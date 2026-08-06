@@ -1,0 +1,40 @@
+{
+  "name": "前移加算子",
+  "description": "把源列前移 n 行（前 n 行为空，末尾 n 个原值丢弃）后，逐列加到多个目标列上",
+  "code": "",
+  "color": [52, 152, 219],
+  "summary": "源列前移 n 行（前 n 行为空）后，加到指定多列上；支持 Float64/Int64，类型自动提升",
+  "description_md": "# 前移加算子\n\n对 **DataFrameArray** 中的每一个 DataFrame，把指定**源列**前移 `n` 行，再把前移后的值**逐列相加**到多个目标列上。\n\n## 前移语义\n\n前移 `n` 行等价于 pandas `Series.shift(n)`：\n\n```\nshifted[i] = source[i - n]   (i >= n)\nshifted[i] = None            (i < n)\n```\n\n- 前 `n` 行为空值（None）；\n- 末尾 `n` 个原值「掉出」序列被丢弃；\n- 列长度不变（与原表行数一致）。\n\n## 相加语义\n\n把前移后的源列**逐元素相加**到每个目标列上（就地覆盖目标列）：\n\n```\ntarget[i] = target[i] + shifted[i]\n```\n\n- **空值传播**：与 pandas 逐元素加法一致，任一加数为空则结果为空。因此每个目标列的前 `n` 行会变为空。\n- 源列本身保持不变（除非源列也被列入 `target_columns`，此时源列 = 原值 + 前移值）。\n- 前移值只计算一次（来自原始源列），因此源列同时作为目标列是安全的。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含若干数据表，源列与目标列需为 Float64 或 Int64。单个 DataFrame 也会被包装为单元素数组处理。\n- **输出**：`output`（DataFrameArray）—— 目标列被替换为「原值 + 前移源列值」后的数据表数组；其余列保持不变。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `source_column` | String | （空） | 要前移的源列名，需为 Float64/Int64；为空时报错（-6） |\n| `shift_n` | String | （空，按 0） | 前移行数（非负整数）；空或非法按 0 处理（0 = 不前移，直接相加） |\n| `target_columns` | String | （空） | 目标列名列表，逗号分隔，如 `close,open`；为空时报错（-7），重复列名只处理一次 |\n\n## 类型规则\n\n| 源列类型 | 目标列类型 | 结果类型 |\n| --- | --- | --- |\n| Int64 | Int64 | Int64（饱和加法，保留类型） |\n| Float64 | Float64 | Float64 |\n| Float64 | Int64 | Float64（目标列提升为 Float64） |\n| Int64 | Float64 | Float64 |\n| 任一非数值 | — | 跳过并告警 |\n\n## 用法示例\n\n1. 把「数据源读取器」输出（DataFrameArray，例如按 `ts_code` 分组的股票行情）连接到本算子 `input`。\n2. 配置 `source_column = close`、`shift_n = 1`、`target_columns = close,open`：把昨天的收盘价加到今天的收盘价与开盘价上（前 1 行变空）。\n3. 也可只前移加到单列：`target_columns = close`。\n4. 执行后每个 DataFrame 的目标列被替换为「原值 + 前移值」。\n\n## 注意事项\n\n- `source_column` 为空时返回错误码 -6；`target_columns` 为空时返回 -7。\n- 前移后源列前 `n` 行为空，相加后目标列前 `n` 行也为空（空值传播）。\n- Int64 相加使用饱和加法（`saturating_add`），溢出时停留在 `i64::MAX`/`i64::MIN`，不会 panic。\n- 源列不存在或非数值类型时，跳过整个 DataFrame 的处理并告警；目标列不存在或非数值时仅跳过该列。\n- `shift_n` 大于等于行数时，前移列全为空，目标列相加后全为空。\n- 不依赖任何外部库，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "source_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "shift_n",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "target_columns",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    }
+  ]
+}

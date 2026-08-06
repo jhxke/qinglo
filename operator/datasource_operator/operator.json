@@ -1,0 +1,70 @@
+{
+  "name": "PostgreSQL 数据源读取器",
+  "description": "从 PostgreSQL 数据库执行 SQL 查询，将结果转换为 Table 输出（支持排序、分组、动态返回类型）",
+  "code": "",
+  "color": [52, 152, 219],
+  "summary": "从 PostgreSQL 执行 SQL 查询，结果作为数据表输出（可排序/分组/动态类型）",
+  "description_md": "# PostgreSQL 数据源读取器\n\n从 PostgreSQL 数据库执行 SQL 查询，并将结果集转换为**数据表**输出，作为整个数据流的起点。\n\n## 输入输出\n\n- **输出**：`output`（DataFrame 或 DataFrameArray）—— SQL 查询结果转换后的数据表。当 `output_data_type` 设为 `DataFrameArray` 且设置了 `group_by_column` 时，每组作为一个独立的 DataFrame 放在数组中。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `host` | String | `localhost` | 数据库主机地址 |\n| `port` | Int | `5432` | 数据库端口 |\n| `database` | String | `postgres` | 数据库名称 |\n| `username` | String | `postgres` | 登录用户名 |\n| `password` | String | （空） | 登录密码 |\n| `query` | String | `SELECT * FROM stock_prices LIMIT 100` | 要执行的 SQL 语句 |\n| `sort_column` | String | （空） | 按哪个字段排序；为空则不排序 |\n| `sort_descending` | Bool | `false` | 排序方向：`true`=降序，`false`=升序 |\n| `group_by_column` | String | （空） | 按哪个字段分组；为空则不分组 |\n| `output_data_type` | String | `DataFrame` | 返回数据类型：`DataFrame` 或 `DataFrameArray`（大小写敏感） |\n\n### 参数组合行为\n\n| `group_by_column` | `output_data_type` | 行为 |\n| --- | --- | --- |\n| 空 | DataFrame | 直接返回单个 DataFrame（可选排序） |\n| 空 | DataFrameArray | 整个 DataFrame 包装为单元素 DataFrameArray（可视为无分组场景） |\n| 非空 | DataFrame | 按分组字段排序，使同组行相邻，仍返回单个 DataFrame |\n| 非空 | DataFrameArray | 按分组字段切分为多组，每组一个 DataFrame，返回 DataFrameArray |\n\n## 用法示例\n\n1. 填写数据库连接参数（`host` / `port` / `database` / `username` / `password`）。\n2. 在 `query` 中编写查询语句，例如：\n\n```\nSELECT code, date, close FROM stock_prices\n```\n\n3. 可选：按收盘价降序排序 —— 设置 `sort_column = \"close\"`, `sort_descending = true`。\n4. 可选：按股票代码分组返回 DataFrameArray —— 设置 `group_by_column = \"code\"`, `output_data_type = \"DataFrameArray\"`。\n5. 将 `output` 端口连接到下游算子（如指标算子 / 分组循环算子）。\n6. 执行 DAG 即可获取数据。\n\n## 注意事项\n\n- 查询应包含 `LIMIT` 或合理过滤条件，避免拉取过多数据导致内存占用过高。\n- 若连接失败，请检查 `host`、`port`、账号密码是否正确，以及数据库是否允许远程连接。\n- 密码以明文存储于算子配置中，请注意工作区文件的访问权限。\n- 排序与分组均在 DataFrame 上以内存方式执行（非 SQL 层），适合中、小数据集；若数据量特别大，建议在 SQL 中通过 `ORDER BY` / `GROUP BY` 先行处理。",
+  "port_params": [
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "host",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "localhost"
+    },
+    {
+      "name": "port",
+      "direction": "Param",
+      "param_type": "Int",
+      "default_value": "5432"
+    },
+    {
+      "name": "database",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "whatigo"
+    },
+    {
+      "name": "username",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "postgres"
+    },
+    {
+      "name": "password",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "difyai123456"
+    },
+    {
+      "name": "query",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "SELECT ts_code,trade_date,open,high,low,close FROM tushare_daily LIMIT 10000"
+    },
+    {
+      "name": "sort_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "trade_date"
+    },
+    {
+      "name": "sort_descending",
+      "direction": "Param",
+      "param_type": "Bool",
+      "default_value": "false"
+    },
+    {
+      "name": "group_by_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "ts_code"
+    }
+  ]
+}

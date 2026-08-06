@@ -1,0 +1,29 @@
+# ===== Rust / Cargo 编译产物 =====
+# 默认 target 目录（含 run-app.ps1 / run-srv.ps1 设置的 target/app、target/srv 子目录）
+/target/
+/target_app/
+/target_srv/
+/temp_compile/
+
+# ===== 临时编译与调试文件 =====
+*.pdb
+temp_srv_err.log
+temp_srv_out.log
+
+# ===== 运行时缓存 =====
+/cache/
+
+# ===== IDE / 编辑器 =====
+.trae/
+.cargo/
+.vscode/
+models/
+lib/
+dag/
+cache/
+# .vscode/ 视团队约定，默认保留以共享配置
+
+# ===== 操作系统杂项 =====
+.DS_Store
+Thumbs.db
+desktop.ini

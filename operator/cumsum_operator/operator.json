@@ -1,0 +1,34 @@
+{
+  "name": "累加算子",
+  "description": "对 DataFrameArray 中每个 DataFrame 的指定列做行向累加（cumsum），第 i 行替换为第 0..=i 行之和",
+  "code": "",
+  "color": [155, 89, 182],
+  "summary": "对指定单列做行向累加（第 i 行 = 前 i 行之和），可指定结果列名，空值跳过，支持 Float64/Int64",
+  "description_md": "# 累加算子\n\n对 **DataFrameArray** 中的每一个 DataFrame，把**单个源列**做**行向累加**（cumulative sum）：第 `i` 行替换为第 `0..=i` 行之和，即\n\n```\nout[0] = v[0]\nout[1] = v[0] + v[1]\nout[2] = v[0] + v[1] + v[2]\n...\n```\n\n从第一行累加到最后一行。**仅支持单列累加**，`columns` 不支持逗号分隔多列。\n\n## 结果列写入\n\n累加结果写入由 `result_column` 指定的列：\n\n- `result_column` 为空或与 `columns` 相同：**就地覆盖源列**（保留原列名）。\n- `result_column` 与 `columns` 不同：写入名为 `result_column` 的列——若该列已存在则覆盖，否则新增列；**源列保持不变**。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含若干数据表，源列需为 Float64 或 Int64 类型。单个 DataFrame 也会被包装为单元素数组处理。\n- **输出**：`output`（DataFrameArray）—— 累加结果列写入后的数据表数组；其余列保持不变。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `columns` | String | （空） | 需要累加的**源列名**，仅支持单列，不支持逗号分隔多列；为空时报错（-6），含逗号时报错（-7） |\n| `result_column` | String | （空） | 累加结果写入的列名。为空或与 `columns` 相同时就地覆盖源列；不同时写入该列名（已存在则覆盖，否则新增，源列保留） |\n\n## 空值处理\n\n与 pandas `cumsum(skipna=True)` 一致：\n\n- 空值位置输出空值；\n- 累加器不重置，跳过空值继续累加。\n\n例如 `[1, None, 2]` → `[1, None, 3]`。\n\n## 类型处理\n\n- **Float64 列**：按 Float64 累加。\n- **Int64 列**：按 Int64 累加（使用饱和加法避免溢出 panic），保留 Int64 类型。\n- **String / Bool / Null 列**：不支持累加，跳过并告警。\n- **源列不存在**：跳过并告警。\n\n## 用法示例\n\n1. 将「PostgreSQL 数据源读取器」输出（`DataFrameArray`，例如按 `ts_code` 分组的股票行情）连接到本算子 `input` 端口。\n2. 就地累加成交量：`columns = volume`（`result_column` 留空，结果覆盖原 `volume` 列）。\n3. 累加到新列、保留原值：`columns = volume`，`result_column = cum_volume`，结果写入新列 `cum_volume`，原 `volume` 列不变。\n4. 执行后每个 DataFrame 的对应列将被写入行向累加值。\n\n## 注意事项\n\n- `columns` 为空时返回错误码 -6（不执行）；`columns` 含逗号时返回错误码 -7（不支持多列）。\n- 当 `result_column` 与源列不同时，结果写入新列/覆盖同名列，**源列保留**；相同时就地覆盖源列。\n- Int64 累加使用饱和加法（`saturating_add`），超长序列溢出时停留在 `i64::MAX`/`i64::MIN`，不会 panic。\n- 不依赖任何外部库，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "columns",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "result_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    }
+  ]
+}

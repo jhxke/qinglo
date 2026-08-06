@@ -1,0 +1,59 @@
+{
+  "name": "ollama流式对话",
+  "description": "对接本地 ollama 服务，流式输出 LLM 生成内容（逐 token）。prompt 可来自输入端口或参数",
+  "code": "",
+  "color": [16, 185, 129],
+  "stream": true,
+  "summary": "对接 ollama 流式生成；prompt 优先取输入端口，其次参数；逐 token 输出 String",
+  "description_md": "# ollama 流式对话算子\n\n对接本地 **ollama** 服务（默认 `127.0.0.1:11434`），调用 `/api/generate` 流式接口，\n逐 token 输出 LLM 生成内容（`PortData::String`）。\n\n## 流式执行\n\n本算子声明 `stream=true`，导出 5 个流式 C ABI 符号：\n\n- `execute_operator_stream_start`：建立到 ollama 的 HTTP/1.0 连接，发送生成请求\n- `execute_operator_stream_next`：读取下一行 NDJSON，解析 `response` 字段得到 token\n- `execute_operator_stream_end`：关闭连接释放资源\n- `push` / `push_end`：源算子不使用（push 返回错误）\n\n服务端 `execute_dag` 识别为流式链头，逐 chunk 拉取并实时推送给下游。\n\n## 输入输出\n\n- **输入**：`prompt`（String，可选）—— 提示词。若未连接或为空，使用参数 `prompt`。\n- **输出**：`output`（String，流式）—— 逐 token 的生成内容。\n\n## 参数\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `host` | String | `127.0.0.1:11434` | ollama 服务地址（IP:Port） |\n| `model` | String | `qwen2.5` | 模型名（需已在 ollama 中 pull） |\n| `prompt` | String | （空） | 提示词（输入端口为空时使用） |\n| `system` | String | （空） | 系统提示词（可选） |\n| `temperature` | Float | `0.8` | 采样温度 |\n| `timeout_secs` | Int | `300` | 连接/读取超时（秒） |\n\n## 用法示例\n\n1. 启动 ollama 并拉取模型：`ollama pull qwen2.5`。\n2. 将本算子拖入画布，配置 `model`、`prompt`（或连接上游节点输出到 `prompt` 输入端口）。\n3. 执行 DAG，下游节点（如文本展示）实时接收 token chunk。\n\n## 注意事项\n\n- 使用纯 `std::net::TcpStream` + HTTP/1.0，**无外部 HTTP 依赖**，DLL 体积小。\n- 本算子定位为流式链头（source），不支持流式上游输入（`push` 会返回错误）。\n- 若 `stream=false`（批量模式），走 `execute_operator` 兜底，收集全部 token 后一次性返回。\n- ollama 需先 `ollama serve` 启动服务。",
+  "port_params": [
+    {
+      "name": "prompt",
+      "direction": "Input",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "host",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "127.0.0.1:11434"
+    },
+    {
+      "name": "model",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "qwen2.5"
+    },
+    {
+      "name": "prompt",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "system",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "temperature",
+      "direction": "Param",
+      "param_type": "Float",
+      "default_value": "0.8"
+    },
+    {
+      "name": "timeout_secs",
+      "direction": "Param",
+      "param_type": "Int",
+      "default_value": "300"
+    }
+  ]
+}

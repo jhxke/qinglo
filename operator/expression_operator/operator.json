@@ -1,0 +1,34 @@
+{
+  "name": "表达式算子",
+  "description": "对 DataFrameArray 中每个 DataFrame 逐行计算布尔表达式，成立则输出列写 1，不成立或空值写 0",
+  "code": "",
+  "color": [52, 152, 219],
+  "summary": "按行计算表达式（如 ma5 > ma10），成立写 1 否则写 0，结果写入指定列",
+  "description_md": "# 表达式算子\n\n对 **DataFrameArray** 中的每一个 DataFrame **逐行**计算一个表达式，**表达式成立则将该行指定列写为 1，不成立或不可计算（空值）则写为 0**。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含若干数据表，每个表需含有表达式所引用的列（Float64 或 Int64 类型）。单个 DataFrame 也会被包装为单元素数组处理。\n- **输出**：`output`（DataFrameArray）—— 在每个输入表基础上写入指定列后的数据表数组。若该列已存在则覆盖，否则追加为新列（Float64 类型，值 1.0 / 0.0）。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `column_name` | String | `signal` | 结果写入的列名；为空时回退为 `signal`；若已存在则覆盖原列 |\n| `expression` | String | （空） | 布尔/数值表达式，如 `ma5 > ma10`；为空时报错 |\n\n## 表达式语法\n\n支持常见的算术、比较与逻辑运算符，按优先级从低到高：\n\n| 优先级 | 运算符 | 说明 |\n| --- | --- | --- |\n| 1（低） | `\\|\\|` | 逻辑或（任一非零为真） |\n| 2 | `&&` | 逻辑与（均非零为真） |\n| 3 | `> < >= <= == !=` | 比较（非结合，仅允许一次） |\n| 4 | `+ -` | 加减 |\n| 5 | `* /` | 乘除 |\n| 6（高） | `-` `!` | 一元负号 / 逻辑非 |\n| 基元 | 数字 / 列名 / `( )` | 数字字面量、列引用、括号分组 |\n\n- **列名**：由字母/下划线开头，后接字母数字下划线。列值会自动按 Float64 / Int64 读取。\n- **数字**：支持小数与科学计数法，如 `3.14`、`1e-5`。\n- **空值传播**：算术与比较运算中任一操作数为空（如 MA 前若干行无值）→ 结果为空 → 输出列写 0。\n- **真值约定**：非零数值视为真，零视为假。最终输出统一为 `1.0`（真）或 `0.0`（假/空）。\n\n## 用法示例\n\n1. 将「指标算子」输出（已含 `ma5`、`ma10` 列）连接到本算子 `input` 端口。\n2. 配置参数：\n   - `column_name = signal`\n   - `expression = ma5 > ma10`\n3. 执行后每个 DataFrame 将新增/覆盖 `signal` 列，`ma5 > ma10` 成立的行值为 `1.0`，否则 `0.0`。\n\n### 复合表达式示例\n\n- 金叉且超卖：`ma5 > ma10 && rsi_14 < 30`\n- 价格突破上轨或下轨：`close > upper || close < lower`\n- 成交量放大且涨幅大于阈值：`volume > volume_ma5 * 1.5 && close / close_prev > 1.03`\n- 取反：`!(ma5 > ma10)`\n\n## 注意事项\n\n- 表达式为空时算子返回错误（不执行）。\n- 表达式引用的列在任一 DataFrame 中不存在或类型不支持（非 Float64/Int64）时，算子对该 DataFrame 报错并整体返回错误码 -8。\n- `column_name` 为空时回退为 `signal`。\n- 输出列固定为 Float64 类型，值为 `1.0` 或 `0.0`。\n- 不依赖任何外部表达式引擎，词法/语法分析内置实现，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "column_name",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "signal"
+    },
+    {
+      "name": "expression",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    }
+  ]
+}
