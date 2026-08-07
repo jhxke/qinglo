@@ -1042,12 +1042,26 @@ fn execute_streaming_subgraph(
             .node_map
             .get(nid)
             .expect("subgraph node missing in node_map");
-        // 收集输入：流式上游端口占位，非流式上游端口物化
-        let mut incoming: Vec<&_> = dag.edges.iter().filter(|e| e.target_node_id == *nid).collect();
-        incoming.sort_by_key(|e| e.target_port);
-        let mut inputs: Vec<PortData> = Vec::with_capacity(incoming.len());
+        // 收集输入：按 target_port 索引构造，长度 = node.input_count。流式上游端口与
+        // 未连接端口填充占位（算子通过 push 接收流式 chunk，不应读取占位端口）；非流式
+        // 上游端口物化。支持「一个输出端口 → 多个输入端口」的扇入与稀疏端口。
+        let mut input_slots: Vec<Option<PortData>> = (0..node.input_count).map(|_| None).collect();
         let mut input_err: Option<String> = None;
-        for edge in &incoming {
+        for edge in dag.edges.iter().filter(|e| e.target_node_id == *nid) {
+            if edge.target_port >= node.input_count {
+                input_err = Some(format!(
+                    "节点 {} ({}) 的输入端口 {} 越界（input_count={}）",
+                    node.id, node.operator_name, edge.target_port, node.input_count
+                ));
+                break;
+            }
+            if input_slots[edge.target_port].is_some() {
+                input_err = Some(format!(
+                    "节点 {} ({}) 的输入端口 {} 存在重复入边",
+                    node.id, node.operator_name, edge.target_port
+                ));
+                break;
+            }
             let src_streaming = plan
                 .streaming_capable
                 .get(&edge.source_node_id)
@@ -1055,20 +1069,19 @@ fn execute_streaming_subgraph(
                 .unwrap_or(false);
             if src_streaming {
                 // 流式输入端口：占位（算子通过 push 接收实际 chunk）
-                inputs.push(PortData::String(String::new()));
+                input_slots[edge.target_port] = Some(PortData::String(String::new()));
             } else {
                 match outputs_map.get(&edge.source_node_id) {
-                    Some(upstream_outputs) => {
-                        if let Some(out) = upstream_outputs.get(edge.source_port) {
-                            inputs.push(out.clone());
-                        } else {
+                    Some(upstream_outputs) => match upstream_outputs.get(edge.source_port) {
+                        Some(out) => input_slots[edge.target_port] = Some(out.clone()),
+                        None => {
                             input_err = Some(format!(
                                 "节点 {} ({}) 的上游节点 {} 输出端口 {} 不存在",
                                 node.id, node.operator_name, edge.source_node_id, edge.source_port
                             ));
                             break;
                         }
-                    }
+                    },
                     None => {
                         input_err = Some(format!(
                             "节点 {} ({}) 的上游节点 {} 尚未执行或无输出",
@@ -1079,6 +1092,10 @@ fn execute_streaming_subgraph(
                 }
             }
         }
+        let inputs: Vec<PortData> = input_slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| PortData::String(String::new())))
+            .collect();
         if let Some(err) = input_err {
             let exec_result = OperatorExecutionResult::failed(Vec::new(), err.clone(), None);
             state.update_execution_result(&node.id, exec_result.clone());
@@ -1325,7 +1342,14 @@ where
         let src_cap = streaming_capable.get(&e.source_node_id).copied().unwrap_or(false);
         let tgt_cap = streaming_capable.get(&e.target_node_id).copied().unwrap_or(false);
         if src_cap && tgt_cap {
-            streaming_out.entry(e.source_node_id.clone()).or_default().push(e.target_node_id.clone());
+            // 同一源节点到同一目标节点的多条流式边（如「一个输出端口 → 多个输入端口」
+            // 或同一对节点间的多条连线）只保留一条：流式 push 不区分端口，重复入队
+            // 会导致目标节点对同一个 chunk 收到多次推送。跨节点的扇出仍由下游列表的
+            // 多个不同目标节点自然完成。
+            let downs = streaming_out.entry(e.source_node_id.clone()).or_default();
+            if !downs.contains(&e.target_node_id) {
+                downs.push(e.target_node_id.clone());
+            }
             streaming_targets.insert(e.target_node_id.clone());
         }
     }
@@ -1382,25 +1406,38 @@ where
             }
         };
 
-        // 批量路径：收集输入：按 target_port 排序的入边，从上游输出中取对应端口
-        let mut incoming: Vec<&_> = dag.edges.iter().filter(|e| e.target_node_id == node.id).collect();
-        incoming.sort_by_key(|e| e.target_port);
-
-        let mut inputs: Vec<PortData> = Vec::with_capacity(incoming.len());
+        // 批量路径：按 target_port 索引构造输入向量，长度 = node.input_count，未连接
+        // 的端口填充空 String 占位。这样「一个输出端口 → 多个输入端口」（跨节点扇出、
+        // 同节点多端口扇入、稀疏端口）都能正确对齐到算子期望的端口下标，避免旧实现
+        // 按 target_port 排序后顺序 push 导致的端口错位与长度不符。
+        let mut input_slots: Vec<Option<PortData>> = (0..node.input_count).map(|_| None).collect();
         let mut input_error: Option<String> = None;
-        for edge in &incoming {
+        for edge in dag.edges.iter().filter(|e| e.target_node_id == node.id) {
+            if edge.target_port >= node.input_count {
+                input_error = Some(format!(
+                    "节点 {} ({}) 的输入端口 {} 越界（input_count={}）",
+                    node.id, node.operator_name, edge.target_port, node.input_count
+                ));
+                break;
+            }
+            if input_slots[edge.target_port].is_some() {
+                input_error = Some(format!(
+                    "节点 {} ({}) 的输入端口 {} 存在重复入边",
+                    node.id, node.operator_name, edge.target_port
+                ));
+                break;
+            }
             match outputs_map.get(&edge.source_node_id) {
-                Some(upstream_outputs) => {
-                    if let Some(out) = upstream_outputs.get(edge.source_port) {
-                        inputs.push(out.clone());
-                    } else {
+                Some(upstream_outputs) => match upstream_outputs.get(edge.source_port) {
+                    Some(out) => input_slots[edge.target_port] = Some(out.clone()),
+                    None => {
                         input_error = Some(format!(
                             "节点 {} ({}) 的上游节点 {} 输出端口 {} 不存在",
                             node.id, node.operator_name, edge.source_node_id, edge.source_port
                         ));
                         break;
                     }
-                }
+                },
                 None => {
                     input_error = Some(format!(
                         "节点 {} ({}) 的上游节点 {} 尚未执行或无输出",
@@ -1426,6 +1463,12 @@ where
             failed_error = Some(err);
             break;
         }
+
+        // 未连接的端口填充空 String 占位；算子按端口下标读取输入，占位端口不应被消费
+        let inputs: Vec<PortData> = input_slots
+            .into_iter()
+            .map(|slot| slot.unwrap_or_else(|| PortData::String(String::new())))
+            .collect();
 
         // DLL 已在预扫描阶段解析完毕（失败已在 early_failure 提前返回），此处直接取缓存
         let dll_path = node_dll.get(node_id).cloned().unwrap_or_else(|| PathBuf::from(""));

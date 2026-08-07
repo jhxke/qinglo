@@ -521,8 +521,10 @@ impl DagGraph {
             return Err("该连线已存在".to_string());
         }
 
-        // 一个输入端口只能接受一条连线, 否则执行时按 target_port 排序后
-        // 会出现多条边映射到同一输入端口, 导致数据错乱.
+        // 仅限制「同一个输入端口」不可被多条边占用: 多条边映射到同一 target_port 会让
+        // 服务端输入装配出现重复入边而报错. 「一个输出端口 → 多个目标节点的输入端口」
+        // 的扇出是允许的——服务端批量/流式路径都按 target_port 下标物化上游输出并
+        // clone 给各目标节点 (见 operator_runtime_server 输入装配 input_slots 逻辑).
         if self.edges.iter().any(|e|
             e.target_node_id == edge.target_node_id && e.target_port == edge.target_port
         ) {
@@ -1329,6 +1331,22 @@ mod tests {
         assert!(g.add_edge(Edge::new(n1.clone(), 0, n3.clone(), 0)).is_ok());
         assert!(g.add_edge(Edge::new(n2.clone(), 0, n3.clone(), 1)).is_ok());
         assert_eq!(g.edges.len(), 2);
+    }
+
+    #[test]
+    fn add_edge_allows_fan_out_one_output_to_many_targets() {
+        // 一个输出端口可以连到多个目标节点的输入端口 (扇出). n1:0 → n2:0 与
+        // n1:0 → n3:0 应同时成功: 服务端会按 target_port 物化 n1 的输出并 clone
+        // 给每个目标节点 (见 runtime 批量/流式输入装配 input_slots).
+        let (mut g, n1, n2, n3) = make_graph();
+        assert!(g.add_edge(Edge::new(n1.clone(), 0, n2.clone(), 0)).is_ok());
+        assert!(g.add_edge(Edge::new(n1.clone(), 0, n3.clone(), 0)).is_ok());
+        assert_eq!(g.edges.len(), 2);
+        let fan_out = g.edges
+            .iter()
+            .filter(|e| e.source_node_id == n1 && e.source_port == 0)
+            .count();
+        assert_eq!(fan_out, 2, "同一输出端口应允许扇出到多个目标");
     }
 
     #[test]

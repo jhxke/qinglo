@@ -189,6 +189,23 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 INPUT_PORT_COLOR
             };
 
+            // 连线进行中且源是输出端口时，给「可连入」的空输入端口加绿色环，引导扇出
+            // 与连线的合法落点（已被占用或同节点自环的输入端口不加，提示用户避开）。
+            if let Some((src_node, _, src_is_output)) = &tab.connecting_from {
+                if *src_is_output && src_node != &node.id {
+                    let occupied = tab.graph.edges.iter().any(|e|
+                        e.target_node_id == node.id && e.target_port == i
+                    );
+                    if !occupied {
+                        painter.circle_stroke(
+                            screen_port_pos,
+                            (PORT_RADIUS + 3.0) * tab.canvas_zoom,
+                            Stroke::new(1.5 * tab.canvas_zoom, Color32::from_rgb(120, 230, 140)),
+                        );
+                    }
+                }
+            }
+
             painter.circle_filled(screen_port_pos, PORT_RADIUS * tab.canvas_zoom, port_color);
 
             let port_rect = Rect::from_center_size(screen_port_pos, Vec2::new(PORT_RADIUS * 2.0 * tab.canvas_zoom, PORT_RADIUS * 2.0 * tab.canvas_zoom));
@@ -208,6 +225,19 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
             } else {
                 OUTPUT_PORT_COLOR
             };
+
+            // 扇出提示: 该输出端口已有 outgoing 连线时，在外圈描一道亮环，提示同一
+            // 输出端口可继续点击连到更多目标节点的输入端口（一个输出 → 多个输入）。
+            let has_outgoing = tab.graph.edges.iter().any(|e|
+                e.source_node_id == node.id && e.source_port == i
+            );
+            if has_outgoing {
+                painter.circle_stroke(
+                    screen_port_pos,
+                    (PORT_RADIUS + 3.0) * tab.canvas_zoom,
+                    Stroke::new(1.5 * tab.canvas_zoom, Color32::from_rgba_unmultiplied(255, 255, 255, 210)),
+                );
+            }
 
             painter.circle_filled(screen_port_pos, PORT_RADIUS * tab.canvas_zoom, port_color);
 
@@ -329,10 +359,12 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     }
 
     // 注意: interact 顺序决定 hit-test 优先级, 后 interact 的区域优先接收事件.
-    // 端口 rect 位于节点 rect 内部, 必须让端口在节点之后 interact, 否则节点会抢占端口的点击.
-    // 因此先处理所有节点, 再处理所有端口; 连线删除单独处理.
+    // 端口 rect 位于节点 rect 内部, 必须让端口优先级高于节点; 且已连线的端口位置会
+    // 落在连线 hit-rect 内, 若连线优先级高于端口, 已连线的输出端口将无法再次点击
+    // (无法扇出「一个输出 → 多个输入」). 因此顺序定为: 节点 → 连线 → 端口,
+    // 端口最后 interact, 优先级最高.
 
-    // 第一轮: 节点 (拖拽 / 选中 / 右键菜单)
+    // 第一轮: 节点 (拖拽 / 选中 / 右键菜单) — 最低优先级
     for interaction in &node_interactions {
         if let NodeInteraction::Node { node_id, rect, canvas_zoom } = interaction {
             let response = ui.interact(*rect, egui::Id::new(format!("node_{}", node_id)), egui::Sense::click_and_drag());
@@ -393,7 +425,27 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         }
     }
 
-    // 第二轮: 端口 (后 interact, 优先级高于节点, 确保端口可点击)
+    // 第二轮: 连线右键删除 — 中优先级。连线 hit-rect 覆盖其两端端口, 但端口在第三轮
+    // 后 interact, 优先级更高, 故连线端点处的点击会让位给端口 (保证已连线端口仍可
+    // 扇出); 删除连线请在线段中段右键。
+    for edge in tab.graph.edges.clone() {
+        if let Some(hit_rect) = edge_hit_rect(&tab.graph, edge.id.clone(), rect.min, tab.canvas_zoom, tab.canvas_offset) {
+            let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
+            response.context_menu(|ui| {
+                if ui.button("删除连线").clicked() {
+                    ui.close_menu();
+                    // 删除连线时，级联失效目标节点及其所有下游节点
+                    tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
+                    tab.graph.remove_edge(&edge.id);
+                    tab.dirty = true;
+                }
+            });
+        }
+    }
+
+    // 第三轮: 端口 (最后 interact, 优先级最高)。已连线的端口位置会落在连线 hit-rect
+    // 内, 必须让端口优先级高于连线, 否则已连线的输出端口无法再次点击扇出
+    // (一个输出 → 多个目标节点输入)。同时端口优先级高于节点, 确保端口可点击。
     for interaction in &node_interactions {
         match interaction {
             NodeInteraction::InputPort { node_id, port_index, rect } => {
@@ -409,22 +461,6 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 }
             }
             NodeInteraction::Node { .. } => {}
-        }
-    }
-
-    // 连线右键删除
-    for edge in tab.graph.edges.clone() {
-        if let Some(hit_rect) = edge_hit_rect(&tab.graph, edge.id.clone(), rect.min, tab.canvas_zoom, tab.canvas_offset) {
-            let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
-            response.context_menu(|ui| {
-                if ui.button("删除连线").clicked() {
-                    ui.close_menu();
-                    // 删除连线时，级联失效目标节点及其所有下游节点
-                    tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
-                    tab.graph.remove_edge(&edge.id);
-                    tab.dirty = true;
-                }
-            });
         }
     }
 
