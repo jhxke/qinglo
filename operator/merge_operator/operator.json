@@ -1,0 +1,29 @@
+{
+  "name": "数据合并算子",
+  "description": "输出第一个非空输入端口的完整 DataFrame（含各分支累积的新增列），不做合并",
+  "code": "",
+  "color": [155, 89, 182],
+  "summary": "依赖 runtime 对象共享，原样输出第一个非空输入（含全部累积列）",
+  "description_md": "# 数据合并算子\n\n将多个分支的**新增列**汇聚到数据预览中统一展示。\n\n## 核心设计：对象共享 + Passthrough\n\n本算子**不做列合并**。它依赖 runtime 层的**对象共享机制**：\n\n1. 数据源扇出到多个分支时，各分支共享同一个 `DataFrame` 对象（`Rc<RefCell<PortData>>`）\n2. 每个分支算子（MA / RSI / MACD ...）**就地追加列**，执行后回写到共享对象\n3. 各分支的列按拓扑序**累积**到同一对象上\n4. 合并算子只需**输出第一个非空输入**即可拿到包含所有分支新增列的完整 DataFrame\n\n```\n数据源 df: [open, high, low, close]\n  ├─ MA 分支    → 就地加 ma_5     ┐\n  ├─ RSI 分支   → 就地加 rsi_14   ├─ 共享同一对象，列累积\n  └─ MACD 分支  → 就地加 macd/signal ┘\n        ↓\n  数据合并算子（passthrough：输出第一个非空输入）\n        ↓\n  [open, high, low, close, ma_5, rsi_14, macd, signal]\n```\n\n## 用法\n\n1. 拖拽「数据合并算子」到画布，默认自带 2 个输入端口。\n2. 右键节点 → **新增输入端口**，按分支数量增加端口。\n3. 将各分支末尾算子的输出连接到本算子的不同输入端口。\n4. 执行 DAG，合并算子原样输出第一个非空输入（已含全部累积列）。\n5. 右键合并算子 → **数据预览** 即可在一个表里查看所有分支的新增列。\n\n## 注意事项\n\n- 至少需要 1 个输入端口且已连线才会输出数据；全部端口未连接时报错 `-5`。\n- 算子本身不做任何列操作，仅选择第一个有效输入端口原样输出。\n- 列的累积由 runtime 层的 `Rc<RefCell<PortData>>` 共享 + 回写机制保证。",
+  "dynamic_input_ports": true,
+  "port_params": [
+    {
+      "name": "input_0",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "input_1",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    }
+  ]
+}

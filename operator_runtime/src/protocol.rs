@@ -203,6 +203,12 @@ pub struct OperatorConfig {
     /// `operator.json` 中缺省时为 `false`（批量算子）。
     #[serde(default)]
     pub stream: bool,
+    /// 是否支持**动态新增输入端口**（如合并算子可按需扩展输入口数）。
+    /// `operator.json` 中缺省时为 `false`（端口数固定）。
+    /// 为 `true` 时客户端会在节点右键菜单显示「新增输入端口」、
+    /// 在输入端口右键菜单显示「删除该输入端口」。
+    #[serde(default)]
+    pub dynamic_input_ports: bool,
 }
 
 /// 层级化算子目录项（文件夹）
@@ -242,6 +248,11 @@ pub struct OperatorInfo {
     /// 是否为流式算子（客户端据此在 DAG 节点上设置 `DagNodeDef.stream`）。
     #[serde(default)]
     pub stream: bool,
+    /// 是否支持**动态新增输入端口**（客户端据此在节点右键菜单显示
+    /// 「新增输入端口」、在输入端口右键菜单显示「删除该输入端口」）。
+    /// 由 `operator.json` 的 `dynamic_input_ports` 字段决定，缺省为 `false`。
+    #[serde(default)]
+    pub dynamic_input_ports: bool,
 }
 
 // ===== DAG 定义（可序列化，用于客户端→服务端的整体下发执行）=====

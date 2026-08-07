@@ -1,15 +1,15 @@
 [package]
-name = "indicator_operator"
+name = "ma_operator"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-name = "indicator_operator"
+name = "ma_operator"
 
 [[bin]]
-name = "indicator_operator_debug"
+name = "ma_operator_debug"
 path = "src/debug_main.rs"
 
 [dependencies]

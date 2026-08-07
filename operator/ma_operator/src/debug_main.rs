@@ -1,4 +1,4 @@
-use indicator_operator::{execute_operator, release_port_data};
+use ma_operator::{execute_operator, release_port_data};
 use operator_runtime::{DataFrame, DataType, PortData};
 use operator_runtime::c_abi::{
     portdata_to_c, portdata_from_c, CPortData, CPortValue, TYPE_NULL,
@@ -36,12 +36,12 @@ fn build_stock_df(seed_close: f64, count: usize) -> DataFrame {
     df
 }
 
-/// 以 DataFrameArray 输入运行一次指标算子，返回输出 PortData
+/// 以 DataFrameArray 输入运行一次 MA 算子，返回输出 PortData
 ///
 /// 注意：execute_operator 内部会通过 portdata_from_c 消费输入 CPortData
 /// （将其 type_tag 置为 TYPE_NULL）。因此这里只保留一份 CPortData（数组元素本身），
 /// 调用结束后根据 type_tag 判断是否需要释放，避免对已消费的句柄重复释放。
-fn run_indicator(input_dfs: Vec<DataFrame>, params_json: &str) -> Option<PortData> {
+fn run_ma(input_dfs: Vec<DataFrame>, params_json: &str) -> Option<PortData> {
     let input_port = PortData::DataFrameArray(input_dfs);
     // portdata_to_c 内部会克隆 DataFrame 到独立的 C 句柄，原 PortData 仍持有所有权
     let mut c_inputs = [portdata_to_c(&input_port)];
@@ -140,50 +140,40 @@ fn main() {
         df_b.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
     );
 
-    // ---------- 1. 仅 MA ----------
+    // ---------- 1. MA (5,10,20) ----------
     println!("\n########## 测试 MA (5,10,20) ##########");
     let ma_json = r#"{ "ma_periods": "5,10,20" }"#;
-    if let Some(pd) = run_indicator(vec![df_a.clone(), df_b.clone()], ma_json) {
+    if let Some(pd) = run_ma(vec![df_a.clone(), df_b.clone()], ma_json) {
         print_output("MA", &pd, 8);
     }
 
-    // ---------- 2. 仅 RSI ----------
-    println!("\n########## 测试 RSI (14) ##########");
-    let rsi_json = r#"{ "rsi_period": "14" }"#;
-    if let Some(pd) = run_indicator(vec![df_a.clone(), df_b.clone()], rsi_json) {
-        print_output("RSI", &pd, 8);
-    }
-
-    // ---------- 3. 仅 MACD ----------
-    println!("\n########## 测试 MACD (12,26,9) ##########");
-    let macd_json = r#"{ "macd_fast": "12", "macd_slow": "26", "macd_signal": "9" }"#;
-    if let Some(pd) = run_indicator(vec![df_a.clone(), df_b.clone()], macd_json) {
-        print_output("MACD", &pd, 8);
-    }
-
-    // ---------- 4. 多指标同时计算（MA + RSI + MACD） ----------
-    println!("\n########## 测试多指标同时计算 (MA + RSI + MACD) ##########");
-    let all_json = r#"{
-        "ma_periods": "5,10,20",
-        "rsi_period": "14",
-        "macd_fast": "12",
-        "macd_slow": "26",
-        "macd_signal": "9"
-    }"#;
-    if let Some(pd) = run_indicator(vec![df_a.clone(), df_b.clone()], all_json) {
-        print_output("ALL", &pd, 8);
-    }
-
-    // ---------- 5. 兼容性：单个 DataFrame 输入 ----------
+    // ---------- 2. 兼容性：单个 DataFrame 输入 ----------
     println!("\n########## 兼容性测试：单个 DataFrame 输入（应输出单元素 DataFrameArray）##########");
-    if let Some(pd) = run_indicator(vec![df_a.clone()], ma_json) {
+    if let Some(pd) = run_ma(vec![df_a.clone()], ma_json) {
         print_output("Single-DF MA", &pd, 5);
     }
 
-    // ---------- 6. 空参数：原样返回输入 ----------
+    // ---------- 3. 自定义源列名（source_column=price，非标准 close） ----------
+    println!("\n########## 测试自定义源列 (source_column=price) ##########");
+    let mut df_price = DataFrame::new();
+    let price_col = DataFrame::new_float64_column(
+        "price",
+        (0..30)
+            .map(|i| {
+                Some(10.0 + (i as f64) * 0.5 + if i % 5 == 0 { -1.5 } else { 0.8 })
+            })
+            .collect(),
+    );
+    df_price.add_column(price_col);
+    let sc_json = r#"{ "ma_periods": "5,10", "source_column": "price" }"#;
+    if let Some(pd) = run_ma(vec![df_price], sc_json) {
+        print_output("MA-SOURCE-COL", &pd, 5);
+    }
+
+    // ---------- 4. 空参数：原样返回输入 ----------
     println!("\n########## 空参数测试：原样返回输入 ##########");
     let empty_json = r#"{}"#;
-    if let Some(pd) = run_indicator(vec![df_a, df_b], empty_json) {
+    if let Some(pd) = run_ma(vec![df_a, df_b], empty_json) {
         print_output("EMPTY", &pd, 5);
     }
 }

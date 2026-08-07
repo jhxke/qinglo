@@ -33,12 +33,14 @@
 | **算子参数面板** | 选中自定义算子节点时，右侧面板展示端口定义、参数编辑与算子文档（Markdown） |
 | **算子分类树** | 左侧算子面板按层级分类展示全部可用算子，支持搜索过滤，后台线程周期刷新 |
 
-### 算子能力（内置 8 个，分 5 类）
+### 算子能力（内置 10 个，分 5 类）
 
 | 类别 | 算子 | 功能 |
 | --- | --- | --- |
 | 📥 **数据源** | PostgreSQL 数据源读取器 | 执行 SQL 查询，结果转 `DataFrame` / `DataFrameArray`，支持排序、分组、动态类型推断 |
-| 📈 **技术指标** | 指标算子 | 一次性计算 **MA / RSI / MACD**（参数非空即计算，可同时输出多指标列） |
+| 📈 **技术指标** | MA算子 | 计算简单移动平均线 MA，支持多周期（如 5,10,20），追加 `ma_N` 列 |
+| | RSI算子 | 计算相对强弱指数 RSI（Wilder 平滑），追加 `rsi_N` 列 |
+| | MACD算子 | 计算指数平滑异同移动平均 MACD，追加 `macd` / `macd_signal` / `macd_hist` 三列 |
 | 🔢 **因子运算** | 累加算子 | 对指定列行向 `cumsum`，支持结果列名、空值跳过、Float64/Int64 |
 | | 前移加算子 | 源列前移 n 行（pandas `shift`）后逐列相加，类型自动提升 |
 | | 表达式算子 | 内置词法/语法分析器，逐行计算布尔表达式（如 `ma5 > ma10 && rsi_14 < 30`），成立写 1 |
@@ -281,7 +283,7 @@ cargo run -p mining-app                 # 终端 2：启动 GUI
 ### 典型量化挖掘工作流
 
 1. **接入数据**：拖入「PostgreSQL 数据源读取器」，配置连接参数与 SQL，按 `ts_code` 分组返回 `DataFrameArray`
-2. **计算指标**：连接「指标算子」，配置 `ma_periods=5,10,20` / `rsi_period=14` / `macd_fast=12,macd_slow=26,macd_signal=9`
+2. **计算指标**：按需连接「MA算子」（`ma_periods=5,10,20`）/「RSI算子」（`rsi_period=14`）/「MACD算子」（`macd_fast=12,macd_slow=26,macd_signal=9`）
 3. **生成信号**：连接「表达式算子」，编写 `ma5 > ma10 && rsi_14 < 30`，结果写入 `signal` 列
 4. **因子运算**：按需串联「累加算子」「前移加算子」做累计 / 滞后处理
 5. **可视化验证**：连接「K 线可视化算子」/「折线可视化算子」，右键节点预览图表
@@ -418,7 +420,9 @@ Qinglo/
 │   └── Cargo.toml
 └── operator/                       # 内置算子库
     ├── datasource_operator/        # PostgreSQL 数据源读取器
-    ├── indicator_operator/         # MA / RSI / MACD 技术指标
+    ├── ma_operator/                # MA 简单移动平均
+    ├── rsi_operator/               # RSI 相对强弱指数
+    ├── macd_operator/              # MACD 指数平滑异同移动平均
     ├── cumsum_operator/            # 行向累加
     ├── shift_add_operator/         # 前移加
     ├── expression_operator/        # 布尔表达式

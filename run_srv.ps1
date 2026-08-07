@@ -7,8 +7,49 @@ Write-Host "===== Building operators =====" -ForegroundColor Green
 # Use prefer-dynamic so operator_runtime links as a separate DLL
 $env:RUSTFLAGS = "-C prefer-dynamic"
 
-# Build operator_runtime cdylib and all operators (debug mode, matching runtime_server)
-cargo build -p datasource_operator -p indicator_operator -p expression_operator -p kline_visualization_operator -p line_chart_operator -p ollama_operator -p cumsum_operator -p shift_add_operator
+# Group directory names. Built from [char] code points so the script file stays
+# pure-ASCII: PowerShell 5.1 reads non-BOM files as the ANSI codepage (cp936 here),
+# which would corrupt literal Chinese. Operators deploy to lib\<group>\<operator>\;
+# runtime_server's scan_operators treats a dir without operator.json as a category
+# and recurses, so the frontend renders the two-level grouping.
+$grpDataSource = [char]0x6570 + [char]0x636E + [char]0x6E90                                 # data source
+$grpTechIndex  = [char]0x6280 + [char]0x672F + [char]0x6307 + [char]0x6807                 # technical index
+$grpMathOp     = [char]0x6570 + [char]0x5B66 + [char]0x8FD0 + [char]0x7B97                 # math operation
+$grpViz        = [char]0x53EF + [char]0x89C6 + [char]0x5316                                # visualization
+$grpLLM        = [char]0x5927 + [char]0x6A21 + [char]0x578B                                # large model (ollama)
+
+# Operator specs: Group=group dir (level 1), Name=package/DLL name, Dir=operator dir (level 2),
+# Json=operator.json relative path. Dir names reuse the same [char]-code trick.
+$operators = @(
+    # ===== data source =====
+    @{ Group = $grpDataSource; Name = "datasource_operator"; Dir = [char]0x6570 + [char]0x636E + [char]0x6E90 + [char]0x8BFB + [char]0x53D6; Json = "operator\datasource_operator\operator.json" }
+
+    # ===== technical index =====
+    @{ Group = $grpTechIndex; Name = "ma_operator";   Dir = "MA" + [char]0x7B97 + [char]0x5B50;   Json = "operator\ma_operator\operator.json" }
+    @{ Group = $grpTechIndex; Name = "rsi_operator";  Dir = "RSI" + [char]0x7B97 + [char]0x5B50;  Json = "operator\rsi_operator\operator.json" }
+    @{ Group = $grpTechIndex; Name = "macd_operator"; Dir = "MACD" + [char]0x7B97 + [char]0x5B50; Json = "operator\macd_operator\operator.json" }
+
+    # ===== math operation =====
+    @{ Group = $grpMathOp; Name = "expression_operator"; Dir = [char]0x8868 + [char]0x8FBE + [char]0x5F0F + [char]0x7B97 + [char]0x5B50;             Json = "operator\expression_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "cumsum_operator";     Dir = [char]0x7D2F + [char]0x52A0 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\cumsum_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "shift_add_operator";  Dir = [char]0x524D + [char]0x79FB + [char]0x52A0 + [char]0x7B97 + [char]0x5B50;           Json = "operator\shift_add_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "merge_operator";      Dir = [char]0x6570 + [char]0x636E + [char]0x5408 + [char]0x5E76 + [char]0x7B97 + [char]0x5B50; Json = "operator\merge_operator\operator.json" }
+
+    # ===== visualization =====
+    @{ Group = $grpViz; Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\kline_visualization_operator\operator.json" }
+    @{ Group = $grpViz; Name = "line_chart_operator";           Dir = [char]0x6298 + [char]0x7EBF + [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50; Json = "operator\line_chart_operator\operator.json" }
+
+    # ===== large model =====
+    @{ Group = $grpLLM; Name = "ollama_operator"; Dir = "Ollama" + [char]0x7B97 + [char]0x5B50; Json = "operator\ollama_operator\operator.json" }
+)
+
+# Build all operators in a single cargo invocation (cargo parallelizes internally).
+$packages = @()
+foreach ($op in $operators) {
+    $packages += "-p"
+    $packages += $op.Name
+}
+cargo build @packages
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Operator build FAILED!" -ForegroundColor Red
@@ -18,18 +59,6 @@ if ($LASTEXITCODE -ne 0) {
 # Cargo outputs go to deps directory
 $depsDir = "$env:CARGO_TARGET_DIR\debug\deps"
 $debugDir = "$env:CARGO_TARGET_DIR\debug"
-
-# Operator DLL mapping: DLL name -> lib subdirectory -> operator.json path
-$operatorMap = @(
-    @{ Name = "datasource_operator"; Dir = [char]0x6570 + [char]0x636E + [char]0x6E90 + [char]0x8BFB + [char]0x53D6; Json = "operator\datasource_operator\operator.json" },
-    @{ Name = "indicator_operator"; Dir = [char]0x6307 + [char]0x6807 + [char]0x7B97 + [char]0x5B50;   Json = "operator\indicator_operator\operator.json" },
-    @{ Name = "expression_operator"; Dir = [char]0x8868 + [char]0x8FBE + [char]0x5F0F + [char]0x7B97 + [char]0x5B50; Json = "operator\expression_operator\operator.json" },
-    @{ Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50; Json = "operator\kline_visualization_operator\operator.json" },
-    @{ Name = "line_chart_operator"; Dir = [char]0x6298 + [char]0x7EBF + [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50; Json = "operator\line_chart_operator\operator.json" },
-    @{ Name = "ollama_operator"; Dir = "Ollama" + [char]0x7B97 + [char]0x5B50; Json = "operator\ollama_operator\operator.json" },
-    @{ Name = "cumsum_operator"; Dir = [char]0x7D2F + [char]0x52A0 + [char]0x7B97 + [char]0x5B50; Json = "operator\cumsum_operator\operator.json" },
-    @{ Name = "shift_add_operator"; Dir = [char]0x524D + [char]0x79FB + [char]0x52A0 + [char]0x7B97 + [char]0x5B50; Json = "operator\shift_add_operator\operator.json" }
-)
 
 # 1. Ensure operator_runtime.dll is next to the exe (Windows DLL search priority)
 $runtimeDllSrc = "$depsDir\operator_runtime.dll"
@@ -41,26 +70,47 @@ if (Test-Path $runtimeDllSrc) {
     Write-Host "WARNING: operator_runtime.dll not found at $runtimeDllSrc" -ForegroundColor Red
 }
 
-# 2. Deploy operator DLL + operator.json + operator_runtime.dll to lib subdirs
-foreach ($op in $operatorMap) {
-    $destDir = Join-Path $PSScriptRoot "lib\$($op.Dir)"
-    Write-Host "Copying $($op.Name).dll -> lib\$($op.Dir)\" -ForegroundColor Yellow
+# 2. Reset lib/ to a clean state. It is fully generated by this script, so wiping it
+#    each run removes stale entries from any previous layout (e.g. the old one-level
+#    lib\<operator>\ structure) that would otherwise surface as duplicate/ungrouped
+#    operators in the frontend.
+$libRoot = Join-Path $PSScriptRoot "lib"
+if (Test-Path $libRoot) {
+    Remove-Item $libRoot -Recurse -Force
+}
+New-Item -ItemType Directory -Path $libRoot -Force | Out-Null
 
-    # Clean and recreate
-    if (Test-Path $destDir) {
-        Remove-Item $destDir -Recurse -Force
+# Group operators by Group (preserving first-seen order), deploy to lib\<group>\<operator>\
+$grouped = [ordered]@{}
+foreach ($op in $operators) {
+    if (-not $grouped.Contains($op.Group)) {
+        $grouped[$op.Group] = @()
     }
-    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    $grouped[$op.Group] += $op
+}
 
-    # Copy operator DLL
-    Copy-Item "$depsDir\$($op.Name).dll" $destDir
+foreach ($groupEntry in $grouped.GetEnumerator()) {
+    Write-Host "----- Group: $($groupEntry.Key) -----" -ForegroundColor Magenta
+    foreach ($op in $groupEntry.Value) {
+        $destDir = Join-Path $PSScriptRoot "lib\$($groupEntry.Key)\$($op.Dir)"
+        Write-Host "Copying $($op.Name).dll -> lib\$($groupEntry.Key)\$($op.Dir)\" -ForegroundColor Yellow
 
-    # Copy operator.json definition
-    Copy-Item "$PSScriptRoot\$($op.Json)" $destDir
+        # Clean and recreate
+        if (Test-Path $destDir) {
+            Remove-Item $destDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
 
-    # Also copy operator_runtime.dll so operator can find its dynamic dependency
-    if (Test-Path $runtimeDllSrc) {
-        Copy-Item $runtimeDllSrc $destDir
+        # Copy operator DLL
+        Copy-Item "$depsDir\$($op.Name).dll" $destDir
+
+        # Copy operator.json definition
+        Copy-Item "$PSScriptRoot\$($op.Json)" $destDir
+
+        # Also copy operator_runtime.dll so operator can find its dynamic dependency
+        if (Test-Path $runtimeDllSrc) {
+            Copy-Item $runtimeDllSrc $destDir
+        }
     }
 }
 

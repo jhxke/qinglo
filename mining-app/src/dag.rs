@@ -102,6 +102,13 @@ pub struct CustomOperatorDef {
     /// `operator.json` 中缺省时为 `false`（批量算子）。
     #[serde(default)]
     pub stream: bool,
+    /// 是否支持**动态新增输入端口**（如合并算子可按需扩展输入口数）。
+    /// `operator.json` 中缺省时为 `false`（端口数固定）。
+    /// 为 `true` 时：
+    ///   - 节点右键菜单显示「新增输入端口」项
+    ///   - 已连接输入端口的右键菜单显示「删除该输入端口」（端口数>=2时才允许删除到剩1）
+    #[serde(default)]
+    pub dynamic_input_ports: bool,
 }
 
 impl Default for CustomOperatorDef {
@@ -251,7 +258,103 @@ pub extern "C" fn execute_operator(
             summary: String::new(),
             description_md: String::new(),
             stream: false,
+            dynamic_input_ports: false,
         }
+    }
+}
+
+impl Node {
+    /// 对 `dynamic_input_ports=true` 的节点，新增一个输入端口（下标紧跟现有最大输入端口）。
+    /// 输入端口命名为 `input_N`，类型默认 DataFrameArray（与输入默认类型一致）。
+    /// 返回新建端口的下标（作为输入端口集合中的 index）。
+    ///
+    /// # 错误
+    /// 若算子的 `dynamic_input_ports` 为 false，返回 Err。
+    pub fn add_input_port(&mut self) -> Result<usize, String> {
+        let custom = match &mut self.operator_type {
+            OperatorType::Custom(c) => c,
+        };
+        if !custom.dynamic_input_ports {
+            return Err(format!("算子「{}」不支持动态输入端口", custom.name));
+        }
+        // 找当前最大输入端口 index（用于命名 input_N）
+        let mut max_input_idx = 0usize;
+        let mut input_count = 0usize;
+        for pp in &custom.port_params {
+            if pp.direction == PortDirection::Input {
+                input_count += 1;
+                // 从名字 input_X 里解析出 X；若解析失败则用 input_count-1 兜底
+                if let Some(suffix) = pp.name.strip_prefix("input_") {
+                    if let Ok(n) = suffix.parse::<usize>() {
+                        max_input_idx = max_input_idx.max(n);
+                    }
+                } else {
+                    max_input_idx = max_input_idx.max(input_count - 1);
+                }
+            }
+        }
+        // 新端口命名：若当前最后一个是 input_0, input_1 -> 下一个是 input_2
+        let new_idx = if input_count == 0 { 0 } else { max_input_idx + 1 };
+        let new_def = OperatorPortParamDef {
+            name: format!("input_{}", new_idx),
+            direction: PortDirection::Input,
+            // 默认用 DataFrameArray：合并场景下这是主流；若前几个输入端口
+            // 类型都是 DataFrame，则跟着用 DataFrame（保持一致）
+            param_type: custom
+                .port_params
+                .iter()
+                .find(|pp| pp.direction == PortDirection::Input)
+                .map(|pp| pp.param_type.clone())
+                .unwrap_or(ParamType::DataFrameArray),
+            default_value: String::new(),
+        };
+        custom.port_params.push(new_def);
+        Ok(input_count)
+    }
+
+    /// 对 `dynamic_input_ports=true` 的节点，删除指定**输入端口索引**（按输入顺序的
+    /// index，不是 port_params 的整体下标）。
+    ///
+    /// # 规则
+    /// - `dynamic_input_ports` 必须为 true
+    /// - 删除后至少保留 1 个输入端口（否则该算子将无法接收任何输入）
+    /// - 删除时同步把目标端口上的连线一起移除（调用方再对 DAG 调用 remove_edges_targetting_port）
+    ///   本方法只改 OperatorType 的端口声明。
+    ///
+    /// 返回被删除端口在 `port_params` 中的名字，便于调用方同步删除连向该端口的连线。
+    pub fn remove_input_port(&mut self, input_port_index: usize) -> Result<String, String> {
+        let custom = match &mut self.operator_type {
+            OperatorType::Custom(c) => c,
+        };
+        if !custom.dynamic_input_ports {
+            return Err(format!("算子「{}」不支持动态输入端口", custom.name));
+        }
+        let input_count = custom.port_params.iter()
+            .filter(|pp| pp.direction == PortDirection::Input)
+            .count();
+        if input_count <= 1 {
+            return Err("删除后至少需要保留 1 个输入端口".to_string());
+        }
+        if input_port_index >= input_count {
+            return Err(format!(
+                "输入端口索引越界: index={}, input_count={}",
+                input_port_index, input_count
+            ));
+        }
+
+        // 找到第 input_port_index 个方向为 Input 的端口在 port_params 中的位置
+        let pos_in_vec = custom
+            .port_params
+            .iter()
+            .enumerate()
+            .filter(|(_, pp)| pp.direction == PortDirection::Input)
+            .nth(input_port_index)
+            .map(|(i, _)| i)
+            .ok_or_else(|| "输入端口不存在".to_string())?;
+
+        let removed_name = custom.port_params[pos_in_vec].name.clone();
+        custom.port_params.remove(pos_in_vec);
+        Ok(removed_name)
     }
 }
 
@@ -337,6 +440,13 @@ impl OperatorType {
     pub fn as_custom(&self) -> &CustomOperatorDef {
         match self {
             OperatorType::Custom(def) => def,
+        }
+    }
+
+    /// 算子是否支持**动态新增输入端口**。合并类算子返回 true，其余算子默认 false。
+    pub fn dynamic_input_ports(&self) -> bool {
+        match self {
+            OperatorType::Custom(def) => def.dynamic_input_ports,
         }
     }
 
@@ -563,6 +673,32 @@ impl DagGraph {
         self.nodes.iter().any(|n| n.id == node_id)
     }
 
+    /// 移除所有连向 `node_id` 的 **第 `target_port_index` 个输入端口** 的边。
+    /// 在删除动态输入端口时调用，避免保留指向已不存在端口的"悬空连线"。
+    /// 返回被移除的边数量。
+    pub fn remove_edges_on_input_port(&mut self, node_id: &str, target_port_index: usize) -> usize {
+        let before = self.edges.len();
+        self.edges.retain(|e| !(e.target_node_id == node_id && e.target_port == target_port_index));
+        before - self.edges.len()
+    }
+
+    /// 当节点的输入端口定义顺序发生变化（例如删除中间某个输入端口导致后续端口
+    /// 下标整体前移 1）时，需要把所有以该节点为目标的 `target_port` 进行重排：
+    /// - 删除前下标 < `removed_index`：不变
+    /// - 删除前下标 == `removed_index`：上面 `remove_edges_on_input_port` 已移除
+    /// - 删除前下标 > `removed_index`：`target_port -= 1`
+    pub fn shift_target_ports_after_remove(
+        &mut self,
+        node_id: &str,
+        removed_index: usize,
+    ) {
+        for edge in self.edges.iter_mut() {
+            if edge.target_node_id == node_id && edge.target_port > removed_index {
+                edge.target_port -= 1;
+            }
+        }
+    }
+
     fn would_create_cycle(&self, edge: &Edge) -> bool {
         let mut visited = HashSet::new();
         let mut stack = vec![edge.target_node_id.clone()];
@@ -741,6 +877,9 @@ pub fn operator_info_to_type(info: &ProtoOperatorInfo) -> OperatorType {
         summary: info.summary.clone(),
         description_md: info.description_md.clone(),
         stream: info.stream,
+        // 由 operator.json 的 dynamic_input_ports 字段经服务端 OperatorInfo 透传，
+        // 不再按算子名兜底判断，避免依赖命名约定造成误判。
+        dynamic_input_ports: info.dynamic_input_ports,
     })
 }
 

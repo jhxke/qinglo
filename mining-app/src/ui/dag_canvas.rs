@@ -409,6 +409,27 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                     tab.line_chart_preview_node_id = Some(node_id.clone());
                 }
                 ui.separator();
+
+                // dynamic_input_ports=true 的节点：提供"新增输入端口"
+                if let Some(node) = tab.graph.get_node(node_id) {
+                    if node.operator_type.dynamic_input_ports() {
+                        if ui.button("➕ 新增输入端口").clicked() {
+                            ui.close_menu();
+                            if let Some(node_mut) = tab.graph.get_node_mut(node_id) {
+                                match node_mut.add_input_port() {
+                                    Ok(_new_idx) => {
+                                        tab.io_registry.invalidate_downstream(node_id, &tab.graph);
+                                        tab.dirty = true;
+                                        tab.error_message = None;
+                                    }
+                                    Err(e) => tab.error_message = Some(e),
+                                }
+                            }
+                        }
+                        ui.separator();
+                    }
+                }
+
                 if ui.button("删除结点").clicked() {
                     ui.close_menu();
                     // 删除结点时，级联失效所有下游节点
@@ -449,16 +470,66 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     for interaction in &node_interactions {
         match interaction {
             NodeInteraction::InputPort { node_id, port_index, rect } => {
-                let response = ui.interact(*rect, egui::Id::new(format!("input_port_{}_{}", node_id, port_index)), egui::Sense::click());
+                let id = egui::Id::new(format!("input_port_{}_{}", node_id, port_index));
+                // 使用 click_and_drag 的 Sense 不会影响点击连线，click 语义保留；
+                // 加 drag 仅为了让 context_menu 响应右键（egui 的右键 = drag with secondary）。
+                let response = ui.interact(*rect, id, egui::Sense::click_and_drag());
                 if response.clicked() {
                     handle_port_click(tab, node_id, *port_index, false);
                 }
+                response.context_menu(|ui| {
+                    ui.label(format!("输入端口 #{}", port_index));
+                    if let Some(node) = tab.graph.get_node(node_id) {
+                        // 显示该输入端口的名字（如 input_0）便于识别
+                        if let Some(def) = node.operator_type.input_defs().get(*port_index) {
+                            ui.label(format!("端口名: {}", def.name));
+                        }
+                        if node.operator_type.dynamic_input_ports() {
+                            ui.separator();
+                            // 剩余输入端口数 > 1 才允许删除（至少保留 1 个）
+                            let can_remove = node.operator_type.input_count() > 1;
+                            let remove_btn = ui.add_enabled(
+                                can_remove,
+                                egui::Button::new("🗑 删除该输入端口"),
+                            );
+                            if remove_btn.clicked() {
+                                ui.close_menu();
+                                // 先从节点定义中删除；再同步 graph 中连线 target_port 的重排
+                                let target_id = node_id.clone();
+                                let removed_idx = *port_index;
+                                if let Some(node_mut) = tab.graph.get_node_mut(&target_id) {
+                                    match node_mut.remove_input_port(removed_idx) {
+                                        Ok(_removed_name) => {
+                                            // 1. 移除落在已删除端口上的连线
+                                            tab.graph.remove_edges_on_input_port(&target_id, removed_idx);
+                                            // 2. 原下标 > removed_idx 的目标端口整体前移 1
+                                            tab.graph.shift_target_ports_after_remove(&target_id, removed_idx);
+                                            // 3. 级联失效该节点及其下游
+                                            tab.io_registry.invalidate_downstream(&target_id, &tab.graph);
+                                            tab.dirty = true;
+                                            tab.error_message = None;
+                                        }
+                                        Err(e) => {
+                                            tab.error_message = Some(e);
+                                        }
+                                    }
+                                }
+                            }
+                            if !can_remove {
+                                ui.label("（仅剩 1 个输入端口，无法再删除）");
+                            }
+                        }
+                    }
+                });
             }
             NodeInteraction::OutputPort { node_id, port_index, rect } => {
-                let response = ui.interact(*rect, egui::Id::new(format!("output_port_{}_{}", node_id, port_index)), egui::Sense::click());
+                let response = ui.interact(*rect, egui::Id::new(format!("output_port_{}_{}", node_id, port_index)), egui::Sense::click_and_drag());
                 if response.clicked() {
                     handle_port_click(tab, node_id, *port_index, true);
                 }
+                response.context_menu(|ui| {
+                    ui.label(format!("输出端口 #{}", port_index));
+                });
             }
             NodeInteraction::Node { .. } => {}
         }

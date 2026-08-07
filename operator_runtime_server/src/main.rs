@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 use parking_lot::RwLock;
 use serde_json::{from_str, to_string};
@@ -15,6 +17,10 @@ use operator_runtime::protocol::{
 use operator_runtime::PortData;
 use operator_runtime::PREVIEW_ROW_LIMIT;
 use operator_sdk as executor;
+
+/// 共享 PortData：扇出时多个分支共享同一个 `Rc<RefCell<PortData>>`，
+/// 各分支算子就地追加列后回写到此对象，使列在分支间累积。
+type SharedPortData = Rc<RefCell<PortData>>;
 
 /// 服务版本
 const VERSION: &str = "0.1.0";
@@ -265,6 +271,7 @@ fn load_operator_info(dir: &Path, category_path: &[String]) -> Option<OperatorIn
         summary: config.summary,
         description_md: config.description_md,
         stream: config.stream,
+        dynamic_input_ports: config.dynamic_input_ports,
     })
 }
 
@@ -971,7 +978,7 @@ impl<'a> StreamCtx<'a> {
         state: &RuntimeState,
         plan: &StreamingPlan,
         subgraph_nodes: &[String],
-        outputs_map: &mut std::collections::HashMap<String, Vec<PortData>>,
+        outputs_map: &mut std::collections::HashMap<String, Vec<SharedPortData>>,
     ) -> Vec<DagNodeResult> {
         let mut node_results = Vec::new();
         for nid in subgraph_nodes {
@@ -986,7 +993,7 @@ impl<'a> StreamCtx<'a> {
             let aggregated = aggregate_chunks(acc);
             let preview = aggregated.preview(PREVIEW_ROW_LIMIT);
             let row_count = aggregated.first_dataframe_row_count().unwrap_or(0);
-            outputs_map.insert(nid.clone(), vec![aggregated]);
+            outputs_map.insert(nid.clone(), vec![Rc::new(RefCell::new(aggregated))]);
             let exec_result = OperatorExecutionResult::completed(
                 vec![ExecutionLogEntry::info(format!("流式节点 {} ({}) 执行完成", nid, node.operator_name))],
                 0,
@@ -1017,7 +1024,7 @@ fn execute_streaming_subgraph(
     dag: &DagDefinition,
     head_id: &str,
     plan: &StreamingPlan,
-    outputs_map: &mut std::collections::HashMap<String, Vec<PortData>>,
+    outputs_map: &mut std::collections::HashMap<String, Vec<SharedPortData>>,
     on_progress: &mut dyn FnMut(DagEvent),
 ) -> (Vec<DagNodeResult>, Option<String>) {
     let mut node_results: Vec<DagNodeResult> = Vec::new();
@@ -1073,7 +1080,7 @@ fn execute_streaming_subgraph(
             } else {
                 match outputs_map.get(&edge.source_node_id) {
                     Some(upstream_outputs) => match upstream_outputs.get(edge.source_port) {
-                        Some(out) => input_slots[edge.target_port] = Some(out.clone()),
+                        Some(out) => input_slots[edge.target_port] = Some(out.borrow().clone()),
                         None => {
                             input_err = Some(format!(
                                 "节点 {} ({}) 的上游节点 {} 输出端口 {} 不存在",
@@ -1231,6 +1238,37 @@ fn execute_streaming_subgraph(
 /// - **批量节点**：收集入边对应的上游输出作为输入，调用 `executor::execute_operator`
 ///   执行，缓存输出供下游节点使用。
 ///
+/// 判断算子输出是否应回写到输入的共享 `Rc<RefCell<PortData>>`。
+///
+/// 回写条件（全部满足）：
+/// 1. 输出和输入都是 `DataFrameArray`
+/// 2. DataFrame 数量一致
+/// 3. 各对应 DataFrame 行数一致（保证列对齐）
+/// 4. 输出的列数 ≥ 输入的列数（即算子就地追加了列，而非替换/删除列）
+///
+/// 满足时回写使后续同源分支能读到累积列；不满足时创建新 Rc，不影响其他分支。
+fn should_writeback_to_input(output: &PortData, input_rc: &SharedPortData) -> bool {
+    let out_dfs = match output {
+        PortData::DataFrameArray(dfs) => dfs,
+        _ => return false,
+    };
+    let in_borrow = input_rc.borrow();
+    let in_dfs = match &*in_borrow {
+        PortData::DataFrameArray(dfs) => dfs,
+        _ => return false,
+    };
+
+    if out_dfs.len() != in_dfs.len() {
+        return false;
+    }
+
+    // 逐 DataFrame 检查行数一致 + 列数不减少
+    out_dfs
+        .iter()
+        .zip(in_dfs.iter())
+        .all(|(o, i)| o.row_count == i.row_count && o.columns.len() >= i.columns.len())
+}
+
 /// 任一节点失败则停止后续执行，已完成的节点结果仍包含在返回值中。
 fn execute_dag<F>(
     state: &RuntimeState,
@@ -1362,8 +1400,10 @@ where
         sorted_ids: &sorted_ids,
     };
 
-    // 各节点输出缓存（node_id -> outputs），供下游节点取输入
-    let mut outputs_map: std::collections::HashMap<String, Vec<PortData>> = std::collections::HashMap::new();
+    // 各节点输出缓存（node_id -> outputs），供下游节点取输入。
+    // 使用 SharedPortData (Rc<RefCell<PortData>>)：扇出时多个分支共享同一个 Rc，
+    // 算子执行后若新增了列则回写到共享对象，使后续分支能看到累积列。
+    let mut outputs_map: std::collections::HashMap<String, Vec<SharedPortData>> = std::collections::HashMap::new();
     let mut node_results: Vec<DagNodeResult> = Vec::new();
     let mut failed_error: Option<String> = None;
     // 已被流式子图覆盖的节点（主循环跳过，避免重复执行）
@@ -1410,7 +1450,10 @@ where
         // 的端口填充空 String 占位。这样「一个输出端口 → 多个输入端口」（跨节点扇出、
         // 同节点多端口扇入、稀疏端口）都能正确对齐到算子期望的端口下标，避免旧实现
         // 按 target_port 排序后顺序 push 导致的端口错位与长度不符。
-        let mut input_slots: Vec<Option<PortData>> = (0..node.input_count).map(|_| None).collect();
+        //
+        // input_slots 保存 SharedPortData (Rc<RefCell<PortData>>)，扇出时多个端口
+        // 共享同一个 Rc，算子执行后若新增列则回写到共享对象，使后续分支能读到累积列。
+        let mut input_slots: Vec<Option<SharedPortData>> = (0..node.input_count).map(|_| None).collect();
         let mut input_error: Option<String> = None;
         for edge in dag.edges.iter().filter(|e| e.target_node_id == node.id) {
             if edge.target_port >= node.input_count {
@@ -1429,7 +1472,7 @@ where
             }
             match outputs_map.get(&edge.source_node_id) {
                 Some(upstream_outputs) => match upstream_outputs.get(edge.source_port) {
-                    Some(out) => input_slots[edge.target_port] = Some(out.clone()),
+                    Some(out) => input_slots[edge.target_port] = Some(Rc::clone(out)),
                     None => {
                         input_error = Some(format!(
                             "节点 {} ({}) 的上游节点 {} 输出端口 {} 不存在",
@@ -1464,10 +1507,17 @@ where
             break;
         }
 
-        // 未连接的端口填充空 String 占位；算子按端口下标读取输入，占位端口不应被消费
+        // 未连接的端口填充空 String 占位；算子按端口下标读取输入，占位端口不应被消费。
+        // 从 SharedPortData 克隆出 PortData 传给 executor（C ABI 需要 owned 数据）；
+        // input_slots (Rc) 保留用于执行后回写——若算子新增了列，回写到共享 Rc 使
+        // 后续同源分支能读到累积列。
         let inputs: Vec<PortData> = input_slots
-            .into_iter()
-            .map(|slot| slot.unwrap_or_else(|| PortData::String(String::new())))
+            .iter()
+            .map(|slot| {
+                slot.as_ref()
+                    .map(|rc| rc.borrow().clone())
+                    .unwrap_or_else(|| PortData::String(String::new()))
+            })
             .collect();
 
         // DLL 已在预扫描阶段解析完毕（失败已在 early_failure 提前返回），此处直接取缓存
@@ -1546,8 +1596,42 @@ where
             failed_error = Some(format!("节点 {} ({}) 执行失败", node.id, node.operator_name));
             break;
         } else {
-            // 完整输出（未截断）保留在服务端内存中，供下游节点消费
-            outputs_map.insert(node.id.clone(), outputs);
+            // 完整输出（未截断）保留在服务端内存中，供下游节点消费。
+            //
+            // 对象共享 + 回写机制：
+            // 若节点只有 1 个连接的输入端口，且输出是 DataFrameArray、与输入行数
+            // 一致且列数 ≥ 输入列数（即算子就地追加了列），则将输出回写到输入的
+            // 共享 Rc 上，并把同一 Rc 作为本节点输出存入 outputs_map。
+            //
+            // 这样扇出到多个分支时，所有分支共享同一个 Rc：第一个分支执行后回写
+            // 新增列，第二个分支读到的是已累积列的数据，依次累积，最终合并算子
+            // 取任意输入端口都能拿到包含全部分支新增列的完整 DataFrame。
+            //
+            // 不满足回写条件时（行数变化、多输入、非 DataFrameArray 等）则创建
+            // 新 Rc，不影响其他分支。
+            let connected_inputs: Vec<&SharedPortData> = input_slots
+                .iter()
+                .filter_map(|slot| slot.as_ref())
+                .collect();
+
+            let mut output_rcs: Vec<SharedPortData> = Vec::with_capacity(outputs.len());
+            for (out_idx, out_pd) in outputs.into_iter().enumerate() {
+                let should_writeback = out_idx == 0
+                    && connected_inputs.len() == 1
+                    && should_writeback_to_input(&out_pd, &connected_inputs[0]);
+
+                if should_writeback {
+                    let input_rc = connected_inputs[0];
+                    // 回写：更新共享 Rc 的内容，所有指向该 Rc 的节点（源、已执行的
+                    // 同源分支）都会看到累积列。
+                    *input_rc.borrow_mut() = out_pd;
+                    // 本节点输出与输入共享同一 Rc
+                    output_rcs.push(Rc::clone(input_rc));
+                } else {
+                    output_rcs.push(Rc::new(RefCell::new(out_pd)));
+                }
+            }
+            outputs_map.insert(node.id.clone(), output_rcs);
         }
     }
 

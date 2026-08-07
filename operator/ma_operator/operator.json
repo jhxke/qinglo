@@ -1,0 +1,34 @@
+{
+  "name": "MA算子",
+  "description": "对 DataFrameArray 中每个 DataFrame 计算 MA（简单移动平均）均线，支持多周期，结果以 ma_N 列追加",
+  "code": "",
+  "color": [46, 204, 113],
+  "summary": "计算 MA 简单移动平均线，支持多周期（如 5,10,20），每个周期追加一列 ma_N",
+  "description_md": "# MA 算子\n\n对 **DataFrameArray** 中的每一个 DataFrame 计算 **MA（简单移动平均）** 均线，支持多周期，计算结果以新列 `ma_N` 追加到原表。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含价格序列的若干数据表，每个表需含有 `source_column` 指定的列（Float64 类型，默认 `close`）。单个 DataFrame 也会被包装为单元素数组处理。\n- **输出**：`output`（DataFrameArray）—— 在每个输入表基础上追加 MA 列后的数据表数组。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `ma_periods` | String | （空） | MA 均线周期，多个用英文逗号分隔，如 `5,10,20`；空则不计算（原样返回输入） |\n| `source_column` | String | `close` | 指标计算所用的源列名；DataFrameArray 未必含标准 open/high/low/close 列，可按需指定，留空回退 `close` |\n\n## 输出列\n\n| 指标 | 追加列 | 说明 |\n| --- | --- | --- |\n| MA | `ma_5`、`ma_10`、`ma_20` ... | 每个 period 对应一列，前 N-1 行为空 |\n\n## 用法示例\n\n1. 将数据源读取器（`output_data_type=DataFrameArray` 且按 `ts_code` 分组）的输出连接到本算子的 `input` 端口。\n2. 配置 `ma_periods=5,10,20`，输出列依次为 `close, ma_5, ma_10, ma_20`。\n3. 若数据源列名为 `price` 而非 `close`，配置 `source_column=price` 即可。\n4. 执行 DAG，每个 DataFrame 将按所配置的周期追加 MA 列。\n\n## 计算公式\n\n- **MA_N**：`MA_N[i] = (x[i] + x[i-1] + ... + x[i-N+1]) / N`\n\n## 注意事项\n\n- `ma_periods` 为空时，输出与输入一致（不追加任何列）。\n- 源列由 `source_column` 指定（默认 `close`，Float64 类型）；某 DataFrame 缺少该列或类型不匹配时，该 DataFrame 原样返回，不影响其他 DataFrame。\n- 周期不足的前 N-1 行，对应 MA 值为空。\n- `ma_periods` 中的空格会被自动忽略，非正整数会被过滤。\n- 滚动求和实现，时间复杂度 O(n)，对长周期（如 MA250）友好。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "ma_periods",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "source_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "close"
+    }
+  ]
+}
