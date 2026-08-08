@@ -38,6 +38,7 @@ $operators = @(
     # ===== visualization =====
     @{ Group = $grpViz; Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\kline_visualization_operator\operator.json" }
     @{ Group = $grpViz; Name = "line_chart_operator";           Dir = [char]0x6298 + [char]0x7EBF + [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50; Json = "operator\line_chart_operator\operator.json" }
+    @{ Group = $grpViz; Name = "chat_visualization_operator";   Dir = "DSL" + [char]0x5BF9 + [char]0x8BDD + [char]0x5C55 + [char]0x793A + [char]0x7B97 + [char]0x5B50;        Json = "operator\chat_visualization_operator\operator.json" }
 
     # ===== large model =====
     @{ Group = $grpLLM; Name = "ollama_operator"; Dir = "Ollama" + [char]0x7B97 + [char]0x5B50; Json = "operator\ollama_operator\operator.json" }

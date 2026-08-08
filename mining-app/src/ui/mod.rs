@@ -1,4 +1,5 @@
 pub mod activity_bar;
+pub mod chat_view;
 pub mod code_editor;
 pub mod dag_canvas;
 pub mod data_preview_view;

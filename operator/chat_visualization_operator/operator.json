@@ -1,0 +1,59 @@
+{
+  "name": "DSL流式对话展示",
+  "description": "接收 ollama 流式 token 输出，拼接为对话 DSL 文本，供前端「聊天预览」窗口流式渲染用户/助手消息气泡",
+  "code": "",
+  "color": [59, 130, 246],
+  "stream": true,
+  "summary": "流式下游：接收 token chunk + 可选 prompt，输出 chat DSL（右键「聊天预览」实时渲染气泡）",
+  "description_md": "# DSL 流式对话展示算子\n\n作为 **ollama 流式对话算子**（或任何逐 chunk 输出 String 的流式源）的下游，\n将流式到达的 token 实时拼接为 `chat { user \"...\"; assistant \"...\"; status streaming }` 格式的 DSL，\n并在 mining-app 中通过右键「聊天预览」渲染为聊天气泡界面（含流式打字机光标、角色标签、状态指示）。\n\n## 设计要点\n\n- **流式 C ABI**：导出 5 个符号（`stream_start/push/push_end/next/end`），同时保留批量\n  `execute_operator` 作为 `stream=false` 兜底。\n- **双输入端口**：\n  - `prompt`（String，可选）—— 用户问题内容，作为 `user` 气泡展示。优先取输入端口，其次参数 `prompt`。\n  - `tokens`（String，流式）—— 上游 ollama 推送的 token chunk，按到达顺序拼接到 `assistant` 消息。\n- **增量 DSL 快照流式输出**：`stream_next` 在每次 `push` 后产出一份完整 DSL 快照\n  （`status=streaming` + 当前累积 assistant 文本），服务端通过 `StreamChunk` 帧实时\n  推送到前端，前端重读缓存即可看到「打字机」逐 token 效果。`push_end` 后产出最终\n  DSL（`status=done`）。服务端 `aggregate_chunks` 对 DSL 快照型 String chunk 采用\n  「保留最后一份」策略（非拼接），保证最终缓存是单份合法 DSL。\n- **状态标记**：DSL 中 `status` 字段可取 `streaming`（生成中）/`done`（上游 EOF）/`error`，\n  前端据以显示或隐藏闪烁光标、完成标识。\n\n## DSL 语法\n\n```\nchat \"对话标题\" {\n  user \"用户的问题文本\"\n  assistant \"助手回答（持续追加中）\"\n  status streaming\n  token_count 128\n}\n```\n\n关键字：`chat` / `user` / `assistant` / `status` / `token_count`；\n字符串支持 `\\\" \\\\ \\n \\r \\t` 转义；`status` 可取标识符或字符串。\n\n## 输入输出\n\n- **输入 [0] prompt**（String，可选）—— 用户问题；未连接或为空时用参数 `prompt`；再空则不生成 `user` 气泡。\n- **输入 [1] tokens**（String，流式）—— 上游逐 chunk 推送的 token。\n- **输出 output**（String，流式）—— 最新完整的 `chat { ... }` DSL 文本。\n\n## 参数\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `title` | String | 「对话」 | 聊天窗口标题 |\n| `prompt` | String | （空） | 用户问题（输入端口为空时兜底） |\n| `user_label` | String | 「用户」 | user 气泡标签 |\n| `assistant_label` | String | 「助手」 | assistant 气泡标签 |\n| `debug_log` | Bool | `false` | 是否将 token 流同时打印到 stderr（便于调试） |\n\n## 用法示例\n\n1. 画布中放置「ollama 流式对话」算子，配置 `model` 与 `prompt`（或上游数据）。\n2. 放置本算子，连线：`ollama.output` → `chat.tokens`；可选另一条线：上游 prompt → `chat.prompt`。\n3. 执行 DAG，右键本算子节点 →「聊天预览」，即可看到 LLM 逐 token 流式回复。\n\n## 调试输出\n\n开启 `debug_log=true` 后，每个到达的 token chunk 会以 `[chat_op] token(5)=hello` 格式写入 stderr，\n可在运行服务的终端实时查看，用于排查上游是否真的在推送数据。",
+  "port_params": [
+    {
+      "name": "prompt",
+      "direction": "Input",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "tokens",
+      "direction": "Input",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "title",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "对话"
+    },
+    {
+      "name": "prompt",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "user_label",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "用户"
+    },
+    {
+      "name": "assistant_label",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "助手"
+    },
+    {
+      "name": "debug_log",
+      "direction": "Param",
+      "param_type": "Bool",
+      "default_value": "false"
+    }
+  ]
+}

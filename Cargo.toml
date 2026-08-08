@@ -10,6 +10,7 @@ members = [
     "operator/kline_visualization_operator",
     "operator/line_chart_operator",
     "operator/ollama_operator",
+    "operator/chat_visualization_operator",
     "operator/cumsum_operator",
     "operator/shift_add_operator",
     "operator/merge_operator",

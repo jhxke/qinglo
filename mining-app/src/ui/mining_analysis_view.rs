@@ -175,6 +175,11 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
         super::line_chart_view::render_line_chart_preview_window(ui, tab);
     }
 
+    // 聊天预览浮动窗口（由算子右键菜单「聊天预览」触发，解析节点输出的 chat DSL）
+    if let Some(tab) = editor_state.active_tab_mut() {
+        super::chat_view::render_chat_preview_window(ui, tab);
+    }
+
     // 新建 / 重命名对话框
     render_dialogs(ui, editor_state);
 
@@ -1568,13 +1573,33 @@ fn spawn_run_all(ctx: &Context, editor_state: &mut DagEditorState) {
     let ctx_clone = ctx.clone();
 
     std::thread::spawn(move || {
-        // 阻塞的 TCP 下发 + 服务端执行在此工作线程完成；流式接收每个节点进度
-        let res = crate::operator_executor::execute_dag_on_server_with_progress(
+        // 阻塞的 TCP 下发 + 服务端执行在此工作线程完成；流式接收每个节点进度 + chunk
+        let res = crate::operator_executor::execute_dag_on_server_streaming(
             &graph_clone,
             &dag_name,
             |p| {
                 // 每条进度立即推给 UI 线程并唤醒重绘，实现「运行到哪个算子」的实时反馈
                 let _ = tx.send(DagExecMessage::NodeProgress(p.clone()));
+                ctx_clone.request_repaint();
+            },
+            |node_id, chunk| {
+                // 流式 chunk（如 chat DSL 快照）：落盘预览缓存供聊天预览窗口逐 token 刷新
+                let node_name = graph_clone
+                    .get_node(node_id)
+                    .map(|n| n.operator_type.name().to_string())
+                    .unwrap_or_else(|| node_id.to_string());
+                if let Err(e) = crate::data_preview::save_preview_from_truncated(
+                    node_id,
+                    &node_name,
+                    std::slice::from_ref(chunk),
+                    0,
+                ) {
+                    eprintln!("流式 chunk 缓存失败 (节点 {}): {}", node_id, e);
+                }
+                let _ = tx.send(DagExecMessage::StreamChunk {
+                    node_id: node_id.to_string(),
+                    chunk: chunk.clone(),
+                });
                 ctx_clone.request_repaint();
             },
         );
@@ -1654,11 +1679,31 @@ pub fn spawn_run_up_to(
     let target_for_thread = target.clone();
 
     std::thread::spawn(move || {
-        let res = crate::operator_executor::execute_dag_up_to_detached_with_progress(
+        let res = crate::operator_executor::execute_dag_up_to_detached_streaming(
             &graph_clone,
             &target_for_thread,
             |p| {
                 let _ = tx.send(DagExecMessage::NodeProgress(p.clone()));
+                ctx_clone.request_repaint();
+            },
+            |node_id, chunk| {
+                // 流式 chunk（如 chat DSL 快照）：落盘预览缓存供聊天预览窗口逐 token 刷新
+                let node_name = graph_clone
+                    .get_node(node_id)
+                    .map(|n| n.operator_type.name().to_string())
+                    .unwrap_or_else(|| node_id.to_string());
+                if let Err(e) = crate::data_preview::save_preview_from_truncated(
+                    node_id,
+                    &node_name,
+                    std::slice::from_ref(chunk),
+                    0,
+                ) {
+                    eprintln!("流式 chunk 缓存失败 (节点 {}): {}", node_id, e);
+                }
+                let _ = tx.send(DagExecMessage::StreamChunk {
+                    node_id: node_id.to_string(),
+                    chunk: chunk.clone(),
+                });
                 ctx_clone.request_repaint();
             },
         );
@@ -1798,6 +1843,14 @@ pub fn poll_dag_exec_task(ctx: &Context, editor_state: &mut DagEditorState) {
                 if let Some(idx) = editor_state.find_tab_by_model(&model_id) {
                     editor_state.tabs[idx].add_runtime_log(msg, level);
                 }
+            }
+            Ok(DagExecMessage::StreamChunk { node_id, chunk: _ }) => {
+                // 流式 chunk 的预览缓存已在工作线程落盘（save_preview_from_truncated），
+                // request_repaint 也已调用。UI 线程无需额外处理——聊天预览窗口每帧
+                // 重读缓存文件即可看到逐 token 刷新的「打字机」效果。
+                // 此处仅排空消息，避免积压。可选：记录调试日志。
+                let _ = node_id; // 避免未使用警告
+                // 不 break，继续排空后续消息
             }
             Ok(DagExecMessage::NodeProgress(nr)) => {
                 // 服务端推送的单节点进度：立即回填 registry 并记录日志，实现实时可视化

@@ -458,6 +458,95 @@ pub fn execute_dag_up_to_detached(
     execute_dag_up_to_detached_with_progress(graph, target_node_id, |_| {})
 }
 
+// ===== 流式执行接口（转发 StreamChunk 事件，供聊天预览等实时刷新场景使用）=====
+
+use operator_executor_client::runtime_client::DagStreamEvent;
+
+/// 与 [`execute_dag_on_server_with_progress`] 相同，但额外通过 `on_chunk` 回调转发
+/// 服务端推送的 `StreamChunk` 帧（流式节点产出的实时 chunk），供调用方做实时预览。
+pub fn execute_dag_on_server_streaming<F, G>(
+    graph: &DagGraph,
+    name: &str,
+    mut on_progress: F,
+    mut on_chunk: G,
+) -> Result<DagExecutionResult, String>
+where
+    F: FnMut(&DagNodeResult),
+    G: FnMut(&str, &PortData),
+{
+    if graph.nodes.is_empty() {
+        return Err("DAG 为空，无节点可执行".to_string());
+    }
+
+    let dag = build_dag_definition(graph, name);
+
+    // 落盘到 dag 目录
+    let dag_dir = crate::config::get_dag_directory();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| as_millis_helper(d))
+        .unwrap_or(0);
+    let safe_name = sanitize_dag_file_name(name);
+    let file_name = format!("dag_{}_{}.json", safe_name, timestamp);
+    let dag_path = dag_dir.join(&file_name);
+    match serde_json::to_string_pretty(&dag) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&dag_path, &json) {
+                eprintln!("写入 DAG 文件失败: {} (路径: {})", e, dag_path.display());
+            }
+            let latest_path = dag_dir.join("dag_latest.json");
+            let _ = fs::write(&latest_path, &json);
+        }
+        Err(e) => {
+            eprintln!("序列化 DAG 失败，跳过落盘: {}", e);
+        }
+    }
+
+    with_runtime_client(|client| {
+        client.execute_dag_streaming(&dag, |ev| match ev {
+            DagStreamEvent::NodeProgress(p) => on_progress(&p),
+            DagStreamEvent::StreamChunk { node_id, chunk, .. } => {
+                on_chunk(&node_id, &chunk);
+            }
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 与 [`execute_dag_up_to_detached_with_progress`] 相同，但额外通过 `on_chunk` 回调转发
+/// 服务端推送的 `StreamChunk` 帧。
+pub fn execute_dag_up_to_detached_streaming<F, G>(
+    graph: &DagGraph,
+    target_node_id: &str,
+    mut on_progress: F,
+    mut on_chunk: G,
+) -> Result<DagExecutionResult, String>
+where
+    F: FnMut(&DagNodeResult),
+    G: FnMut(&str, &PortData),
+{
+    let ancestors = graph.get_ancestors(target_node_id)?;
+    let ancestor_set: HashSet<String> = ancestors.iter().cloned().collect();
+
+    let dag_name = format!("upto_{}", target_node_id);
+    let subset = build_dag_definition_subset(graph, &dag_name, &ancestor_set);
+
+    with_runtime_client(|client| {
+        client.execute_dag_streaming(&subset, |ev| match ev {
+            DagStreamEvent::NodeProgress(p) => on_progress(&p),
+            DagStreamEvent::StreamChunk { node_id, chunk, .. } => {
+                on_chunk(&node_id, &chunk);
+            }
+        })
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// `Duration::as_millis()` 的辅助函数（避免在闭包中类型推断歧义）。
+fn as_millis_helper(d: std::time::Duration) -> u128 {
+    d.as_millis()
+}
+
 /// 将单个节点的执行结果回填到 registry 与预览缓存。
 ///
 /// 从 [`apply_dag_execution_result`] 的循环体抽出，供「最终结果回填」和「进度回填」共用。

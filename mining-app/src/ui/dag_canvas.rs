@@ -400,18 +400,39 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                     ui.close_menu();
                     tab.preview_node_id = Some(node_id.clone());
                 }
-                if ui.button("K线图预览").clicked() {
-                    ui.close_menu();
-                    tab.kline_preview_node_id = Some(node_id.clone());
-                }
-                if ui.button("折线图预览").clicked() {
-                    ui.close_menu();
-                    tab.line_chart_preview_node_id = Some(node_id.clone());
-                }
-                ui.separator();
-
-                // dynamic_input_ports=true 的节点：提供"新增输入端口"
+                // 预览类按钮 + 动态端口按钮：一次性取出节点信息按需显示，
+                // 避免对不兼容算子显示预览按钮（如对 ollama 节点点聊天预览会导致 DSL 解析报错）。
                 if let Some(node) = tab.graph.get_node(node_id) {
+                    let op_name = node.operator_type.name();
+                    // K线图预览：仅对 K线可视化类算子显示
+                    if op_name.contains("K线") || op_name.contains("kline") {
+                        if ui.button("K线图预览").clicked() {
+                            ui.close_menu();
+                            tab.kline_preview_node_id = Some(node_id.clone());
+                        }
+                    }
+                    // 折线图预览：仅对 折线/表达式 等数值输出类算子显示（宽松匹配）。
+                    if op_name.contains("折线") || op_name.contains("line")
+                        || op_name.contains("表达式") || op_name.contains("expression") {
+                        if ui.button("折线图预览").clicked() {
+                            ui.close_menu();
+                            tab.line_chart_preview_node_id = Some(node_id.clone());
+                        }
+                    }
+                    // 聊天预览：仅对「DSL流式对话展示」算子显示。
+                    // 对 ollama 等原始 token 输出算子点此按钮会把纯文本当作 DSL 解析
+                    // （例如模型返回 "Thinking Process:" 会在行 1 列 17 遇到 ':' 报非法字符）。
+                    if op_name.contains("DSL流式对话展示")
+                        || op_name.contains("chat_visualization")
+                        || node.operator_type.as_custom().summary.contains("chat DSL") {
+                        if ui.button("聊天预览").clicked() {
+                            ui.close_menu();
+                            tab.chat_preview_node_id = Some(node_id.clone());
+                        }
+                    }
+                    ui.separator();
+
+                    // dynamic_input_ports=true 的节点：提供"新增输入端口"
                     if node.operator_type.dynamic_input_ports() {
                         if ui.button("➕ 新增输入端口").clicked() {
                             ui.close_menu();

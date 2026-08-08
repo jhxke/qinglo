@@ -2,6 +2,7 @@ use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 use egui::{Rect, Vec2};
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
+use operator_executor_client::PortData;
 use crate::dag::{DagGraph, OperatorType, NodeIORegistry, CustomOperatorDef};
 use crate::dag_store::{self, DagModelMeta, DagModelRecord};
 
@@ -12,10 +13,17 @@ use crate::debug_executor::DebugDiagnostics;
 /// `Log` 携带阶段性日志（如「已将流程下发到服务端」），UI 线程立即追加到日志面板；
 /// `NodeProgress` 携带服务端推送的单节点进度（Executing/Completed/Failed），UI 线程
 /// 据此立即回填 `io_registry` 并重绘画布，实现「运行到哪个算子」的实时可视化；
+/// `StreamChunk` 携带流式节点的实时 chunk（如 chat DSL 快照），UI 线程落盘预览缓存
+/// 供聊天预览窗口逐 token 刷新（打字机效果）；
 /// `Finished` 携带最终执行结果，UI 线程做收尾（去重回填未收到进度的节点 + 汇总日志）。
 pub enum DagExecMessage {
     Log(String, LogLevel),
     NodeProgress(DagNodeResult),
+    /// 流式 chunk：node_id + chunk 数据 + chunk 序号
+    StreamChunk {
+        node_id: String,
+        chunk: PortData,
+    },
     Finished(Result<DagExecutionResult, String>),
 }
 
@@ -231,6 +239,10 @@ pub struct DagTab {
     /// 由算子右键菜单「折线图预览」触发，读取该节点预览缓存中的首个 DataFrameArray
     /// 输出，并按节点参数（`date_col`/`close_col`）交由 line_chart_view 渲染折线图。
     pub line_chart_preview_node_id: Option<String>,
+    /// 当前打开「聊天预览」浮动窗口的节点 ID；为 None 时窗口关闭。
+    /// 由算子右键菜单「聊天预览」触发，读取该节点预览缓存中的首个 String 输出
+    /// （DSL流式对话展示算子返回的 chat DSL）并交由 chat_view 解析渲染气泡界面。
+    pub chat_preview_node_id: Option<String>,
     /// 自定义算子编辑器的 Debug 面板状态 (输入文本与最近一次诊断结果)
     pub custom_op_debug: CustomOperatorDebugState,
     /// 提醒日志：用户点击保存、验证、清空等 UI 操作的直接反馈。
@@ -273,6 +285,7 @@ impl DagTab {
             preview_node_id: None,
             kline_preview_node_id: None,
             line_chart_preview_node_id: None,
+            chat_preview_node_id: None,
             custom_op_debug: CustomOperatorDebugState {
                 input_text: "1, 2, 3, 4, 5".to_string(),
                 diagnostics: None,

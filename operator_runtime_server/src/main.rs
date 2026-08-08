@@ -813,8 +813,10 @@ enum DagEvent {
 
 /// 把流式节点累积的 chunk 列表聚合为单个 `PortData`，供非流式下游消费与 DagNodeResult 预览。
 ///
-/// 聚合规则（v1）：
-/// - 全 `String` → 拼接
+/// 聚合规则：
+/// - 全 `String` → 检测是否为「快照型」（首 chunk 以 `chat ` 开头，如 DSL 流式对话展示算子）：
+///   - 快照型 → 保留最后一份（每份都是完整 DSL 快照，拼接会产生多份首尾相接的非法文本）
+///   - 增量型 → 拼接（如 ollama 逐 token 输出）
 /// - 全 `DataFrame` → `DataFrameArray`
 /// - 单 chunk → 原样
 /// - 空 → `String("")`
@@ -827,6 +829,13 @@ fn aggregate_chunks(chunks: Vec<PortData>) -> PortData {
         return chunks.into_iter().next().unwrap();
     }
     if chunks.iter().all(|c| matches!(c, PortData::String(_))) {
+        // 快照型 String chunk（如 chat DSL）：保留最后一份，避免拼接多份完整快照
+        if let PortData::String(first) = &chunks[0] {
+            if first.starts_with("chat ") {
+                return chunks.into_iter().last().unwrap();
+            }
+        }
+        // 增量型 String chunk：拼接
         let mut s = String::new();
         for c in chunks {
             if let PortData::String(part) = c {

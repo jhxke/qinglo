@@ -767,6 +767,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat_visualization_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
