@@ -1,0 +1,52 @@
+{
+  "name": "收益率直方图算子",
+  "description": "对 DataFrameArray 中每个 DataFrame 逐行计算筛选表达式，成立时收集指定收益率列的同行值，汇总后生成直方图 DataFrame",
+  "code": "",
+  "color": [155, 89, 182],
+  "summary": "表达式筛选为 true 的行，收集 value_column 列同行值（如未来收益率），汇总所有 DataFrame 后输出直方图 DataFrame",
+  "description_md": "# 收益率直方图算子\n\n对 **DataFrameArray** 中的每一个 DataFrame **逐行**计算一个筛选表达式，**表达式成立**的行，将 `value_column` 参数指定列的**同一行值**收集起来。汇总所有 DataFrame 中收集到的所有样本值后，按分箱数生成直方图 **DataFrame** 输出。\n\n典型使用场景：先用「表达式算子」或直接在本算子 `expression` 中写 `ma5 > ma10` 之类的信号条件，`value_column` 取「未来收益算子」生成的 `future_return_5` 列，即可得到「信号触发后，未来 5 天收益率的分布直方图」，用于评估信号胜率。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含若干数据表，每个表需含有表达式所引用列 + `value_column` 指定列（均需 Float64 或 Int64 类型）。单个 DataFrame 会被包装为单元素数组处理。\n- **输出**：`output`（DataFrame）—— 单个直方图数据表，行数 = 分箱数，共 6 列：\n\n| 列名 | 类型 | 说明 |\n| --- | --- | --- |\n| `bin_index` | Int64 | 0 基分箱编号 |\n| `bin_left` | Float64 | 箱左边界（含） |\n| `bin_right` | Float64 | 箱右边界（不含，最后一箱含最大值） |\n| `bin_center` | Float64 | 箱中点 = (left+right)/2 |\n| `count` | Int64 | 落入该箱的样本数量 |\n| `frequency` | Float64 | 落入该箱的样本频率 = count / 总样本数 |\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `expression` | String | （空） | 筛选表达式，如 `ma5 > ma10`；为空时报错。语法、运算符优先级、空值传播规则与「表达式算子」完全一致 |\n| `value_column` | String | （空） | 统计值列名，通常为未来收益率列（如 `future_return_5`）；为空时报错。表达式为 true 的行，取该列同一行的值作为直方图样本 |\n| `bins` | String | `20` | 直方图分箱数（正整数）；空串回退默认 20；非正整数或非法值时报错（-6） |\n| `min_val` | String | （空） | 可选的最小值边界；空串表示自动取所有样本值的最小值；若用户指定小于该值的样本会被丢弃不统计 |\n| `max_val` | String | （空） | 可选的最大值边界；空串表示自动取所有样本值的最大值；若用户指定大于该值的样本会被丢弃不统计 |\n\n## 表达式语法\n\n与「表达式算子」完全一致：\n\n| 优先级 | 运算符 | 说明 |\n| --- | --- | --- |\n| 1（低） | `\\|\\|` | 逻辑或 |\n| 2 | `&&` | 逻辑与 |\n| 3 | `> < >= <= == !=` | 比较（非结合） |\n| 4 | `+ -` | 加减 |\n| 5 | `* /` | 乘除 |\n| 6（高） | `-` `!` | 一元负号 / 逻辑非 |\n| 基元 | 数字 / 列名 / `( )` | 数字字面量、列引用、括号分组 |\n\n## 用法示例\n\n1. 将「未来收益算子」输出（含 `ma5`、`ma10`、`future_return_5` 列）连接到本算子 `input` 端口。\n2. 配置参数：\n   - `expression = ma5 > ma10 && close > 10`\n   - `value_column = future_return_5`\n   - `bins = 30`\n3. 执行后输出单个 DataFrame（30 行），即金叉且收盘价 > 10 条件下、未来 5 天收益率的 30 分箱直方图。\n4. 将输出连接到「直方图展示算子」，右键节点即可看到可视化柱状图。\n\n### 典型 DAG 链路\n\n```\n数据源读取器 → MA 算子 → 未来收益算子(n=5) → 收益率直方图算子 → 直方图展示算子\n```\n\n这能直接回答：「当 ma5 > ma10 时，未来 5 天的收益率分布是怎样的？」\n\n## 注意事项\n\n- 空值传播：表达式引用列的值为空时，该行被视为表达式**不成立**，不收集样本。\n- `value_column` 的值为空、Inf 或 NaN 的行，也不会被收集到样本中。\n- 所有 DataFrame 的样本会被**汇总**到同一个直方图中（而不是每个 DataFrame 生成一张直方图），适合多股票分组后的分布统计。\n- 若 `min_val`/`max_val` 同时指定且颠倒，会自动对调后使用；若 `min_val == max_val`，会自动向两侧各扩展 0.5 避免零宽度分箱。\n- 输出为**单个 DataFrame**（非 DataFrameArray），下游算子若要求 DataFrameArray，可用「数据合并算子」等适配，或直接接「直方图展示算子」。\n- 不依赖任何外部统计库，所有算法内置实现，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrame",
+      "default_value": ""
+    },
+    {
+      "name": "expression",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "value_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "bins",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "20"
+    },
+    {
+      "name": "min_val",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "max_val",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    }
+  ]
+}

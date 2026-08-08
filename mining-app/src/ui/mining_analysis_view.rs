@@ -183,6 +183,11 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
         super::chat_view::render_chat_preview_window(ui, tab);
     }
 
+    // 直方图预览浮动窗口（由算子右键菜单「直方图预览」触发，按 x_col/y_col 渲染柱状图）
+    if let Some(tab) = editor_state.active_tab_mut() {
+        super::histogram_view::render_histogram_preview_window(ui, tab);
+    }
+
     // 新建 / 重命名对话框
     render_dialogs(ui, editor_state);
 

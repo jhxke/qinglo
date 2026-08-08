@@ -430,6 +430,15 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                             tab.chat_preview_node_id = Some(node_id.clone());
                         }
                     }
+                    // 直方图预览：仅对「直方图展示」算子显示。
+                    if op_name.contains("直方图展示")
+                        || op_name.contains("histogram_visualization")
+                        || node.operator_type.as_custom().summary.contains("直方图预览") {
+                        if ui.button("直方图预览").clicked() {
+                            ui.close_menu();
+                            tab.histogram_preview_node_id = Some(node_id.clone());
+                        }
+                    }
                     ui.separator();
 
                     // dynamic_input_ports=true 的节点：提供"新增输入端口"

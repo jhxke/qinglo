@@ -243,6 +243,10 @@ pub struct DagTab {
     /// 由算子右键菜单「聊天预览」触发，读取该节点预览缓存中的首个 String 输出
     /// （DSL流式对话展示算子返回的 chat DSL）并交由 chat_view 解析渲染气泡界面。
     pub chat_preview_node_id: Option<String>,
+    /// 当前打开「直方图预览」浮动窗口的节点 ID；为 None 时窗口关闭。
+    /// 由算子右键菜单「直方图预览」触发，读取该节点预览缓存中的首个 DataFrame
+    /// （直方图展示算子返回的 DataFrame）并按 x_col/y_col/left_col/right_col 渲染柱状图。
+    pub histogram_preview_node_id: Option<String>,
     /// 自定义算子编辑器的 Debug 面板状态 (输入文本与最近一次诊断结果)
     pub custom_op_debug: CustomOperatorDebugState,
     /// 提醒日志：用户点击保存、验证、清空等 UI 操作的直接反馈。
@@ -286,6 +290,7 @@ impl DagTab {
             kline_preview_node_id: None,
             line_chart_preview_node_id: None,
             chat_preview_node_id: None,
+            histogram_preview_node_id: None,
             custom_op_debug: CustomOperatorDebugState {
                 input_text: "1, 2, 3, 4, 5".to_string(),
                 diagnostics: None,

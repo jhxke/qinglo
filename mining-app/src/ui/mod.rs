@@ -3,6 +3,7 @@ pub mod chat_view;
 pub mod code_editor;
 pub mod dag_canvas;
 pub mod data_preview_view;
+pub mod histogram_view;
 pub mod kline_chart_view;
 pub mod line_chart_view;
 pub mod markdown_view;

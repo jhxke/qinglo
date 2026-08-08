@@ -1465,6 +1465,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "future_return_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1802,6 +1812,16 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "histogram_visualization_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "hmac"
@@ -3113,6 +3133,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
+name = "return_histogram_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rfd"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3923,6 +3953,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "volatility_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "waker-fn"

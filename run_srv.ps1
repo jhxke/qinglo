@@ -34,11 +34,15 @@ $operators = @(
     @{ Group = $grpMathOp; Name = "cumsum_operator";     Dir = [char]0x7D2F + [char]0x52A0 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\cumsum_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "shift_add_operator";  Dir = [char]0x524D + [char]0x79FB + [char]0x52A0 + [char]0x7B97 + [char]0x5B50;           Json = "operator\shift_add_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "merge_operator";      Dir = [char]0x6570 + [char]0x636E + [char]0x5408 + [char]0x5E76 + [char]0x7B97 + [char]0x5B50; Json = "operator\merge_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "future_return_operator"; Dir = [char]0x672A + [char]0x6765 + [char]0x6536 + [char]0x76CA + [char]0x7B97 + [char]0x5B50; Json = "operator\future_return_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "volatility_operator";   Dir = [char]0x6CE2 + [char]0x52A8 + [char]0x7387 + [char]0x7B97 + [char]0x5B50;                       Json = "operator\volatility_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "return_histogram_operator"; Dir = [char]0x6536 + [char]0x76CA + [char]0x7387 + [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x7B97 + [char]0x5B50; Json = "operator\return_histogram_operator\operator.json" }
 
     # ===== visualization =====
     @{ Group = $grpViz; Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\kline_visualization_operator\operator.json" }
     @{ Group = $grpViz; Name = "line_chart_operator";           Dir = [char]0x6298 + [char]0x7EBF + [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50; Json = "operator\line_chart_operator\operator.json" }
     @{ Group = $grpViz; Name = "chat_visualization_operator";   Dir = "DSL" + [char]0x5BF9 + [char]0x8BDD + [char]0x5C55 + [char]0x793A + [char]0x7B97 + [char]0x5B50;        Json = "operator\chat_visualization_operator\operator.json" }
+    @{ Group = $grpViz; Name = "histogram_visualization_operator"; Dir = [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x5C55 + [char]0x793A + [char]0x7B97 + [char]0x5B50;     Json = "operator\histogram_visualization_operator\operator.json" }
 
     # ===== large model =====
     @{ Group = $grpLLM; Name = "ollama_operator"; Dir = "Ollama" + [char]0x7B97 + [char]0x5B50; Json = "operator\ollama_operator\operator.json" }
