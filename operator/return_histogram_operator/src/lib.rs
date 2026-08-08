@@ -467,9 +467,17 @@ fn collect_filtered_values(
     Ok(all_values)
 }
 
-/// 构建直方图 DataFrame
+/// 构建直方图 DataFrame（以 0 为中心向两边对称分箱）
+///
+/// 分箱策略：
+/// - 负值部分：从 0 向左分 `neg_bins` 个箱，范围 `[-neg_bins*bin_width, 0)`
+/// - 正值部分：从 0 向右分 `pos_bins` 个箱，范围 `[0, pos_bins*bin_width)`
+/// - 两侧使用相同的 `bin_width`，保证刻度对称
+/// - bin_index 顺序：先负值箱（最靠左开始），后正值箱（从 0 向右）
+/// - 新增列 `sign` (Int64)：-1 表示负值侧，1 表示正值侧（0 值归到正值侧第一个箱，sign=1）
+///
 /// 列: bin_index(Int64), bin_left(Float64), bin_right(Float64),
-///     bin_center(Float64), count(Int64), frequency(Float64)
+///     bin_center(Float64), count(Int64), frequency(Float64), sign(Int64)
 fn build_histogram_dataframe(
     values: &[f64],
     bins: usize,
@@ -478,52 +486,89 @@ fn build_histogram_dataframe(
 ) -> DataFrame {
     let mut df = DataFrame::new();
 
-    let (data_min, data_max) = if values.is_empty() {
-        (0.0, 1.0)
+    // ---------- Step 1: 决定负值/正值各自的分箱数 ----------
+    // bins 拆分：偶数则平分；奇数则正值侧多一个（0 归到正值侧）
+    let neg_bins = bins / 2;
+    let pos_bins = bins - neg_bins;
+    let total_bins = neg_bins + pos_bins; // 等于 bins
+
+    // ---------- Step 2: 决定分箱宽度 bin_width（以 0 为中心对称） ----------
+    // 如果用户显式指定了 min/max，取两者绝对值的较大者作为半区间宽度的参考
+    let (abs_data_min, abs_data_max) = if values.is_empty() {
+        (1.0, 1.0)
     } else {
         let mn = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let mx = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        (mn, mx)
+        (mn.abs().max(1e-9), mx.abs().max(1e-9))
     };
 
-    let actual_min = min_opt.unwrap_or(data_min);
-    let actual_max = max_opt.unwrap_or(data_max);
+    // 用户显式边界的绝对值覆盖
+    let user_abs_min = min_opt.map(|v| v.abs().max(1e-9));
+    let user_abs_max = max_opt.map(|v| v.abs().max(1e-9));
+    let abs_lo = user_abs_min.unwrap_or(abs_data_min);
+    let abs_hi = user_abs_max.unwrap_or(abs_data_max);
+    let abs_bound = abs_lo.max(abs_hi);
 
-    // 防止 min == max
-    let (range_min, range_max) = if actual_min == actual_max {
-        (actual_min - 0.5, actual_max + 0.5)
-    } else if actual_min > actual_max {
-        (actual_max, actual_min)
-    } else {
-        (actual_min, actual_max)
-    };
+    // 各侧需要覆盖的绝对值范围 = abs_bound（若数据全正/全负，仍然对称留空另一侧）
+    let side_range = if abs_bound <= 0.0 { 1.0 } else { abs_bound };
 
-    let bin_width = (range_max - range_min) / bins as f64;
+    // 计算 bin_width：使用单侧分箱数多的那一方（保证刚好覆盖 abs_bound）
+    let side_bins_max = neg_bins.max(pos_bins).max(1);
+    let bin_width = side_range / side_bins_max as f64;
+    let bin_width = if bin_width <= 0.0 { 1e-9 } else { bin_width };
+
+    // 实际正负范围（以 0 为中心对称）
+    let neg_total = neg_bins as f64 * bin_width; // 负值侧总宽度
+    let pos_total = pos_bins as f64 * bin_width; // 正值侧总宽度
+    let range_min = -neg_total;
+    let range_max = pos_total;
+
     let total_count = values.len() as f64;
 
-    let mut counts: Vec<i64> = vec![0; bins];
+    // ---------- Step 3: 计数 ----------
+    let mut counts: Vec<i64> = vec![0; total_bins];
 
     if !values.is_empty() && bin_width > 0.0 {
         for &v in values {
             if v < range_min || v > range_max {
                 continue;
             }
-            let mut idx = ((v - range_min) / bin_width).floor() as usize;
-            if idx >= bins {
-                idx = bins - 1;
+            let idx = if v < 0.0 {
+                // 负值侧：[range_min, 0) → idx 0..neg_bins
+                // 第 i 个负值箱 (0-indexed): [ -neg_total + i*bin_width, -neg_total + (i+1)*bin_width )
+                // 简化：从 0 向左看，v 在 [-k*bin_width, -(k-1)*bin_width) → idx = neg_bins - k
+                let from_zero = (-v).min(neg_total);
+                let k = (from_zero / bin_width).floor() as usize;
+                // k=0 → 最接近 0 的负值箱 idx = neg_bins - 1
+                // k=neg_bins-1 → 最左侧负值箱 idx = 0
+                let k = k.min(neg_bins.saturating_sub(1));
+                neg_bins - 1 - k
+            } else {
+                // 正值侧：[0, range_max] → idx neg_bins..total_bins-1
+                let from_zero = v.min(pos_total);
+                let mut k = (from_zero / bin_width).floor() as usize;
+                if k >= pos_bins {
+                    k = pos_bins - 1;
+                }
+                neg_bins + k
+            };
+            if idx < total_bins {
+                counts[idx] += 1;
             }
-            counts[idx] += 1;
         }
     }
 
-    let mut bin_index_col: Vec<Option<i64>> = Vec::with_capacity(bins);
-    let mut bin_left_col: Vec<Option<f64>> = Vec::with_capacity(bins);
-    let mut bin_right_col: Vec<Option<f64>> = Vec::with_capacity(bins);
-    let mut bin_center_col: Vec<Option<f64>> = Vec::with_capacity(bins);
-    let mut count_col: Vec<Option<i64>> = Vec::with_capacity(bins);
-    let mut freq_col: Vec<Option<f64>> = Vec::with_capacity(bins);
+    // ---------- Step 4: 构造各列 ----------
+    let mut bin_index_col: Vec<Option<i64>> = Vec::with_capacity(total_bins);
+    let mut bin_left_col: Vec<Option<f64>> = Vec::with_capacity(total_bins);
+    let mut bin_right_col: Vec<Option<f64>> = Vec::with_capacity(total_bins);
+    let mut bin_center_col: Vec<Option<f64>> = Vec::with_capacity(total_bins);
+    let mut count_col: Vec<Option<i64>> = Vec::with_capacity(total_bins);
+    let mut freq_col: Vec<Option<f64>> = Vec::with_capacity(total_bins);
+    let mut sign_col: Vec<Option<i64>> = Vec::with_capacity(total_bins);
 
-    for i in 0..bins {
+    // 负值箱：先从最左 (range_min) 开始，idx 0..neg_bins
+    for i in 0..neg_bins {
         let left = range_min + (i as f64) * bin_width;
         let right = left + bin_width;
         let center = (left + right) / 2.0;
@@ -536,6 +581,24 @@ fn build_histogram_dataframe(
         bin_center_col.push(Some(center));
         count_col.push(Some(cnt));
         freq_col.push(Some(freq));
+        sign_col.push(Some(-1));
+    }
+    // 正值箱：从 0 开始，idx neg_bins..total_bins-1
+    for j in 0..pos_bins {
+        let i = neg_bins + j;
+        let left = 0.0 + (j as f64) * bin_width;
+        let right = left + bin_width;
+        let center = (left + right) / 2.0;
+        let cnt = counts[i];
+        let freq = if total_count > 0.0 { cnt as f64 / total_count } else { 0.0 };
+
+        bin_index_col.push(Some(i as i64));
+        bin_left_col.push(Some(left));
+        bin_right_col.push(Some(right));
+        bin_center_col.push(Some(center));
+        count_col.push(Some(cnt));
+        freq_col.push(Some(freq));
+        sign_col.push(Some(1));
     }
 
     df.add_column(DataFrame::new_int64_column("bin_index", bin_index_col));
@@ -544,6 +607,13 @@ fn build_histogram_dataframe(
     df.add_column(DataFrame::new_float64_column("bin_center", bin_center_col));
     df.add_column(DataFrame::new_int64_column("count", count_col));
     df.add_column(DataFrame::new_float64_column("frequency", freq_col));
+    df.add_column(DataFrame::new_int64_column("sign", sign_col));
+
+    // 用于 debug：打印分箱概览
+    println!(
+        "收益率直方图算子: 分箱统计(以0为中心) bins={}(neg={},pos={}), bin_width={}, 范围=[{}, {}]",
+        bins, neg_bins, pos_bins, bin_width, range_min, range_max
+    );
 
     df
 }

@@ -181,34 +181,123 @@ fn test_collect_filtered_values_null_value_skipped() {
 }
 
 #[test]
-fn test_build_histogram_simple() {
-    // 10 个样本：[0,1,2,3,4,5,6,7,8,9]，bins=5
-    // 期望分箱: [0,2) [2,4) [4,6) [6,8) [8,10]
-    // counts: 2, 2, 2, 2, 2
-    let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
-    let df = build_histogram_dataframe(&values, 5, None, None);
-    assert_eq!(df.row_count, 5);
-    assert_eq!(df.col_count(), 6);
+fn test_build_histogram_symmetric_pos_and_neg() {
+    // 正负混合样本，bins=4：neg_bins=2, pos_bins=2
+    // 数据: [-6, -4, -3, -1, 0, 1, 2, 4, 5, 7]
+    // data_min=-6, data_max=7 → abs_bound = max(6,7)=7
+    // side_bins_max = max(2,2) = 2 → bin_width = 7/2 = 3.5
+    // 负值侧（2 箱）: [-7, -3.5), [-3.5, 0)
+    //   idx 0: [-7, -3.5) → -6, -4 → count=2
+    //   idx 1: [-3.5, 0)  → -3, -1 → count=2
+    // 正值侧（2 箱）: [0, 3.5), [3.5, 7]
+    //   idx 2: [0, 3.5)  → 0,1,2 → count=3
+    //   idx 3: [3.5, 7]  → 4,5,7 → count=3
+    let values = vec![-6.0, -4.0, -3.0, -1.0, 0.0, 1.0, 2.0, 4.0, 5.0, 7.0];
+    let df = build_histogram_dataframe(&values, 4, None, None);
+    assert_eq!(df.row_count, 4);
+    // 必须存在新增的 sign 列，总共 7 列
+    assert_eq!(df.col_count(), 7);
+    assert!(df.column("sign").is_some());
 
     let count_col = df.column("count").unwrap();
-    assert_eq!(count_col.get_i64(0), Some(2));
-    assert_eq!(count_col.get_i64(1), Some(2));
-    assert_eq!(count_col.get_i64(2), Some(2));
-    assert_eq!(count_col.get_i64(3), Some(2));
-    assert_eq!(count_col.get_i64(4), Some(2));
+    // 负值 2 箱
+    assert_eq!(count_col.get_i64(0), Some(2)); // -6, -4
+    assert_eq!(count_col.get_i64(1), Some(2)); // -3, -1
+    // 正值 2 箱
+    assert_eq!(count_col.get_i64(2), Some(3)); // 0,1,2
+    assert_eq!(count_col.get_i64(3), Some(3)); // 4,5,7
 
-    // 验证频率 = 2/10 = 0.2
-    let freq_col = df.column("frequency").unwrap();
-    for i in 0..5 {
-        let f = freq_col.get_f64(i).unwrap();
-        assert!((f - 0.2).abs() < 1e-12, "第{}箱频率={}，期望0.2", i, f);
-    }
+    // 总数 = 10
+    let total: i64 = (0..4).map(|i| count_col.get_i64(i).unwrap_or(0)).sum();
+    assert_eq!(total, 10);
 
-    // 验证边界
+    // sign 列：负值侧 -1，正值侧 1
+    let sign_col = df.column("sign").unwrap();
+    assert_eq!(sign_col.get_i64(0), Some(-1));
+    assert_eq!(sign_col.get_i64(1), Some(-1));
+    assert_eq!(sign_col.get_i64(2), Some(1));
+    assert_eq!(sign_col.get_i64(3), Some(1));
+
+    // bin_center：负值箱中心应为负，正值箱中心应为正
+    let center_col = df.column("bin_center").unwrap();
+    assert!(center_col.get_f64(0).unwrap() < 0.0);
+    assert!(center_col.get_f64(1).unwrap() < 0.0);
+    assert!(center_col.get_f64(2).unwrap() >= 0.0);
+    assert!(center_col.get_f64(3).unwrap() > 0.0);
+
+    // 正值第一个箱 left = 0
     let left_col = df.column("bin_left").unwrap();
-    let right_col = df.column("bin_right").unwrap();
-    assert!((left_col.get_f64(0).unwrap() - 0.0).abs() < 1e-12);
-    assert!((right_col.get_f64(4).unwrap() - 9.0).abs() < 1e-12);
+    assert!((left_col.get_f64(2).unwrap() - 0.0).abs() < 1e-9);
+
+    // 频率之和 ≈ 1.0
+    let freq_col = df.column("frequency").unwrap();
+    let total_freq: f64 = (0..4).map(|i| freq_col.get_f64(i).unwrap_or(0.0)).sum();
+    assert!((total_freq - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_build_histogram_all_positive_still_symmetric() {
+    // 全正值数据：也应保留负值侧分箱（虽然都是 0 count）
+    // 数据: [1,2,3,4,5,6,7,8,9,10], bins=4
+    // abs_bound=10, side_bins_max=2 → bin_width=5
+    // 负值 2 箱: [-10,-5), [-5,0) → count=0
+    // 正值 2 箱: [0,5), [5,10]
+    //   idx2: 1,2,3,4 → 4
+    //   idx3: 5,6,7,8,9,10 → 6  (10 越界修正到最后一箱)
+    let values: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+    let df = build_histogram_dataframe(&values, 4, None, None);
+    assert_eq!(df.row_count, 4);
+
+    let count_col = df.column("count").unwrap();
+    assert_eq!(count_col.get_i64(0), Some(0)); // 负值箱
+    assert_eq!(count_col.get_i64(1), Some(0)); // 负值箱
+    assert_eq!(count_col.get_i64(2), Some(4)); // [0,5) → 1,2,3,4
+    assert_eq!(count_col.get_i64(3), Some(6)); // [5,10] → 5..10
+
+    let sign_col = df.column("sign").unwrap();
+    assert_eq!(sign_col.get_i64(0), Some(-1));
+    assert_eq!(sign_col.get_i64(1), Some(-1));
+    assert_eq!(sign_col.get_i64(2), Some(1));
+    assert_eq!(sign_col.get_i64(3), Some(1));
+}
+
+#[test]
+fn test_build_histogram_odd_bins_pos_gets_one_more() {
+    // bins=5 (奇数) → neg_bins=2, pos_bins=3
+    // 数据: [-3, -1, 0, 2, 4, 6, 8]
+    // data 绝对值: min=0→1e-9, max=8 → abs_bound=8
+    // side_bins_max = max(2,3) = 3 → bin_width = 8/3 ≈ 2.666...
+    // 负值侧 2 箱: [-16/3, -8/3), [-8/3, 0)
+    //   idx 0: [-5.33, -2.67) → -3 → count=1
+    //   idx 1: [-2.67, 0)    → -1 → count=1
+    // 正值侧 3 箱: [0, 8/3), [8/3, 16/3), [16/3, 8]
+    //   idx 2: [0, 2.67)   → 0, 2 → count=2
+    //   idx 3: [2.67, 5.33) → 4 → count=1
+    //   idx 4: [5.33, 8]   → 6, 8 → count=2
+    let values = vec![-3.0, -1.0, 0.0, 2.0, 4.0, 6.0, 8.0];
+    let df = build_histogram_dataframe(&values, 5, None, None);
+    assert_eq!(df.row_count, 5);
+
+    let count_col = df.column("count").unwrap();
+    // 负值侧合计 2
+    assert_eq!(
+        count_col.get_i64(0).unwrap_or(0) + count_col.get_i64(1).unwrap_or(0),
+        2
+    );
+    // 正值侧合计 5
+    let pos_total: i64 = (2..5).map(|i| count_col.get_i64(i).unwrap_or(0)).sum();
+    assert_eq!(pos_total, 5);
+    // 总数 7
+    let total: i64 = (0..5).map(|i| count_col.get_i64(i).unwrap_or(0)).sum();
+    assert_eq!(total, 7);
+
+    // sign 列 2 个 -1 + 3 个 1
+    let sign_col = df.column("sign").unwrap();
+    assert_eq!(sign_col.get_i64(0), Some(-1));
+    assert_eq!(sign_col.get_i64(1), Some(-1));
+    assert_eq!(sign_col.get_i64(2), Some(1));
+    assert_eq!(sign_col.get_i64(3), Some(1));
+    assert_eq!(sign_col.get_i64(4), Some(1));
 }
 
 #[test]
@@ -221,47 +310,36 @@ fn test_build_histogram_empty_values() {
     for i in 0..10 {
         assert_eq!(count_col.get_i64(i), Some(0));
     }
+    // 7 列含 sign
+    assert_eq!(df.col_count(), 7);
+    assert!(df.column("sign").is_some());
 }
 
 #[test]
 fn test_build_histogram_single_value() {
-    // min==max，会自动扩展边界
+    // 单值全为 5.0 → bins=5 → neg_bins=2, pos_bins=3
+    // abs_bound=5, side_bins_max=3 → bin_width=5/3≈1.6667
+    // 10 个样本都等于 5.0，应该落入正值侧最后一箱
     let values = vec![5.0; 10];
     let df = build_histogram_dataframe(&values, 5, None, None);
-    // 10 个样本全部落入中间某个箱，count 之和应为 10
+    // 10 个样本全部落入若干正值箱，count 之和应为 10
     let count_col = df.column("count").unwrap();
     let total: i64 = (0..5).map(|i| count_col.get_i64(i).unwrap_or(0)).sum();
     assert_eq!(total, 10);
 }
 
 #[test]
-fn test_build_histogram_with_custom_range() {
-    // 样本值 0..10 = [0,1,2,3,4,5,6,7,8,9]
-    // 自定义范围 [2, 8), bins=3, bin_width=2
-    // 箱0: [2,4)  → 值 2,3   → count=2
-    // 箱1: [4,6)  → 值 4,5   → count=2
-    // 箱2: [6,8]  → 值 6,7,8 → count=3  (v=8 <= 8 且 (8-6)/2=1 → floor=1 越界→最后一箱)
-    // 值 0,1,9  越界被丢弃
-    let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
-    let df = build_histogram_dataframe(&values, 3, Some(2.0), Some(8.0));
-    assert_eq!(df.row_count, 3);
-    let count_col = df.column("count").unwrap();
-    assert_eq!(count_col.get_i64(0), Some(2));
-    assert_eq!(count_col.get_i64(1), Some(2));
-    assert_eq!(count_col.get_i64(2), Some(3));
-}
-
-#[test]
 fn test_build_histogram_bin_columns_exist() {
-    let values = vec![1.0, 2.0, 3.0];
+    let values = vec![-1.0, 0.0, 1.0];
     let df = build_histogram_dataframe(&values, 2, None, None);
-    // 必须存在这 6 列
+    // 必须存在这 7 列（含 sign）
     assert!(df.column("bin_index").is_some());
     assert!(df.column("bin_left").is_some());
     assert!(df.column("bin_right").is_some());
     assert!(df.column("bin_center").is_some());
     assert!(df.column("count").is_some());
     assert!(df.column("frequency").is_some());
+    assert!(df.column("sign").is_some());
     // bin_index 是 0 基编号
     let idx_col = df.column("bin_index").unwrap();
     assert_eq!(idx_col.get_i64(0), Some(0));

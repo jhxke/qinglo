@@ -16,15 +16,25 @@ use crate::data_preview;
 
 // =============================== 配色与常量 ===============================
 
-/// 柱子主色（浅蓝绿，直方图算子 color=[52,152,219] 的柔和变体）。
-const BAR_COLOR: Color32 = Color32::from_rgb(52, 152, 219);
-/// 柱子悬停高亮色（更亮）。
-fn bar_hover_color() -> Color32 {
+/// 正值柱子主色（蓝绿，与直方图算子 color=[52,152,219] 一致）。
+const BAR_POSITIVE: Color32 = Color32::from_rgb(52, 152, 219);
+/// 正值柱子悬停高亮色。
+fn bar_positive_hover() -> Color32 {
     Color32::from_rgb(80, 180, 240)
+}
+/// 负值柱子主色（红橙，代表负收益）。
+const BAR_NEGATIVE: Color32 = Color32::from_rgb(231, 76, 60);
+/// 负值柱子悬停高亮色。
+fn bar_negative_hover() -> Color32 {
+    Color32::from_rgb(250, 110, 90)
 }
 /// 十字光标颜色（半透明白）。
 fn crosshair_color() -> Color32 {
     Color32::from_rgba_unmultiplied(255, 255, 255, 90)
+}
+/// 0 分界竖线颜色（醒目的黄/白色）。
+fn zero_line_color() -> Color32 {
+    Color32::from_rgb(241, 196, 15)
 }
 /// 单图表交互态（滚动位置 + 可见数量）。
 #[derive(Clone, Copy, Default)]
@@ -240,6 +250,20 @@ fn render_histogram_chart(ui: &mut Ui, df: &DataFrame, params: &HistogramParams,
         _ => (0..n).map(|i| Some(i as f64)).collect(),
     };
 
+    // 提取 sign 列（-1=负值侧，1=正值侧；缺失则回退用 bin_center 正负判断）
+    let sign_values: Vec<Option<i64>> = match df.column("sign") {
+        Some(col) if matches!(col.data_type, DataType::Int64) => {
+            (0..n).map(|i| col.get_i64(i)).collect()
+        }
+        _ => {
+            // 回退：用 bin_center/x_values 的正负推断
+            x_values
+                .iter()
+                .map(|opt_x| opt_x.and_then(|x| if x < 0.0 { Some(-1) } else { Some(1) }))
+                .collect()
+        }
+    };
+
     // 提取左右边界列（用于 tooltip，缺失用 None 标记）
     let left_values: Vec<Option<f64>> = match df.column(&params.left_col) {
         Some(col) if matches!(col.data_type, DataType::Float64) => {
@@ -346,6 +370,43 @@ fn render_histogram_chart(ui: &mut Ui, df: &DataFrame, params: &HistogramParams,
     // ---- 背景 ----
     painter.rect_filled(plot_rect, 0.0, super::theme::CANVAS_BG);
 
+    // ---- 0 分界竖线（正值第一个箱的左侧，即 left=0 的箱） ----
+    // 找到正值起始箱：第一个 sign=1 的 bin；若没有显式 sign 列则找 bin_center>=0 且最靠左的
+    let mut zero_line_x: Option<f32> = None;
+    for i in 0..n {
+        let sign = sign_values.get(i).copied().flatten();
+        let left = left_values.get(i).copied().flatten();
+        let is_positive_start = match sign {
+            Some(s) => s == 1 && i.checked_sub(1).map(|prev| sign_values.get(prev).copied().flatten() != Some(1)).unwrap_or(true),
+            None => {
+                // 回退：找到第一个 bin_left 最接近 0 且 >=0 的
+                left.map(|l| l.abs() < 1e-12).unwrap_or(false)
+            }
+        };
+        if is_positive_start && i >= state.first_visible && i < end {
+            zero_line_x = Some(x_of_bin_left(i));
+            break;
+        }
+    }
+    // 如果上面没找到（正值起始箱不在可视区间），尝试从 left_values 找 0 边界
+    if zero_line_x.is_none() {
+        for i in 0..n {
+            if let Some(l) = left_values.get(i).copied().flatten() {
+                if l.abs() < 1e-12 && i >= state.first_visible && i < end {
+                    zero_line_x = Some(x_of_bin_left(i));
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(zx) = zero_line_x {
+        let stroke = Stroke::new(2.0, zero_line_color());
+        painter.line_segment(
+            [Pos2::new(zx, plot_rect.top()), Pos2::new(zx, plot_rect.bottom())],
+            stroke,
+        );
+    }
+
     // ---- 水平网格 + Y 轴刻度 ----
     let ticks = nice_ticks(min_y, max_y, 5);
     let grid_stroke = Stroke::new(1.0, super::theme::CANVAS_GRID);
@@ -390,10 +451,22 @@ fn render_histogram_chart(ui: &mut Ui, df: &DataFrame, params: &HistogramParams,
         let bar_top = y_of(y_val);
         let bar_bottom = y_of(0.0);
 
+        // 判断正负侧：优先用 sign 列，否则回退用 x_center 判断
+        let is_negative = match sign_values.get(i).copied().flatten() {
+            Some(s) => s < 0,
+            None => x_values.get(i).copied().flatten().map(|x| x < 0.0).unwrap_or(false),
+        };
+
         let color = if hover_bin_idx == Some(i) {
-            bar_hover_color()
+            if is_negative {
+                bar_negative_hover()
+            } else {
+                bar_positive_hover()
+            }
+        } else if is_negative {
+            BAR_NEGATIVE
         } else {
-            BAR_COLOR
+            BAR_POSITIVE
         };
 
         let bar_rect = Rect::from_min_max(
