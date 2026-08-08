@@ -14,8 +14,11 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
     }
 
     // 左侧建模列表面板（最左，占满全高）
+    // 用 exact_width 而非 default_width：exact_width 每帧强制使用指定宽度，不写入
+    // egui 的面板宽度记忆。这样窗口缩小被 clamp 压缩显示、但不回写 memory，窗口放大
+    // 后仍以 220.0 为准——避免「缩小再放大后宽度不还原」。
     egui::SidePanel::left("models_panel")
-        .default_width(220.0)
+        .exact_width(220.0)
         .frame(
             egui::Frame::none()
                 .fill(super::theme::SIDEBAR_BG)
@@ -35,7 +38,7 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
         .unwrap_or(false);
     if show_op {
         egui::SidePanel::left("operator_panel")
-            .default_width(240.0)
+            .exact_width(240.0)
             .frame(
                 egui::Frame::none()
                     .fill(super::theme::SIDEBAR_BG)
@@ -991,29 +994,144 @@ fn render_operator_panel(ui: &mut Ui, tab: &mut DagTab) {
     }
 }
 
-/// 递归渲染算子分类树（支持任意深度的子分类）
+/// 递归统计分类下（含全部子分类）的算子总数，用于目录头右侧的计数徽章。
+fn count_operators_recursive(category: &OperatorCategory) -> usize {
+    category.operators.len()
+        + category
+            .subcategories
+            .iter()
+            .map(count_operators_recursive)
+            .sum::<usize>()
+}
+
+/// 递归渲染算子分类树（支持任意深度的子分类）。
 ///
-/// 约定：`name` 为空的分类是"根算子"容器（lib_dir 直接下的算子），
-/// 不渲染 CollapsingHeader，直接平铺算子卡片。
+/// 采用自定义目录头以强化「文件夹」语义：左侧旋转箭头 + 文件夹图标 + 分类名，
+/// 右侧计数徽章；默认折叠，点击整行切换展开。约定 `name` 为空的分类是「根算子」
+/// 容器（lib_dir 直接下的算子），不渲染目录头，直接平铺算子卡片。
 fn render_category_tree(ui: &mut Ui, category: &OperatorCategory, tab: &mut DagTab) {
-    // 空名分类：根算子，直接平铺，不渲染分类头
+    // 空名分类：根算子，直接平铺，不渲染目录头
     if category.name.is_empty() && category.subcategories.is_empty() {
         render_operators_filtered(ui, &category.operators, tab);
         return;
     }
 
-    // 正常分类：用 CollapsingHeader 包裹
-    let category_id = format!("cat_{}_{}", category.name, category.subcategories.len());
-    egui::CollapsingHeader::new(category.name.clone())
-        .id_source(category_id)
-        .default_open(true)
-        .show(ui, |ui| {
-            render_operators_filtered(ui, &category.operators, tab);
-            // 递归渲染子分类
-            for subcat in &category.subcategories {
-                render_category_tree(ui, subcat, tab);
-            }
-        });
+    // 目录头持久化 id：用「分类名 + 算子数 + 子分类数」组合，避免同名分类冲突
+    let category_id = format!(
+        "cat_{}_{}_{}",
+        category.name,
+        category.operators.len(),
+        category.subcategories.len()
+    );
+    let id = ui.make_persistent_id(&category_id);
+    // 默认折叠
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+
+    // —— 自定义目录头（整行可点击切换）——
+    let header_h = 26.0;
+    let (header_rect, header_resp) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), header_h),
+        egui::Sense::click(),
+    );
+    if header_resp.clicked() {
+        state.toggle(ui);
+    }
+    let openness = state.openness(ui.ctx());
+    let is_open = openness > 0.5;
+    let hovered = header_resp.hovered();
+
+    let painter = ui.painter();
+    // 行背景：悬停 / 展开时轻微抬升，强化目录层级感
+    let bg_alpha = if is_open { 16 } else if hovered { 12 } else { 0 };
+    if bg_alpha > 0 {
+        painter.add(egui::Shape::rect_filled(
+            header_rect,
+            super::theme::WIDGET_ROUNDING,
+            Color32::from_rgba_unmultiplied(255, 255, 255, bg_alpha),
+        ));
+    }
+
+    // 旋转箭头：折叠时指向右，展开时指向下，随 openness 平滑旋转
+    let arrow_center = egui::pos2(header_rect.min.x + 10.0, header_rect.center().y);
+    let arrow_color = if hovered || is_open {
+        super::theme::TEXT_HOVER
+    } else {
+        super::theme::TEXT_WEAK
+    };
+    paint_chevron(painter, arrow_center, openness, arrow_color);
+
+    // 分类名
+    let name_color = if hovered || is_open {
+        super::theme::TEXT_STRONG
+    } else {
+        super::theme::TEXT_HOVER
+    };
+    painter.text(
+        egui::pos2(header_rect.min.x + 22.0, header_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &category.name,
+        egui::FontId::proportional(13.0),
+        name_color,
+    );
+
+    // 右侧计数徽章：显示该分类（含子分类）下的算子总数
+    let count = count_operators_recursive(category);
+    let count_text = count.to_string();
+    let badge_font = egui::FontId::proportional(10.0);
+    let text_w = ui.fonts(|f| {
+        f.layout_no_wrap(count_text.clone(), badge_font.clone(), Color32::WHITE)
+            .size()
+            .x
+    });
+    let badge_w = text_w.max(8.0) + 8.0;
+    let badge_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            header_rect.max.x - badge_w - 6.0,
+            header_rect.center().y - 7.0,
+        ),
+        Vec2::new(badge_w, 14.0),
+    );
+    painter.add(egui::Shape::rect_filled(
+        badge_rect,
+        7.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+    ));
+    painter.text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        count_text.as_str(),
+        badge_font,
+        super::theme::TEXT_WEAK,
+    );
+
+    // —— 展开内容（含子分类递归）；show_body_indented 自动缩进体现层级 ——
+    state.show_body_indented(&header_resp, ui, |ui| {
+        render_operators_filtered(ui, &category.operators, tab);
+        for subcat in &category.subcategories {
+            render_category_tree(ui, subcat, tab);
+            ui.add_space(1.0);
+        }
+    });
+}
+
+/// 绘制旋转箭头：openness=0 指向右（折叠），openness=1 指向下（展开）。
+fn paint_chevron(painter: &egui::Painter, center: Pos2, openness: f32, color: Color32) {
+    let s = 3.5;
+    let mut points = vec![
+        egui::pos2(center.x - s, center.y - s),
+        egui::pos2(center.x + s, center.y),
+        egui::pos2(center.x - s, center.y + s),
+    ];
+    let rotation = egui::emath::Rot2::from_angle(egui::remap(
+        openness,
+        0.0..=1.0,
+        0.0..=std::f32::consts::TAU / 4.0,
+    ));
+    for p in &mut points {
+        *p = center + rotation * (*p - center);
+    }
+    painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
 /// 按搜索过滤渲染算子列表

@@ -527,10 +527,28 @@ impl DagEditorState {
     /// 删除磁盘建模 + 关闭对应 tab。
     ///
     /// 实际为软删除：磁盘文件由 `<id>.json` 改名为 `<id>.deleted`，可手动恢复。
+    ///
+    /// 注意：关闭 tab 时**不调用** `close_tab`，因为 `close_tab` 内部会先 `save_tab`，
+    /// 那会把刚重命名为 `.deleted` 的文件又重新写回为 `.json`，导致删除失效。
     pub fn delete_model(&mut self, id: &str) {
         dag_store::delete_model(id);
         if let Some(pos) = self.tabs.iter().position(|t| t.model_id == id) {
-            self.close_tab(pos);
+            // 手动移除 tab，跳过 save_tab（否则删除会被覆盖回写）
+            self.tabs.remove(pos);
+            self.active_tab_index = match self.active_tab_index {
+                Some(a) if a == pos => {
+                    if self.tabs.is_empty() {
+                        None
+                    } else if pos >= self.tabs.len() {
+                        Some(self.tabs.len() - 1)
+                    } else {
+                        Some(pos)
+                    }
+                }
+                Some(a) if a > pos => Some(a - 1),
+                Some(a) => Some(a),
+                None => None,
+            };
         }
         self.refresh_models();
     }
