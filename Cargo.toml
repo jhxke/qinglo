@@ -18,6 +18,8 @@ members = [
     "operator/volatility_operator",
     "operator/return_histogram_operator",
     "operator/histogram_visualization_operator",
+    "operator/price_volume_factor_operator",
+    "operator/factor_histogram_operator",
     "operator_executor_client",
     "operator_sdk",
     "operator_runtime_server",

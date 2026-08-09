@@ -36,7 +36,9 @@ $operators = @(
     @{ Group = $grpMathOp; Name = "merge_operator";      Dir = [char]0x6570 + [char]0x636E + [char]0x5408 + [char]0x5E76 + [char]0x7B97 + [char]0x5B50; Json = "operator\merge_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "future_return_operator"; Dir = [char]0x672A + [char]0x6765 + [char]0x6536 + [char]0x76CA + [char]0x7B97 + [char]0x5B50; Json = "operator\future_return_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "volatility_operator";   Dir = [char]0x6CE2 + [char]0x52A8 + [char]0x7387 + [char]0x7B97 + [char]0x5B50;                       Json = "operator\volatility_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "price_volume_factor_operator"; Dir = [char]0x91CF + [char]0x4EF7 + [char]0x56E0 + [char]0x5B50 + [char]0x7B97 + [char]0x5B50; Json = "operator\price_volume_factor_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "return_histogram_operator"; Dir = [char]0x6536 + [char]0x76CA + [char]0x7387 + [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x7B97 + [char]0x5B50; Json = "operator\return_histogram_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "factor_histogram_operator"; Dir = [char]0x56E0 + [char]0x5B50 + [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x7B97 + [char]0x5B50; Json = "operator\factor_histogram_operator\operator.json" }
 
     # ===== visualization =====
     @{ Group = $grpViz; Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\kline_visualization_operator\operator.json" }

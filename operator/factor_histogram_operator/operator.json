@@ -1,0 +1,58 @@
+{
+  "name": "因子直方图算子",
+  "description": "汇总 DataFrameArray 中 (因子列, 收益率列) 同行配对样本，按因子值等宽分箱，每箱统计样本数与收益率均值，输出单 DataFrame 供「直方图展示算子」渲染",
+  "code": "",
+  "color": [22, 160, 133],
+  "summary": "因子值分箱(X轴) → 收益率均值(Y轴)：汇总所有表样本，等宽分箱统计 count + mean_return",
+  "description_md": "# 因子直方图算子\n\n对 **DataFrameArray** 中所有 DataFrame 的每一行，取 `factor_column`（因子列）与 `return_column`（收益率列）的**同行配对值**，汇总后按因子值**等宽分箱**，每个分箱统计：\n\n- `count`：落入该箱的样本数\n- `mean_return`：该箱内收益率列的**统计均值**（即 Y 轴）\n\n最终输出单个 **DataFrame**（行数 = 分箱数），列结构与「直方图展示算子」默认配置 100% 兼容，直接连接即可可视化：**横轴 = 因子值（bin_center），纵轴 = 收益率均值（mean_return）**。\n\n典型场景：因子分析 / IC 验证。将「量价因子算子」输出的因子列与「未来收益算子」输出的收益率列配对，观察「因子值越大的分箱，未来收益均值是否单调递增」，以此评估因子的预测能力。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 包含若干数据表，每个表需含 `factor_column` 与 `return_column` 两列（Float64 或 Int64 类型，Int64 自动提升为 f64）。单个 DataFrame 会被包装为单元素数组处理。\n- **输出**：`output`（DataFrame）—— 单个因子直方图数据表，行数 = `bins`，共 7 列：\n\n| 列名 | 类型 | 说明 |\n| --- | --- | --- |\n| `bin_index` | Int64 | 0 基分箱编号 |\n| `bin_left` | Float64 | 箱左边界（含） |\n| `bin_right` | Float64 | 箱右边界（不含，最后一箱含最大值） |\n| `bin_center` | Float64 | 箱中点 = (left+right)/2（默认 X 轴） |\n| `count` | Int64 | 落入该箱的样本数量 |\n| `frequency` | Float64 | 样本频率 = count / 总样本数 |\n| `mean_return` | Float64 | 该箱收益率均值（默认 Y 轴，可通过 `result_column` 改名） |\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `factor_column` | String | （空） | 因子列名（X 轴分箱依据），Float64 / Int64；为空时报错 -6 |\n| `return_column` | String | （空） | 收益率列名（Y 轴均值统计对象），Float64 / Int64；为空时报错 -6 |\n| `bins` | String | `20` | 分箱数（正整数）；空串回退默认 20；非正整数报错 -6 |\n| `min_val` | String | （空） | 可选因子最小边界；空串自动取所有样本因子值的最小值；小于该值的样本不统计 |\n| `max_val` | String | （空） | 可选因子最大边界；空串自动取所有样本因子值的最大值；大于该值的样本不统计 |\n| `result_column` | String | `mean_return` | 收益率均值列名；与保留列名(bin_index/bin_left/bin_right/bin_center/count/frequency)冲突时自动回退 `mean_return` |\n\n## 分箱规则\n\n- **等宽分箱**：在 `[range_min, range_max]` 上均匀划分 `bins` 个箱，每箱宽度 = (range_max - range_min) / bins。\n- 每箱**左闭右开** `[left, right)`，**最后一箱右闭** `[left, range_max]`（确保最大值不被丢弃）。\n- `range_min` / `range_max`：用户显式指定时优先使用；未指定时自动取所有样本因子值的最小/最大值。\n- 用户边界颠倒时自动对调；`min == max`（零宽度）时自动向两侧各扩展 0.5。\n- 因子值落在 `[range_min, range_max]` 之外的样本（仅当用户收窄边界时发生）不参与统计。\n\n## 空值与非有限值处理\n\n- 因子值或收益率值为**空（None）**的行 → 跳过，不参与分箱与均值统计。\n- 因子值或收益率值为 **Inf / NaN** 的行 → 跳过。\n- 空箱（count=0）的 `mean_return` 为 `None`，前端渲染时柱高为 0。\n\n## 用法示例\n\n### 标准链路（因子分析）\n\n```\n数据源读取器 → 量价因子算子(n=20) → 未来收益算子(n=5) → 因子直方图算子 → 直方图展示算子\n```\n\n1. 「量价因子算子」输出 DataFrameArray（含因子列 `pv_factor_20`）。\n2. 「未来收益算子」在同一表上追加收益率列 `future_return_5`。\n3. 连接到本算子 `input`，配置：\n   - `factor_column = pv_factor_20`\n   - `return_column = future_return_5`\n   - `bins = 10`\n4. 输出 10 行 DataFrame：每行是一个因子分箱的样本数与平均收益。\n5. 连接到「直方图展示算子」，配置 `y_col = mean_return`（X 轴默认 `bin_center`），右键「直方图预览」即可看到**因子分箱 → 平均收益**柱状图。\n\n### 多股票汇总\n\n所有 DataFrame 的样本会被**汇总到同一个直方图**（而非每表一张），适合多股票分组后跨标的统计因子有效性。\n\n## 与「收益率直方图算子」的区别\n\n| 维度 | 收益率直方图算子 | 因子直方图算子（本算子） |\n| --- | --- | --- |\n| X 轴 | 收益率值（以 0 为中心对称分箱） | 因子值（等宽分箱） |\n| Y 轴 | 样本计数 / 频率 | **收益率均值** / 计数 |\n| 用途 | 信号触发后收益分布（胜率评估） | 因子分箱 → 收益单调性（因子有效性评估） |\n| 筛选 | 表达式过滤 | 无（全样本分箱） |\n\n## 注意事项\n\n- `factor_column` / `return_column` 为必填参数，空串报错 -6。\n- 因子列 / 收益率列需为 Float64 或 Int64；Int64 自动提升为 f64；其他类型报错 -8。\n- 所有 DataFrame 的样本汇总到同一直方图，行数 = `bins`（与输入表数量无关）。\n- 输出为**单个 DataFrame**（非 DataFrameArray），直接接「直方图展示算子」即可。\n- 均值采用单遍累加 `sum / count` 实现，时间复杂度 O(n)，不依赖外部统计库，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrame",
+      "default_value": ""
+    },
+    {
+      "name": "factor_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "return_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "bins",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "20"
+    },
+    {
+      "name": "min_val",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "max_val",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "result_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "mean_return"
+    }
+  ]
+}
