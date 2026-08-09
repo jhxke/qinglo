@@ -14,7 +14,7 @@ use operator_executor_client::PortData;
 use serde::{Deserialize, Serialize};
 
 /// 单个节点预览时最多保存/展示的行数。
-pub const MAX_PREVIEW_ROWS: usize = 1000;
+pub const MAX_PREVIEW_ROWS: usize = 200;
 
 /// 节点预览缓存结构（序列化为 JSON 落盘）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +23,7 @@ pub struct PreviewData {
     pub node_id: String,
     /// 算子名称（仅用于展示，缺失时回退到节点 ID）。
     pub node_name: String,
-    /// 各输出端口的数据（已由服务端截断到前 1000 行）。
+    /// 各输出端口的数据（已由服务端截断到前 200 行）。
     pub outputs: Vec<PortData>,
     /// 原始首个 DataFrame 的行数，用于提示「仅展示前 N 行」。
     pub original_row_count: usize,

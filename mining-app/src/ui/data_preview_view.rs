@@ -4,8 +4,10 @@
 //! `egui::Window`，从 `cache/` 目录读取该节点最近一次执行写入的预览数据
 //! （前 [`MAX_PREVIEW_ROWS`] 行）并以表格形式展示。
 //!
-//! 性能注意：浮动窗口最多展示前 [`MAX_GUI_RENDER_ROWS`] 行，避免一次性渲染
-//! 上万 Label 控件导致拖动/缩放卡顿。
+//! 性能注意：
+//! - 浮动窗口最多展示前 [`MAX_GUI_RENDER_ROWS`] 行，避免一次性渲染上万 Label；
+//! - 表格单元格**不挂任何交互事件**（on_hover_text 等）。200 行 × N 列若每个单元
+//!   格都挂 hover 传感器，每帧命中检测开销巨大，会拖慢甚至拖死 UI。
 
 use egui::{Color32, Grid, ScrollArea, Ui};
 use operator_executor_client::{ColumnData, DataFrame, DataType, PortData};
@@ -240,25 +242,24 @@ fn render_dataframe_table(ui: &mut Ui, df: &DataFrame, grid_id: &str) {
                         .spacing(egui::vec2(6.0, 2.0))
                         .show(ui, |ui| {
                             // ---- 表头行（加粗 + 彩色）----
+                            // 不挂任何交互事件：单元格数量大，每个都加 Sense::hover
+                            // 会导致每帧上万次命中检测，拖慢/拖死 UI。
                             for col in &df.columns {
                                 let name = truncate_str(&col.name, 60);
                                 ui.label(
                                     egui::RichText::new(name)
                                         .strong()
                                         .color(Color32::from_rgb(220, 220, 230)),
-                                )
-                                .on_hover_text(col.name.as_str());
+                                );
                             }
                             ui.end_row();
 
                             // ---- 数据行 ----
+                            // 同样不挂交互事件：render_rows × columns 个单元格若每个都
+                            // on_hover_text，会注册海量 hover 传感器，是卡顿/卡死的主因。
                             for row_idx in 0..render_rows {
                                 for col in &df.columns {
-                                    let (text, full) = format_cell_with_overflow(col, row_idx);
-                                    let label = ui.label(text);
-                                    if let Some(full) = full {
-                                        label.on_hover_text(full);
-                                    }
+                                    ui.label(format_cell(col, row_idx));
                                 }
                                 ui.end_row();
                             }
@@ -268,15 +269,17 @@ fn render_dataframe_table(ui: &mut Ui, df: &DataFrame, grid_id: &str) {
     ui.add_space(6.0);
 }
 
-/// 单元格显示截断字符数。超出部分通过 tooltip 展示完整内容，避免把列撑得过宽。
+/// 单元格显示截断字符数。超出部分直接截断（不再挂 tooltip 事件），避免把列撑得过宽。
 const CELL_DISPLAY_CHARS: usize = 80;
 
-/// 将单元格格式化为「显示字符串 + 可选完整字符串」的元组。
-/// - 显示字符串会按 [`CELL_DISPLAY_CHARS`] 截断，并附加省略号；
-/// - 若实际内容比显示的长，`Option::Some` 中返回完整内容供 hover tooltip 使用。
-fn format_cell_with_overflow(col: &ColumnData, idx: usize) -> (String, Option<String>) {
+/// 将单元格格式化为显示字符串（按 [`CELL_DISPLAY_CHARS`] 截断并附加省略号）。
+///
+/// 注意：不再返回完整内容供 tooltip 使用。表格单元格数量可达
+/// `render_rows × columns`（最多 200 × N），为每个单元格挂 `on_hover_text`
+/// 会注册大量 hover 传感器，每帧命中检测开销巨大，是 UI 卡顿/卡死的主因。
+fn format_cell(col: &ColumnData, idx: usize) -> String {
     if col.is_null(idx) {
-        return ("NULL".to_string(), None);
+        return "NULL".to_string();
     }
     let raw = match col.data_type {
         DataType::Float64 => col.get_f64(idx).map(format_float).unwrap_or_default(),
@@ -285,11 +288,7 @@ fn format_cell_with_overflow(col: &ColumnData, idx: usize) -> (String, Option<St
         DataType::Bool => col.get_bool(idx).map(|v| v.to_string()).unwrap_or_default(),
         DataType::Null => "NULL".to_string(),
     };
-    if raw.chars().count() <= CELL_DISPLAY_CHARS {
-        (raw, None)
-    } else {
-        (truncate_str(&raw, CELL_DISPLAY_CHARS), Some(raw))
-    }
+    truncate_str(&raw, CELL_DISPLAY_CHARS)
 }
 
 /// 浮点数格式化：保留 6 位小数并去除无意义尾零，处理特殊值。

@@ -420,7 +420,7 @@ pub fn enable_operator(def: &CustomOperatorDef) -> Result<String, String> {
 /// 到服务端执行，返回完整结果供 UI 线程回填 registry。
 ///
 /// 与「执行 DAG」路径统一：服务端按拓扑序执行整张子图（下游节点不执行）。
-/// 算子间数据在服务端内存中传递（指针语义），响应只回传每个节点的前 1000
+/// 算子间数据在服务端内存中传递（指针语义），响应只回传每个节点的前 200
 /// 行预览 + 真实行数。
 ///
 /// 本函数**不触碰 registry**——registry 由 UI 线程独占，跨线程无法 `&mut`，
@@ -559,7 +559,7 @@ pub(crate) fn apply_dag_node_result(
 ) -> Result<(), String> {
     match nr.execution_result.status {
         OperatorExecutionStatus::Completed => {
-            // 落盘预览缓存（前 1000 行），失败不影响整体结果
+            // 落盘预览缓存（前 200 行），失败不影响整体结果
             if let Err(e) = crate::data_preview::save_preview_from_truncated(
                 &nr.node_id,
                 &nr.operator_name,

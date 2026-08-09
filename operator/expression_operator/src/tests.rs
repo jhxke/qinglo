@@ -59,8 +59,8 @@ fn test_parse_simple_comparison() {
     let ast = parse_expression("ma5 > ma10").unwrap();
     match ast {
         Expr::Binary(BinOp::Gt, a, b) => {
-            assert_eq!(*a, Expr::Column("ma5".to_string()));
-            assert_eq!(*b, Expr::Column("ma10".to_string()));
+            assert_eq!(*a, Expr::Column("ma5".to_string(), 0));
+            assert_eq!(*b, Expr::Column("ma10".to_string(), 0));
         }
         other => panic!("期望 Gt Binary，得到 {:?}", other),
     }
@@ -107,7 +107,10 @@ fn test_parse_unary_negation() {
     let ast = parse_expression("-a").unwrap();
     match ast {
         Expr::Neg(inner) => match &*inner {
-            Expr::Column(name) => assert_eq!(name, "a"),
+            Expr::Column(name, offset) => {
+                assert_eq!(name, "a");
+                assert_eq!(*offset, 0);
+            }
             other => panic!("期望 Column，得到 {:?}", other),
         },
         other => panic!("期望 Neg，得到 {:?}", other),
@@ -399,4 +402,212 @@ fn test_parse_params_partial() {
     let p = parse_params(json);
     assert_eq!(p.column_name, "");
     assert_eq!(p.expression, "close > 0");
+}
+
+// ============ 列偏移语法（[n-k] / [n] / [n+k]）============
+
+#[test]
+fn test_tokenize_brackets() {
+    let tokens = tokenize("close[n-1]").unwrap();
+    assert_eq!(
+        tokens,
+        vec![
+            Token::Ident("close".to_string()),
+            Token::LBracket,
+            Token::Ident("n".to_string()),
+            Token::Minus,
+            Token::Number(1.0),
+            Token::RBracket,
+        ]
+    );
+}
+
+#[test]
+fn test_parse_column_offset_n_minus_1() {
+    let ast = parse_expression("close[n-1]").unwrap();
+    assert_eq!(ast, Expr::Column("close".to_string(), -1));
+}
+
+#[test]
+fn test_parse_column_offset_n_plus_2() {
+    let ast = parse_expression("close[n+2]").unwrap();
+    assert_eq!(ast, Expr::Column("close".to_string(), 2));
+}
+
+#[test]
+fn test_parse_column_offset_plain_n() {
+    let ast = parse_expression("close[n]").unwrap();
+    assert_eq!(ast, Expr::Column("close".to_string(), 0));
+}
+
+#[test]
+fn test_parse_column_offset_zero_default() {
+    let ast = parse_expression("close").unwrap();
+    assert_eq!(ast, Expr::Column("close".to_string(), 0));
+}
+
+#[test]
+fn test_parse_column_offset_n_minus_5() {
+    let ast = parse_expression("ma5[n-5] > ma10[n-3]").unwrap();
+    match ast {
+        Expr::Binary(BinOp::Gt, a, b) => {
+            assert_eq!(*a, Expr::Column("ma5".to_string(), -5));
+            assert_eq!(*b, Expr::Column("ma10".to_string(), -3));
+        }
+        other => panic!("期望 Gt Binary，得到 {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_column_offset_bad_ident_rejected() {
+    // 必须以 n 开头，不能是 m
+    assert!(parse_expression("close[m-1]").is_err());
+}
+
+#[test]
+fn test_parse_column_offset_bad_number_rejected() {
+    // 小数偏移不允许
+    assert!(parse_expression("close[n-1.5]").is_err());
+}
+
+#[test]
+fn test_parse_column_offset_unclosed_rejected() {
+    assert!(parse_expression("close[n-1").is_err());
+}
+
+#[test]
+fn test_parse_column_offset_empty_bracket_rejected() {
+    // [] 不合法，必须至少有 n
+    assert!(parse_expression("close[]").is_err());
+}
+
+#[test]
+fn test_parse_column_offset_bad_content_rejected() {
+    // [n*2] 不合法
+    assert!(parse_expression("close[n*2]").is_err());
+}
+
+#[test]
+fn test_evaluate_offset_n_minus_1() {
+    // close = [10, 20, 30, 40]; 第 2 行（row=2）的 close[n-1] = 20
+    let ast = parse_expression("close[n-1]").unwrap();
+    let cols = make_columns(&[(
+        "close",
+        vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+    )]);
+    assert_eq!(evaluate(&ast, 0, &cols), None); // row=0: n-1 = -1 越界
+    assert_eq!(evaluate(&ast, 1, &cols), Some(10.0));
+    assert_eq!(evaluate(&ast, 2, &cols), Some(20.0));
+    assert_eq!(evaluate(&ast, 3, &cols), Some(30.0));
+}
+
+#[test]
+fn test_evaluate_offset_n_plus_1() {
+    let ast = parse_expression("close[n+1]").unwrap();
+    let cols = make_columns(&[(
+        "close",
+        vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+    )]);
+    assert_eq!(evaluate(&ast, 0, &cols), Some(20.0));
+    assert_eq!(evaluate(&ast, 1, &cols), Some(30.0));
+    assert_eq!(evaluate(&ast, 2, &cols), Some(40.0));
+    assert_eq!(evaluate(&ast, 3, &cols), None); // row=3: n+1 = 4 越界
+}
+
+#[test]
+fn test_evaluate_offset_plain_n() {
+    // close[n] 等价于 close
+    let ast_n = parse_expression("close[n]").unwrap();
+    let ast_plain = parse_expression("close").unwrap();
+    let cols = make_columns(&[(
+        "close",
+        vec![Some(10.0), Some(20.0), None, Some(40.0)],
+    )]);
+    for row in 0..4 {
+        assert_eq!(evaluate(&ast_n, row, &cols), evaluate(&ast_plain, row, &cols));
+    }
+}
+
+#[test]
+fn test_evaluate_mixed_offsets() {
+    // close > close[n-1] * 1.05  (当前收盘价高于昨日 5%)
+    let ast = parse_expression("close > close[n-1] * 1.05").unwrap();
+    let cols = make_columns(&[(
+        "close",
+        vec![Some(100.0), Some(100.0), Some(110.0), Some(105.0), Some(115.0)],
+    )]);
+    // row=0: close[n-1] 越界 → None → 结果 None
+    assert_eq!(evaluate(&ast, 0, &cols), None);
+    // row=1: close=100, close[n-1]=100 → 100 > 100*1.05 = 100>105 → 0
+    assert_eq!(evaluate(&ast, 1, &cols), Some(0.0));
+    // row=2: close=110, close[n-1]=100 → 110 > 100*1.05 = 110>105 → 1
+    assert_eq!(evaluate(&ast, 2, &cols), Some(1.0));
+    // row=3: close=105, close[n-1]=110 → 105 > 110*1.05 = 105>115.5 → 0
+    assert_eq!(evaluate(&ast, 3, &cols), Some(0.0));
+    // row=4: close=115, close[n-1]=105 → 115 > 105*1.05 = 115>110.25 → 1
+    assert_eq!(evaluate(&ast, 4, &cols), Some(1.0));
+}
+
+#[test]
+fn test_evaluate_double_offset() {
+    // (close[n] - close[n-2]) / close[n-2]
+    let ast = parse_expression("(close - close[n-2]) / close[n-2]").unwrap();
+    let cols = make_columns(&[(
+        "close",
+        vec![Some(100.0), Some(105.0), Some(110.0), Some(121.0)],
+    )]);
+    assert_eq!(evaluate(&ast, 0, &cols), None); // n-2 越界
+    assert_eq!(evaluate(&ast, 1, &cols), None); // n-2 越界
+    // row=2: (110-100)/100 = 0.1
+    assert_eq!(evaluate(&ast, 2, &cols), Some(0.1));
+    // row=3: (121-105)/105 ≈ 0.15238...
+    let v = evaluate(&ast, 3, &cols).unwrap();
+    assert!((v - 16.0 / 105.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_apply_expression_with_offset() {
+    let mut df = DataFrame::new();
+    df.add_column(DataFrame::new_float64_column(
+        "close",
+        vec![
+            Some(10.0), // row0
+            Some(20.0), // row1
+            Some(15.0), // row2
+            Some(30.0), // row3
+            Some(25.0), // row4
+        ],
+    ));
+
+    // 今日收盘价高于昨日：close > close[n-1]
+    let ast = parse_expression("close > close[n-1]").unwrap();
+    let out = apply_expression(&df, "up_day", &ast).unwrap();
+    let col = out.column("up_day").unwrap();
+    // row0: close[n-1] 越界 → None → 0
+    assert_eq!(col.get_f64(0), Some(0.0));
+    // row1: 20 > 10 → 1
+    assert_eq!(col.get_f64(1), Some(1.0));
+    // row2: 15 > 20 → 0
+    assert_eq!(col.get_f64(2), Some(0.0));
+    // row3: 30 > 15 → 1
+    assert_eq!(col.get_f64(3), Some(1.0));
+    // row4: 25 > 30 → 0
+    assert_eq!(col.get_f64(4), Some(0.0));
+}
+
+#[test]
+fn test_collect_columns_offset_same_name_dedup() {
+    // 同一列带不同偏移应只收集一次
+    let ast = parse_expression("close > close[n-1] && close < close[n+1]").unwrap();
+    let mut cols = Vec::new();
+    collect_columns(&ast, &mut cols);
+    assert_eq!(cols, vec!["close"]);
+}
+
+#[test]
+fn test_collect_columns_multiple_offsets_multi_cols() {
+    let ast = parse_expression("close[n-1] > open[n-1] && volume[n] > volume[n-2]").unwrap();
+    let mut cols = Vec::new();
+    collect_columns(&ast, &mut cols);
+    assert_eq!(cols, vec!["close", "open", "volume"]);
 }

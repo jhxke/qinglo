@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 
 /// 节点输出预览时最多保留的行数。服务端序列化 DAG 结果时按此截断，
 /// 避免大数据量经网络回传（完整数据保留在服务端内存中供下游算子使用）。
-pub const PREVIEW_ROW_LIMIT: usize = 1000;
+pub const PREVIEW_ROW_LIMIT: usize = 200;
 
 mod base64_bytes {
     use serde::{self, Serialize, Serializer, Deserializer, Deserialize};

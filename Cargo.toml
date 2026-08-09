@@ -20,6 +20,8 @@ members = [
     "operator/histogram_visualization_operator",
     "operator/price_volume_factor_operator",
     "operator/factor_histogram_operator",
+    "operator/highest_operator",
+    "operator/daily_return_operator",
     "operator_executor_client",
     "operator_sdk",
     "operator_runtime_server",

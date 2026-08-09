@@ -58,6 +58,8 @@ enum Token {
     Not,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
 }
 
 /// 将表达式字符串切分为 Token 序列
@@ -95,6 +97,14 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
                 i += 1;
             }
             '>' => {
@@ -192,7 +202,11 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
     Number(f64),
-    Column(String),
+    /// 列引用：(列名, 行偏移量)
+    /// - offset = 0  → close 或 close[n]（当前行）
+    /// - offset = -1 → close[n-1]（上一行）
+    /// - offset = 1  → close[n+1]（下一行）
+    Column(String, i32),
     Neg(Box<Expr>),
     Not(Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
@@ -363,11 +377,85 @@ impl Parser {
         }
     }
 
-    /// primary := number | ident | "(" expr ")"
+    /// 解析列偏移表达式 [n] / [n-k] / [n+k]，返回偏移量 i32
+    /// 前提：已消费 '[' Token，当前 pos 指向 'n'
+    fn parse_column_offset(&mut self) -> Result<i32, String> {
+        // 必须以 'n' 开头（严格匹配小写）
+        match self.advance() {
+            Some(Token::Ident(ref s)) if s == "n" => {}
+            other => return Err(format!("偏移表达式必须以 'n' 开头，得到 {:?}", other)),
+        }
+        // 接下来可能是 ']'（[n]），或 '+/-' 数字后接 ']'（[n±k]）
+        let offset: i32 = match self.peek() {
+            Some(Token::RBracket) => 0,
+            Some(Token::Minus) => {
+                self.advance(); // 消费 '-'
+                match self.advance() {
+                    Some(Token::Number(v)) => {
+                        if v.fract() != 0.0 || v < 0.0 {
+                            return Err(format!(
+                                "偏移表达式仅支持非负整数常数，得到 {}",
+                                v
+                            ));
+                        }
+                        -(v as i32)
+                    }
+                    other => {
+                        return Err(format!(
+                            "偏移表达式 '-' 后应为非负整数常数，得到 {:?}",
+                            other
+                        ))
+                    }
+                }
+            }
+            Some(Token::Plus) => {
+                self.advance(); // 消费 '+'
+                match self.advance() {
+                    Some(Token::Number(v)) => {
+                        if v.fract() != 0.0 || v < 0.0 {
+                            return Err(format!(
+                                "偏移表达式仅支持非负整数常数，得到 {}",
+                                v
+                            ));
+                        }
+                        v as i32
+                    }
+                    other => {
+                        return Err(format!(
+                            "偏移表达式 '+' 后应为非负整数常数，得到 {:?}",
+                            other
+                        ))
+                    }
+                }
+            }
+            other => {
+                return Err(format!(
+                    "偏移表达式 'n' 后应为 ']' 或 '+/-' 整数，得到 {:?}",
+                    other
+                ))
+            }
+        };
+        // 消费结束的 ']'
+        match self.advance() {
+            Some(Token::RBracket) => Ok(offset),
+            other => Err(format!("偏移表达式期望 ']'，得到 {:?}", other)),
+        }
+    }
+
+    /// primary := number | ident ( '[' n (('+'|'-') number)? ']' )? | "(" expr ")"
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.advance() {
             Some(Token::Number(n)) => Ok(Expr::Number(n)),
-            Some(Token::Ident(s)) => Ok(Expr::Column(s)),
+            Some(Token::Ident(s)) => {
+                // 列名后可能紧跟 [n±k] 偏移表达式
+                let offset = if matches!(self.peek(), Some(Token::LBracket)) {
+                    self.advance(); // 消费 '['
+                    self.parse_column_offset()?
+                } else {
+                    0
+                };
+                Ok(Expr::Column(s, offset))
+            }
             Some(Token::LParen) => {
                 let e = self.parse_or()?;
                 match self.advance() {
@@ -397,7 +485,7 @@ fn parse_expression(expr: &str) -> Result<Expr, String> {
 fn collect_columns(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::Number(_) => {}
-        Expr::Column(name) => {
+        Expr::Column(name, _offset) => {
             if !out.contains(name) {
                 out.push(name.clone());
             }
@@ -468,11 +556,17 @@ fn apply_binop(op: BinOp, a: Option<f64>, b: Option<f64>) -> Option<f64> {
 fn evaluate(expr: &Expr, row: usize, columns: &HashMap<String, Vec<Option<f64>>>) -> Option<f64> {
     match expr {
         Expr::Number(n) => Some(*n),
-        Expr::Column(name) => columns
-            .get(name)
-            .and_then(|v| v.get(row))
-            .copied()
-            .flatten(),
+        Expr::Column(name, offset) => {
+            let col = columns.get(name)?;
+            let len = col.len() as i64;
+            // 按 offset 调整行号；越界返回 None（空值传播）
+            let adjusted = (row as i64) + (*offset as i64);
+            if adjusted < 0 || adjusted >= len {
+                None
+            } else {
+                col.get(adjusted as usize).copied().flatten()
+            }
+        }
         Expr::Neg(e) => evaluate(e, row, columns).map(|v| -v),
         Expr::Not(e) => match evaluate(e, row, columns) {
             None => None,
