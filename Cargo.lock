@@ -1403,6 +1403,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "factor_vc_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

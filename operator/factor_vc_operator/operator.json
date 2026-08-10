@@ -1,0 +1,46 @@
+{
+  "name": "量价能量因子算子",
+  "description": "量价能量因子 factor_vc = M + W×S：价格趋势项 M + 位置惩罚 W × 加权量能 S，综合价、量、位置三维信息",
+  "code": "",
+  "color": [155, 89, 182],
+  "summary": "量价能量因子 factor_vc：M(价格趋势) + W(位置惩罚)×S(加权量能)，N 日内统计，默认 N=20",
+  "description_md": "# 量价能量因子算子\n\n对 **DataFrameArray** 中的每一个 DataFrame 计算**量价能量因子 factor_vc**，综合价格趋势、加权量能与位置惩罚三维信息：\n\n```\nM[i] = (Pt[i] - Pavg,N[i]) / Pavg,N[i]\nS[i] = (1/N) × Σ sign(ret[j]) × ln(1 + Vt[j] / Vavg,N[i])\nW[i] = 1 - pos[i]^1.5\npos[i] = (Pt[i] - Ln[i]) / (Hn[i] - Ln[i])\nfactor_vc[i] = M[i] + W[i] × S[i]\n```\n\n其中窗口为 `[i-N+1, i]`（含当日，`min_periods=N`）：\n- `Pt[i]`：当日收盘价（`price_column` 指定列，默认 `close`）\n- `Pavg,N[i]`：过去 N 日收盘价均值\n- `Vt[j]`：窗口内第 j 日成交量（`volume_column` 指定列，默认 `volume`）\n- `Vavg,N[i]`：过去 N 日成交量均值\n- `ret[j]`：第 j 日收益率 `(Pt[j]-Pt[j-1])/Pt[j-1]`（首行 `ret[0]` 为空）\n- `Hn[i]` / `Ln[i]`：过去 N 日收盘价最高 / 最低\n- `pos[i]`：当日价在窗口高低区间的相对位置 ∈ [0,1]\n- `sign(ret[j])`：收益率符号（正取 +1，负取 -1，0 取 0）\n\n## 因子逻辑\n\n- **M（价格趋势项）**：价格相对 N 日均线偏离度。正→多头趋势，负→空头。\n- **S（加权量能项）**：以 `ln(1+Vt/Vavg)` 为量能贡献，按收益方向加权求和后取均值。\n  放量上涨（ret>0 且 Vt>Vavg）→ 正贡献放大；放量下跌（ret<0）→ 负贡献放大。\n  对数压缩避免单日天量主导，且量价同向时 S 显著偏离 0。\n- **W（位置惩罚项）**：`1 - pos^1.5`。价格越接近窗口最高（pos→1），W→0，量能贡献被抑制；\n  价格越接近窗口最低（pos→0），W→1，量能贡献被放大。1.5 次幂使惩罚曲线在高位更陡峭。\n- **factor_vc = M + W×S**：趋势 + 量能，但高位量能打折、低位量能放大。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 每个 DataFrame 需含有 `price_column`（默认 `close`）与 `volume_column`（默认 `volume`）两列。单个 DataFrame 会被包装为单元素数组。\n- **输出**：`output`（DataFrameArray）—— 在每个输入表基础上追加因子列后的数据表数组。\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `n` | String | `20` | 滚动窗口周期（正整数）。空串回退默认 20；非正整数报错 -6 |\n| `price_column` | String | `close` | 收盘价列名。Float64 / Int64 支持 |\n| `volume_column` | String | `volume` | 成交量列名。Float64 / Int64 支持（Int64 会提升为 f64） |\n| `result_column` | String | `factor_vc_{n}` | 结果因子列名。为空时自动取 `factor_vc_20` 等；与源列同名则就地覆盖，否则新增列 |\n\n## 边界规则\n\n| 情形 | 结果 |\n| --- | --- |\n| 前 N-1 行（窗口不足） | `None` |\n| 窗口内任一 close/volume 为空 | `None`（空值传播） |\n| `ret[0]`（首行无前值）为空 → S 窗口含空 | `None`（故因子有效起点为 i=N，比 M/W 晚 1 行） |\n| `Pavg,N == 0` | `None`（避免除零） |\n| `Vavg,N == 0`（窗口成交量全 0） | `None`（避免除零） |\n| `Hn == Ln`（窗口价格恒定） | `None`（pos 分母为 0） |\n| 源列不存在 / 非数值类型 | 跳过并告警，原表不变 |\n\n## 用法示例\n\n1. 数据源读取器按 `ts_code` 分组输出 DataFrameArray（内含 `close` 与 `volume` 列），连接到本算子 `input`。\n2. 默认 `n=20`，追加一列 `factor_vc_20`。\n3. 自定义周期：`n=10`，结果列 `factor_vc_10`。\n4. 自定义列名：`price_column=close`、`volume_column=vol`。\n5. 自定义结果列：`result_column=my_vc`。\n\n## 注意事项\n\n- `n` 默认 20（月线），空时回退 20；非法非正整数报错 -6。\n- `volume_column` 若为 Int64，会自动提升为 f64 计算，结果列为 Float64。\n- 滚动均值/极值采用 O(n) 实现；S 的窗口加权求和为 O(n×N)，对常规周期（N≤60）无性能压力。\n- 不依赖任何外部计算库，DLL 体积小。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "n",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "20"
+    },
+    {
+      "name": "price_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "close"
+    },
+    {
+      "name": "volume_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "volume"
+    },
+    {
+      "name": "result_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    }
+  ]
+}
