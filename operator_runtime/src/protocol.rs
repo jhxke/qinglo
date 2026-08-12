@@ -377,6 +377,43 @@ pub enum RuntimeRequest {
     ExecuteDag {
         /// 完整的 DAG 定义
         dag: DagDefinition,
+        /// 可选 Debug 会话 ID：非空时服务端在执行结束后保留各节点的完整输出
+        /// （不截断、不释放），供客户端通过 [`RuntimeRequest::QueryDebugNodeMeta`] /
+        /// [`RuntimeRequest::QueryDebugNodePage`] 分页查询，便于调试大数据量。
+        /// 客户端离开 Debug 预览页时必须发送 [`RuntimeRequest::EndDebugSession`]
+        /// 释放服务端内存。
+        #[serde(default)]
+        debug_session_id: Option<String>,
+    },
+    /// 查询 Debug 会话中某节点的输出元信息（端口数、各端口类型/行数/页数）。
+    ///
+    /// 服务端必须已通过 [`RuntimeRequest::ExecuteDag`] 携带相同 `session_id` 执行过
+    /// DAG，且该节点执行成功（`Completed`），否则返回空元信息。
+    QueryDebugNodeMeta {
+        session_id: String,
+        node_id: String,
+    },
+    /// 查询 Debug 会话中某节点指定输出端口、指定页的数据。
+    ///
+    /// 分页规则：
+    /// - `DataFrameArray` 端口：`page_idx` 为 DataFrame 下标（0..N），`page_size` 被忽略，
+    ///   返回完整的单个 DataFrame（包成 `PortData::DataFrame`）。
+    /// - `DataFrame` 端口：`page_idx` 为行页号，`page_size` 为每页行数，
+    ///   返回行切片 `[page_idx*page_size, (page_idx+1)*page_size)` 的 `PortData::DataFrame`。
+    /// - 标量端口（Float/Int/String/Bool）：`page_idx` 必须为 0，原样返回该标量。
+    QueryDebugNodePage {
+        session_id: String,
+        node_id: String,
+        port_idx: usize,
+        page_idx: usize,
+        page_size: usize,
+    },
+    /// 结束 Debug 会话，释放服务端缓存的完整 DataFrameArray / DataFrame。
+    ///
+    /// 客户端离开 Debug 预览页（关闭预览窗口、关闭 tab、切换视图、关闭 Debug 模式
+    /// 开关等）时必须发送本请求。会话 ID 不存在时静默成功（幂等）。
+    EndDebugSession {
+        session_id: String,
     },
     /// 独立单节点流式执行（无需组装完整 DAG）。
     ///
@@ -527,5 +564,44 @@ pub enum RuntimeResponse {
         total_count: usize,
         /// 当前返回的起始索引
         start_index: usize,
+    },
+    /// [`RuntimeRequest::QueryDebugNodeMeta`] 的响应：Debug 会话中某节点各输出
+    /// 端口的元信息（类型、行数、页数）。
+    ///
+    /// `port_types` / `port_row_counts` / `port_page_counts` 三个 Vec 等长，
+    /// 顺序与节点输出端口一致。会话或节点不存在时返回三个空 Vec。
+    DebugNodeMeta {
+        request_id: RequestId,
+        session_id: String,
+        node_id: String,
+        /// 各输出端口的类型名（`PortData::type_name()`，如 `DataFrameArray`/`DataFrame`/`String`）
+        port_types: Vec<String>,
+        /// 各端口的总行数（`DataFrameArray` 为各 DataFrame 行数之和；`DataFrame` 为行数；标量为 0）
+        port_row_counts: Vec<usize>,
+        /// 各端口的页数（`DataFrameArray` = DataFrame 个数；`DataFrame` = ceil(row_count/page_size)；标量 = 1）
+        port_page_counts: Vec<usize>,
+    },
+    /// [`RuntimeRequest::QueryDebugNodePage`] 的响应：Debug 会话中某节点指定端口、
+    /// 指定页的数据切片。
+    ///
+    /// `page_data` 永远是 `PortData::DataFrame`（无论原端口是 `DataFrame` 还是
+    /// `DataFrameArray`，服务端都拆出单个 DataFrame 返回），便于客户端复用现有
+    /// `render_dataframe_table` 渲染。标量端口返回原标量包成对应 `PortData`。
+    /// 会话/节点/端口/页号越界时返回 `None`。
+    DebugNodePage {
+        request_id: RequestId,
+        session_id: String,
+        node_id: String,
+        port_idx: usize,
+        page_idx: usize,
+        /// 该页数据（越界或会话/节点不存在时为 None）
+        page_data: Option<PortData>,
+        /// 该页实际行数（标量为 0）
+        row_count: usize,
+    },
+    /// [`RuntimeRequest::EndDebugSession`] 的响应（幂等：会话不存在也返回 Ok）。
+    DebugSessionEnded {
+        request_id: RequestId,
+        session_id: String,
     },
 }

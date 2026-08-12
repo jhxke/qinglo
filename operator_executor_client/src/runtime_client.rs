@@ -89,6 +89,28 @@ pub struct StreamResult {
     pub output_row_count: usize,
 }
 
+/// Debug 会话中某节点各输出端口的元信息（[`RuntimeClient::query_debug_node_meta`] 返回）。
+///
+/// 三个 Vec 等长，顺序与节点输出端口一致。会话或节点不存在时均为空 Vec。
+#[derive(Debug, Clone, Default)]
+pub struct DebugNodeMeta {
+    /// 各端口类型名（`PortData::type_name()`，如 `DataFrameArray`/`DataFrame`/`String`）
+    pub port_types: Vec<String>,
+    /// 各端口总行数（`DataFrameArray` 为各 DataFrame 行数之和；`DataFrame` 为行数；标量为 0）
+    pub port_row_counts: Vec<usize>,
+    /// 各端口页数（`DataFrameArray` = DataFrame 个数；`DataFrame` = ceil(row_count/page_size)；标量 = 1）
+    pub port_page_counts: Vec<usize>,
+}
+
+/// Debug 会话中某节点指定端口、指定页的数据切片（[`RuntimeClient::query_debug_node_page`] 返回）。
+#[derive(Debug, Clone)]
+pub struct DebugNodePage {
+    /// 该页数据（越界或会话/节点不存在时为 None）
+    pub page_data: Option<PortData>,
+    /// 该页实际行数（标量为 0）
+    pub row_count: usize,
+}
+
 /// TCP 客户端（同步阻塞，便于在 GUI 线程中通过 spawn_blocking 调用）
 pub struct RuntimeClient {
     addr: String,
@@ -397,6 +419,24 @@ impl RuntimeClient {
     pub fn execute_dag_streaming<F>(
         &self,
         dag: &DagDefinition,
+        on_event: F,
+    ) -> Result<DagExecutionResult, RuntimeClientError>
+    where
+        F: FnMut(DagStreamEvent),
+    {
+        self.execute_dag_streaming_debug(dag, None, on_event)
+    }
+
+    /// 与 [`Self::execute_dag_streaming`] 相同，但额外可携带 `debug_session_id`。
+    ///
+    /// 非 `None` 时服务端在执行结束后保留各节点完整输出（不截断、不释放），
+    /// 供客户端随后通过 [`Self::query_debug_node_meta`] / [`Self::query_debug_node_page`]
+    /// 分页查询。客户端离开 Debug 预览页时必须调用 [`Self::end_debug_session`]
+    /// 释放服务端内存。
+    pub fn execute_dag_streaming_debug<F>(
+        &self,
+        dag: &DagDefinition,
+        debug_session_id: Option<&str>,
         mut on_event: F,
     ) -> Result<DagExecutionResult, RuntimeClientError>
     where
@@ -404,7 +444,10 @@ impl RuntimeClient {
     {
         self.ensure_connected()?;
 
-        let json = to_string(&RuntimeRequest::ExecuteDag { dag: dag.clone() })?;
+        let json = to_string(&RuntimeRequest::ExecuteDag {
+            dag: dag.clone(),
+            debug_session_id: debug_session_id.map(|s| s.to_string()),
+        })?;
         let mut guard = self.stream.lock().unwrap();
         let stream = guard
             .as_mut()
@@ -603,6 +646,87 @@ impl RuntimeClient {
                     start_index: returned_start,
                 })
             },
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 查询 Debug 会话中某节点各输出端口的元信息（类型、行数、页数）。
+    ///
+    /// 必须先通过 [`Self::execute_dag_streaming_debug`] 携带相同 `session_id` 执行过
+    /// DAG，且目标节点执行成功（`Completed`），否则返回空 [`DebugNodeMeta`]。
+    /// `page_size` 用于 `DataFrame` 端口的页数计算（`ceil(row_count/page_size)`）；
+    /// `DataFrameArray` 端口按 DataFrame 个数计页数；标量端口页数为 1。
+    pub fn query_debug_node_meta(
+        &self,
+        session_id: &str,
+        node_id: &str,
+        page_size: usize,
+    ) -> Result<DebugNodeMeta, RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::QueryDebugNodeMeta {
+            session_id: session_id.to_string(),
+            node_id: node_id.to_string(),
+        })? {
+            RuntimeResponse::DebugNodeMeta { port_types, port_row_counts, port_page_counts, .. } => {
+                // 服务端已用 PREVIEW_ROW_LIMIT 计算 DataFrame 页数；若客户端传不同
+                // page_size，这里重算以保持一致（DataFrameArray / 标量不受影响）。
+                let _ = page_size; // 当前服务端固定用 PREVIEW_ROW_LIMIT，客户端传值仅作未来扩展
+                Ok(DebugNodeMeta {
+                    port_types,
+                    port_row_counts,
+                    port_page_counts,
+                })
+            },
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 查询 Debug 会话中某节点指定输出端口、指定页的数据切片。
+    ///
+    /// 分页规则见 [`RuntimeRequest::QueryDebugNodePage`] 的文档。越界或会话/节点
+    /// 不存在时返回 `page_data = None`。
+    pub fn query_debug_node_page(
+        &self,
+        session_id: &str,
+        node_id: &str,
+        port_idx: usize,
+        page_idx: usize,
+        page_size: usize,
+    ) -> Result<DebugNodePage, RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::QueryDebugNodePage {
+            session_id: session_id.to_string(),
+            node_id: node_id.to_string(),
+            port_idx,
+            page_idx,
+            page_size,
+        })? {
+            RuntimeResponse::DebugNodePage { page_data, row_count, .. } => {
+                Ok(DebugNodePage { page_data, row_count })
+            },
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 结束 Debug 会话，释放服务端缓存的完整 DataFrameArray / DataFrame。
+    ///
+    /// 幂等：会话不存在也返回 Ok。客户端离开 Debug 预览页（关闭预览窗口、关闭 tab、
+    /// 切换视图、关闭 Debug 模式开关等）时必须发送本请求，避免服务端内存泄漏。
+    pub fn end_debug_session(&self, session_id: &str) -> Result<(), RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::EndDebugSession {
+            session_id: session_id.to_string(),
+        })? {
+            RuntimeResponse::DebugSessionEnded { .. } => Ok(()),
             RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
             other => Err(RuntimeClientError::InvalidResponse(format!(
                 "Unexpected response: {:?}",

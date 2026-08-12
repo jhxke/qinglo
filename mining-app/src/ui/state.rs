@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 use egui::{Rect, Vec2};
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
+use operator_executor_client::runtime_client::DebugNodeMeta;
 use crate::dag::{DagGraph, OperatorType, NodeIORegistry, CustomOperatorDef};
 use crate::dag_store::{self, DagModelMeta, DagModelRecord};
 
@@ -200,7 +202,30 @@ impl Default for SettingsState {
     }
 }
 
-/// 单个打开的 DAG 标签页：持有「每图编辑状态」。
+/// Debug 模式下数据预览的分页查询状态。
+///
+/// 当 `DagTab.debug_mode` 为 true 且 `debug_session_id` 为 Some 时，数据预览窗口
+/// 不再读本地缓存文件，而是通过此状态向服务端分页查询完整输出数据。
+/// `meta` 在首次打开预览时从服务端查询一次；`cached_page` 仅缓存最近一次查询的页，
+/// 切换端口/页码时重新查询。预览窗口关闭时整体清空（`debug_preview = None`）。
+#[derive(Default)]
+pub struct DebugPreviewState {
+    /// 当前预览的节点 ID
+    pub node_id: String,
+    /// 服务端返回的节点输出元信息（None 表示尚未查询或查询失败）
+    pub meta: Option<DebugNodeMeta>,
+    /// 当前选中的输出端口索引
+    pub current_port_idx: usize,
+    /// 各端口当前页码（key = port_idx, value = page_idx）
+    pub current_pages: HashMap<usize, usize>,
+    /// 缓存的当前页数据：(port_idx, page_idx, data)
+    /// 仅缓存最近一次查询的页，切换页时重新查询服务端
+    pub cached_page: Option<(usize, usize, Option<PortData>)>,
+    /// 错误信息（查询失败时展示）
+    pub error: Option<String>,
+}
+
+/// 一个打开的 DAG 标签页：持有「每图编辑状态」。
 ///
 /// 多 tab 编辑器中，每个 tab 对应一张独立的 [`DagGraph`] 及其交互状态（选中节点、
 /// 画布偏移、I/O 注册表、运行日志等）。`model_id` 关联磁盘建模文件；`dirty` 标记
@@ -263,6 +288,16 @@ pub struct DagTab {
     pub pending_run_all: bool,
     /// 「运行到此结点」右键菜单待处理标志（外层轮询后触发 spawn_run_up_to）
     pub pending_run_up_to: Option<String>,
+    /// Debug 模式开关：开启后，下一次「执行 DAG」/「运行到此结点」会携带
+    /// `debug_session_id` 下发到服务端，服务端保留各节点完整输出供分页查询。
+    /// 数据预览窗口在 Debug 模式下不读缓存文件，而是直接向服务端查询分页数据。
+    pub debug_mode: bool,
+    /// 当前 Debug 会话 ID（UUID v4）。`Some` 表示服务端有对应会话数据可查；
+    /// `None` 表示尚未在 Debug 模式下执行过，或会话已被 `EndDebugSession` 释放。
+    /// 关闭预览窗口 / 关闭 Debug 模式 / 关闭 tab / 切换视图时必须清理并释放。
+    pub debug_session_id: Option<String>,
+    /// Debug 模式下数据预览的分页查询状态。预览窗口打开时初始化，关闭时清空。
+    pub debug_preview: Option<DebugPreviewState>,
 }
 
 impl DagTab {
@@ -302,6 +337,9 @@ impl DagTab {
             dirty: false,
             pending_run_all: false,
             pending_run_up_to: None,
+            debug_mode: false,
+            debug_session_id: None,
+            debug_preview: None,
         }
     }
 

@@ -44,10 +44,24 @@ struct ExecutionRecord {
     result: OperatorExecutionResult,
 }
 
+/// Debug 会话：保存一次 `ExecuteDag`（携带 `debug_session_id`）执行后各节点的
+/// **完整输出**（不截断），供客户端分页查询。客户端离开 Debug 预览页时必须发送
+/// `EndDebugSession` 释放本会话占用的内存。
+#[allow(dead_code)]
+struct DebugSession {
+    /// 各节点的完整输出（按端口顺序），key = node_id
+    node_outputs: std::collections::HashMap<String, Vec<PortData>>,
+}
+
+/// 客户端 ID 类型
+type ClientId = u64;
+
 /// Runtime 状态
 struct RuntimeState {
     /// 下一个请求 ID
     next_request_id: AtomicU64,
+    /// 下一个客户端 ID
+    next_client_id: AtomicU64,
     /// 已加载的算子
     operators: RwLock<Vec<OperatorEntry>>,
     /// 编译输出目录
@@ -56,21 +70,100 @@ struct RuntimeState {
     lib_dir: PathBuf,
     /// 执行结果注册表（用于状态和日志查询）
     execution_records: RwLock<std::collections::HashMap<String, ExecutionRecord>>,
+    /// Debug 会话注册表：key = session_id（客户端生成的 UUID）
+    debug_sessions: RwLock<std::collections::HashMap<String, DebugSession>>,
+    /// 客户端 -> 该客户端创建的 Debug session_id 列表（用于断开时批量清理）
+    client_debug_sessions: RwLock<std::collections::HashMap<ClientId, Vec<String>>>,
+    /// 客户端 -> 该客户端创建的执行记录 ID 列表（用于断开时批量清理）
+    client_execution_records: RwLock<std::collections::HashMap<ClientId, Vec<String>>>,
 }
 
 impl RuntimeState {
     fn new(compile_dir: PathBuf, lib_dir: PathBuf) -> Self {
         Self {
             next_request_id: AtomicU64::new(1),
+            next_client_id: AtomicU64::new(1),
             operators: RwLock::new(Vec::new()),
             compile_dir,
             lib_dir,
             execution_records: RwLock::new(std::collections::HashMap::new()),
+            debug_sessions: RwLock::new(std::collections::HashMap::new()),
+            client_debug_sessions: RwLock::new(std::collections::HashMap::new()),
+            client_execution_records: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
     fn alloc_request_id(&self) -> RequestId {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// 分配一个新的客户端 ID（连接建立时调用一次）
+    fn alloc_client_id(&self) -> ClientId {
+        let cid = self.next_client_id.fetch_add(1, Ordering::Relaxed);
+        // 提前在映射表中占位，确保后续 register_* 时 key 存在
+        self.client_debug_sessions.write().insert(cid, Vec::new());
+        self.client_execution_records.write().insert(cid, Vec::new());
+        cid
+    }
+
+    /// 注册：某个 Debug session 归属于指定客户端
+    fn register_client_debug_session(&self, client_id: ClientId, session_id: String) {
+        let mut map = self.client_debug_sessions.write();
+        if let Some(sessions) = map.get_mut(&client_id) {
+            sessions.push(session_id);
+        }
+    }
+
+    /// 注册：某条执行记录归属于指定客户端
+    fn register_client_execution_record(&self, client_id: ClientId, id: String) {
+        let mut map = self.client_execution_records.write();
+        if let Some(ids) = map.get_mut(&client_id) {
+            ids.push(id);
+        }
+    }
+
+    /// 清理某客户端占用的全部资源（Debug 会话 + 执行记录）。
+    /// 连接断开时自动调用，无论客户端是否显式发送 EndDebugSession。
+    fn cleanup_client_resources(&self, client_id: ClientId) {
+        // 1. 收集该客户端创建的所有 debug session_id 并清理
+        let debug_session_ids: Vec<String> = self
+            .client_debug_sessions
+            .write()
+            .remove(&client_id)
+            .unwrap_or_default();
+
+        if !debug_session_ids.is_empty() {
+            let mut sessions = self.debug_sessions.write();
+            let n = debug_session_ids.len();
+            for sid in &debug_session_ids {
+                sessions.remove(sid);
+            }
+            drop(sessions);
+            println!(
+                "[runtime] 客户端 #{} 断开：自动回收 {} 个 Debug 会话 ({:?})",
+                client_id, n, debug_session_ids
+            );
+        }
+
+        // 2. 收集该客户端创建的所有 execution record id 并清理
+        let exec_ids: Vec<String> = self
+            .client_execution_records
+            .write()
+            .remove(&client_id)
+            .unwrap_or_default();
+
+        if !exec_ids.is_empty() {
+            let mut records = self.execution_records.write();
+            let n = exec_ids.len();
+            for id in &exec_ids {
+                records.remove(id);
+            }
+            drop(records);
+            println!(
+                "[runtime] 客户端 #{} 断开：自动回收 {} 条执行记录",
+                client_id, n
+            );
+        }
     }
 
     fn find_operator(&self, operator_id: &str) -> Option<PathBuf> {
@@ -96,22 +189,37 @@ impl RuntimeState {
             .retain(|e| e.operator_id != operator_id);
     }
 
-    /// 记录正在执行的状态
-    fn set_executing(&self, id: &str) {
+    /// 记录正在执行的状态。
+    ///
+    /// `client_id` = Some 时，同步将该记录归属到指定客户端（连接断开时自动清理）；
+    /// `client_id` = None 表示无主记录（如内部调用），不参与自动清理。
+    fn set_executing(&self, id: &str, client_id: Option<ClientId>) {
         let mut records = self.execution_records.write();
         records.insert(id.to_string(), ExecutionRecord {
             id: id.to_string(),
             result: OperatorExecutionResult::executing(),
         });
+        drop(records);
+        if let Some(cid) = client_id {
+            self.register_client_execution_record(cid, id.to_string());
+        }
     }
 
-    /// 更新执行结果
-    fn update_execution_result(&self, id: &str, result: OperatorExecutionResult) {
+    /// 更新执行结果。
+    ///
+    /// 若此前 `set_executing` 未注册过 client_id，这里传入 `Some(client_id)` 也会
+    /// 进行一次归属登记（幂等：同一个 id 多次注册仅追加一次列表项，清理时多次
+    /// remove 不影响正确性）。
+    fn update_execution_result(&self, id: &str, result: OperatorExecutionResult, client_id: Option<ClientId>) {
         let mut records = self.execution_records.write();
         records.insert(id.to_string(), ExecutionRecord {
             id: id.to_string(),
             result,
         });
+        drop(records);
+        if let Some(cid) = client_id {
+            self.register_client_execution_record(cid, id.to_string());
+        }
     }
 
     /// 获取执行状态
@@ -130,6 +238,129 @@ impl RuntimeState {
             .get(id)
             .map(|r| r.result.logs.clone())
             .unwrap_or_default()
+    }
+
+    /// 创建或重置一个 Debug 会话。如果同 ID 会话已存在，**先丢弃旧会话**（释放内存）
+    /// 再插入空会话——避免上一次执行的数据残留混入本次结果。
+    fn begin_debug_session(&self, session_id: &str) {
+        let mut sessions = self.debug_sessions.write();
+        sessions.insert(session_id.to_string(), DebugSession {
+            node_outputs: std::collections::HashMap::new(),
+        });
+    }
+
+    /// 把一个节点的完整输出（不截断）写入 Debug 会话。
+    ///
+    /// 在 `execute_dag` 每个节点执行成功后调用。会话不存在时静默跳过（客户端未
+    /// 携带 `debug_session_id` 的正常执行路径不会调用本方法）。
+    fn store_debug_node_outputs(&self, session_id: &str, node_id: &str, outputs: Vec<PortData>) {
+        let mut sessions = self.debug_sessions.write();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.node_outputs.insert(node_id.to_string(), outputs);
+        }
+    }
+
+    /// 结束 Debug 会话，释放服务端内存。会话不存在时静默成功（幂等）。
+    fn end_debug_session(&self, session_id: &str) {
+        let mut sessions = self.debug_sessions.write();
+        sessions.remove(session_id);
+    }
+
+    /// 查询 Debug 会话中某节点的输出元信息（端口数、各端口类型/行数/页数）。
+    ///
+    /// `page_size` 用于 `DataFrame` 端口的页数计算（`ceil(row_count/page_size)`）；
+    /// `DataFrameArray` 端口按 DataFrame 个数计页数；标量端口页数为 1。
+    /// 会话或节点不存在时返回三个空 Vec。
+    fn query_debug_node_meta(
+        &self,
+        session_id: &str,
+        node_id: &str,
+        page_size: usize,
+    ) -> (Vec<String>, Vec<usize>, Vec<usize>) {
+        let sessions = self.debug_sessions.read();
+        let Some(session) = sessions.get(session_id) else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+        let Some(outputs) = session.node_outputs.get(node_id) else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+
+        let mut types = Vec::with_capacity(outputs.len());
+        let mut row_counts = Vec::with_capacity(outputs.len());
+        let mut page_counts = Vec::with_capacity(outputs.len());
+        for pd in outputs {
+            types.push(pd.type_name().to_string());
+            let row_count = pd.first_dataframe_row_count().unwrap_or(0);
+            row_counts.push(row_count);
+            let page_count = match pd {
+                PortData::DataFrameArray(dfs) => dfs.len(),
+                PortData::DataFrame(df) => {
+                    if page_size == 0 {
+                        1
+                    } else {
+                        (df.row_count + page_size - 1) / page_size.max(1)
+                    }
+                }
+                _ => 1,
+            };
+            page_counts.push(page_count);
+        }
+        (types, row_counts, page_counts)
+    }
+
+    /// 查询 Debug 会话中某节点指定输出端口、指定页的数据切片。
+    ///
+    /// 分页规则见 [`RuntimeRequest::QueryDebugNodePage`] 的文档。越界或会话/节点
+    /// 不存在时返回 `(None, 0)`。
+    fn query_debug_node_page(
+        &self,
+        session_id: &str,
+        node_id: &str,
+        port_idx: usize,
+        page_idx: usize,
+        page_size: usize,
+    ) -> (Option<PortData>, usize) {
+        let sessions = self.debug_sessions.read();
+        let Some(session) = sessions.get(session_id) else {
+            return (None, 0);
+        };
+        let Some(outputs) = session.node_outputs.get(node_id) else {
+            return (None, 0);
+        };
+        let Some(pd) = outputs.get(port_idx) else {
+            return (None, 0);
+        };
+
+        match pd {
+            PortData::DataFrameArray(dfs) => {
+                if page_idx >= dfs.len() {
+                    return (None, 0);
+                }
+                let df = &dfs[page_idx];
+                let rc = df.row_count;
+                (Some(PortData::DataFrame(df.clone())), rc)
+            }
+            PortData::DataFrame(df) => {
+                let ps = page_size.max(1);
+                let start = page_idx.checked_mul(ps).unwrap_or(usize::MAX);
+                if start >= df.row_count {
+                    // 越界：返回空 DataFrame（保留列结构），row_count = 0
+                    let empty = df.slice_rows(0, 0);
+                    return (Some(PortData::DataFrame(empty)), 0);
+                }
+                let sliced = df.slice_rows(start, ps);
+                let rc = sliced.row_count;
+                (Some(PortData::DataFrame(sliced)), rc)
+            }
+            other => {
+                // 标量端口：page_idx 必须为 0，原样返回克隆
+                if page_idx == 0 {
+                    (Some(other.clone()), 0)
+                } else {
+                    (None, 0)
+                }
+            }
+        }
     }
 
     /// 扫描 lib 目录，返回层级化的算子列表。
@@ -449,7 +680,8 @@ async fn write_frame(stream: &mut TcpStream, json: &str) -> Result<(), String> {
 }
 
 /// 处理单个请求
-fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeResponse {
+fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest, client_id: ClientId) -> RuntimeResponse {
+    let cid = Some(client_id);
     match request {
         RuntimeRequest::Ping => RuntimeResponse::Pong {
             request_id: 0,
@@ -488,7 +720,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
         } => {
             let request_id = state.alloc_request_id();
             // 先标记为正在执行
-            state.set_executing(&operator_id);
+            state.set_executing(&operator_id, cid);
             let dll_path = match state.find_operator(&operator_id) {
                 Some(p) => p,
                 None => {
@@ -497,7 +729,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
                         format!("算子未加载: {}", operator_id),
                         None,
                     );
-                    state.update_execution_result(&operator_id, exec_result.clone());
+                    state.update_execution_result(&operator_id, exec_result.clone(), cid);
                     return RuntimeResponse::Error {
                         request_id,
                         message: format!("算子未加载: {}", operator_id),
@@ -507,7 +739,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
             let result = execute_dll(&dll_path, &inputs, max_outputs, &params_json, request_id);
             // 更新执行记录
             if let RuntimeResponse::NodeExecuted { ref execution_result, .. } = result {
-                state.update_execution_result(&operator_id, execution_result.clone());
+                state.update_execution_result(&operator_id, execution_result.clone(), cid);
             }
             result
         }
@@ -520,7 +752,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
             let request_id = state.alloc_request_id();
             let exec_id = format!("dll_{}", request_id);
             // 先标记为正在执行
-            state.set_executing(&exec_id);
+            state.set_executing(&exec_id, cid);
             let dll_path_buf = PathBuf::from(&dll_path);
             if !dll_path_buf.exists() {
                 let exec_result = OperatorExecutionResult::failed(
@@ -528,7 +760,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
                     format!("DLL 不存在: {}", dll_path),
                     None,
                 );
-                state.update_execution_result(&exec_id, exec_result);
+                state.update_execution_result(&exec_id, exec_result, cid);
                 return RuntimeResponse::Error {
                     request_id,
                     message: format!("DLL 不存在: {}", dll_path),
@@ -537,7 +769,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
             let result = execute_dll(&dll_path_buf, &inputs, max_outputs, &params_json, request_id);
             // 更新执行记录
             if let RuntimeResponse::NodeExecuted { ref execution_result, .. } = result {
-                state.update_execution_result(&exec_id, execution_result.clone());
+                state.update_execution_result(&exec_id, execution_result.clone(), cid);
             }
             result
         }
@@ -551,12 +783,12 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
             let request_id = state.alloc_request_id();
             let exec_id = format!("compile_{}", request_id);
             // 先标记为正在执行
-            state.set_executing(&exec_id);
+            state.set_executing(&exec_id, cid);
             let runtime_path = match executor::find_runtime_path() {
                 Ok(p) => p,
                 Err(e) => {
                     let exec_result = OperatorExecutionResult::failed(Vec::new(), e.clone(), None);
-                    state.update_execution_result(&exec_id, exec_result);
+                    state.update_execution_result(&exec_id, exec_result, cid);
                     return RuntimeResponse::Error {
                         request_id,
                         message: e,
@@ -575,7 +807,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
                 Ok(outputs) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     let exec_result = OperatorExecutionResult::completed(Vec::new(), duration_ms);
-                    state.update_execution_result(&exec_id, exec_result.clone());
+                    state.update_execution_result(&exec_id, exec_result.clone(), cid);
                     let output_row_count = outputs
                         .iter()
                         .find_map(|p| p.first_dataframe_row_count())
@@ -595,7 +827,7 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
                         e.clone(),
                         Some(duration_ms),
                     );
-                    state.update_execution_result(&exec_id, exec_result);
+                    state.update_execution_result(&exec_id, exec_result, cid);
                     RuntimeResponse::Error {
                         request_id,
                         message: e,
@@ -611,10 +843,13 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
                 categories,
             }
         }
-        RuntimeRequest::ExecuteDag { dag } => {
+        RuntimeRequest::ExecuteDag { dag, debug_session_id } => {
             // 实际由 handle_client 拦截做流式推送，不应到达此处；保留兜底以防遗漏
             let request_id = state.alloc_request_id();
-            let result = execute_dag(&state, &dag, |_| {});
+            if let Some(sid) = &debug_session_id {
+                state.register_client_debug_session(client_id, sid.clone());
+            }
+            let result = execute_dag(&state, &dag, debug_session_id.as_deref(), client_id, |_| {});
             RuntimeResponse::DagExecuted {
                 request_id,
                 result,
@@ -626,6 +861,53 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest) -> RuntimeR
             RuntimeResponse::Error {
                 request_id,
                 message: "ExecuteStream 应由 handle_client 流式处理，不应走单响应路径".to_string(),
+            }
+        }
+        RuntimeRequest::QueryDebugNodeMeta { session_id, node_id } => {
+            let request_id = state.alloc_request_id();
+            // page_size 用 PREVIEW_ROW_LIMIT 计算 DataFrame 端口的页数，与客户端默认一致
+            let (port_types, port_row_counts, port_page_counts) =
+                state.query_debug_node_meta(&session_id, &node_id, PREVIEW_ROW_LIMIT);
+            RuntimeResponse::DebugNodeMeta {
+                request_id,
+                session_id,
+                node_id,
+                port_types,
+                port_row_counts,
+                port_page_counts,
+            }
+        }
+        RuntimeRequest::QueryDebugNodePage {
+            session_id,
+            node_id,
+            port_idx,
+            page_idx,
+            page_size,
+        } => {
+            let request_id = state.alloc_request_id();
+            let (page_data, row_count) = state.query_debug_node_page(
+                &session_id,
+                &node_id,
+                port_idx,
+                page_idx,
+                page_size,
+            );
+            RuntimeResponse::DebugNodePage {
+                request_id,
+                session_id,
+                node_id,
+                port_idx,
+                page_idx,
+                page_data,
+                row_count,
+            }
+        }
+        RuntimeRequest::EndDebugSession { session_id } => {
+            let request_id = state.alloc_request_id();
+            state.end_debug_session(&session_id);
+            RuntimeResponse::DebugSessionEnded {
+                request_id,
+                session_id,
             }
         }
         RuntimeRequest::QueryExecutionStatus { id } => {
@@ -988,6 +1270,7 @@ impl<'a> StreamCtx<'a> {
         plan: &StreamingPlan,
         subgraph_nodes: &[String],
         outputs_map: &mut std::collections::HashMap<String, Vec<SharedPortData>>,
+        client_id: Option<ClientId>,
     ) -> Vec<DagNodeResult> {
         let mut node_results = Vec::new();
         for nid in subgraph_nodes {
@@ -1007,7 +1290,7 @@ impl<'a> StreamCtx<'a> {
                 vec![ExecutionLogEntry::info(format!("流式节点 {} ({}) 执行完成", nid, node.operator_name))],
                 0,
             );
-            state.update_execution_result(nid, exec_result.clone());
+            state.update_execution_result(nid, exec_result.clone(), client_id);
             let nr = DagNodeResult {
                 node_id: nid.clone(),
                 operator_name: node.operator_name.clone(),
@@ -1035,7 +1318,9 @@ fn execute_streaming_subgraph(
     plan: &StreamingPlan,
     outputs_map: &mut std::collections::HashMap<String, Vec<SharedPortData>>,
     on_progress: &mut dyn FnMut(DagEvent),
+    client_id: ClientId,
 ) -> (Vec<DagNodeResult>, Option<String>) {
+    let cid = Some(client_id);
     let mut node_results: Vec<DagNodeResult> = Vec::new();
     let subgraph_set = collect_streaming_subgraph(head_id, plan.streaming_out);
     let subgraph_nodes: Vec<String> = plan
@@ -1114,7 +1399,7 @@ fn execute_streaming_subgraph(
             .collect();
         if let Some(err) = input_err {
             let exec_result = OperatorExecutionResult::failed(Vec::new(), err.clone(), None);
-            state.update_execution_result(&node.id, exec_result.clone());
+            state.update_execution_result(&node.id, exec_result.clone(), cid);
             let nr = DagNodeResult {
                 node_id: node.id.clone(),
                 operator_name: node.operator_name.clone(),
@@ -1133,7 +1418,7 @@ fn execute_streaming_subgraph(
             .cloned()
             .unwrap_or_else(|| PathBuf::from(""));
 
-        state.set_executing(&node.id);
+        state.set_executing(&node.id, cid);
         ctx.emit_node_progress(DagNodeResult {
             node_id: node.id.clone(),
             operator_name: node.operator_name.clone(),
@@ -1148,7 +1433,7 @@ fn execute_streaming_subgraph(
             }
             Err(e) => {
                 let exec_result = OperatorExecutionResult::failed(Vec::new(), e.clone(), None);
-                state.update_execution_result(&node.id, exec_result.clone());
+                state.update_execution_result(&node.id, exec_result.clone(), cid);
                 let nr = DagNodeResult {
                     node_id: node.id.clone(),
                     operator_name: node.operator_name.clone(),
@@ -1220,7 +1505,7 @@ fn execute_streaming_subgraph(
             .map(|n| n.operator_name.clone())
             .unwrap_or_default();
         let exec_result = OperatorExecutionResult::failed(Vec::new(), err.clone(), None);
-        state.update_execution_result(&fail_node, exec_result.clone());
+        state.update_execution_result(&fail_node, exec_result.clone(), cid);
         let nr = DagNodeResult {
             node_id: fail_node.clone(),
             operator_name: op_name,
@@ -1234,7 +1519,7 @@ fn execute_streaming_subgraph(
     }
 
     // ---- (4)(5) 聚合累积输出 + Completed ----
-    node_results.extend(ctx.finalize(state, plan, &subgraph_nodes, outputs_map));
+    node_results.extend(ctx.finalize(state, plan, &subgraph_nodes, outputs_map, cid));
     (node_results, None)
 }
 
@@ -1279,15 +1564,29 @@ fn should_writeback_to_input(output: &PortData, input_rc: &SharedPortData) -> bo
 }
 
 /// 任一节点失败则停止后续执行，已完成的节点结果仍包含在返回值中。
+///
+/// `debug_session_id` 非 None 时，每个执行成功的节点的**完整输出**（不截断）
+/// 会写入 Debug 会话，供客户端随后通过 `QueryDebugNodeMeta` /
+/// `QueryDebugNodePage` 分页查询。会话在执行开始前被（重）置为空，避免上次
+/// 执行的残留数据混入。客户端离开 Debug 预览页时必须发送 `EndDebugSession`
+/// 释放本会话内存。
 fn execute_dag<F>(
     state: &RuntimeState,
     dag: &DagDefinition,
+    debug_session_id: Option<&str>,
+    client_id: ClientId,
     mut on_progress: F,
 ) -> DagExecutionResult
 where
     F: FnMut(DagEvent),
 {
+    let cid = Some(client_id);
     let start = std::time::Instant::now();
+
+    // 进入 Debug 模式：重置会话（同 ID 旧数据先丢弃）
+    if let Some(sid) = debug_session_id {
+        state.begin_debug_session(sid);
+    }
 
     let sorted_ids = match topological_sort_dag(dag) {
         Ok(ids) => ids,
@@ -1435,6 +1734,7 @@ where
                 &plan,
                 &mut outputs_map,
                 &mut on_progress,
+                client_id,
             );
             node_results.extend(sub_results);
             for nid in collect_streaming_subgraph(node_id, &streaming_out) {
@@ -1533,7 +1833,7 @@ where
         let dll_path = node_dll.get(node_id).cloned().unwrap_or_else(|| PathBuf::from(""));
 
         // 标记正在执行
-        state.set_executing(&node.id);
+        state.set_executing(&node.id, cid);
 
         // 推送 Executing 进度帧，让前端实时看到当前运行到哪个算子
         on_progress(DagEvent::NodeProgress(DagNodeResult {
@@ -1575,9 +1875,17 @@ where
         };
 
         // 更新服务端执行记录（供 QueryExecutionStatus/Logs 查询）
-        state.update_execution_result(&node.id, execution_result.clone());
+        state.update_execution_result(&node.id, execution_result.clone(), cid);
 
         let failed = execution_result.status == OperatorExecutionStatus::Failed;
+
+        // Debug 模式：在 outputs 被 move 进 outputs_map 之前，把完整输出克隆一份
+        // 写入 Debug 会话，供客户端随后分页查询。失败节点不写（客户端查询时返回空）。
+        if !failed {
+            if let Some(sid) = debug_session_id {
+                state.store_debug_node_outputs(sid, &node.id, outputs.clone());
+            }
+        }
 
         // 回传给客户端的仅是预览（前 PREVIEW_ROW_LIMIT 行），完整 outputs 保留在服务端
         // 内存中由 outputs_map 传递给下游算子，避免大数据量导致响应超过帧大小上限。
@@ -1686,14 +1994,16 @@ fn run_standalone_stream(
     inputs: &[PortData],
     params_json: &str,
     ev_tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    client_id: ClientId,
 ) {
-    state.set_executing(operator_id);
+    let cid = Some(client_id);
+    state.set_executing(operator_id, cid);
 
     let mut handle = match executor::StreamHandle::start(dll_path, inputs, params_json) {
         Ok(h) => h,
         Err(e) => {
             let exec_result = OperatorExecutionResult::failed(Vec::new(), e.clone(), None);
-            state.update_execution_result(operator_id, exec_result.clone());
+            state.update_execution_result(operator_id, exec_result.clone(), cid);
             let _ = ev_tx.blocking_send(StreamEvent::Done {
                 execution_result: exec_result,
                 final_outputs: Vec::new(),
@@ -1717,7 +2027,7 @@ fn run_standalone_stream(
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let exec_result =
                     OperatorExecutionResult::failed(Vec::new(), e.clone(), Some(duration_ms));
-                state.update_execution_result(operator_id, exec_result.clone());
+                state.update_execution_result(operator_id, exec_result.clone(), cid);
                 let _ = ev_tx.blocking_send(StreamEvent::Done {
                     execution_result: exec_result,
                     final_outputs: Vec::new(),
@@ -1740,7 +2050,7 @@ fn run_standalone_stream(
         ))],
         duration_ms,
     );
-    state.update_execution_result(operator_id, exec_result.clone());
+    state.update_execution_result(operator_id, exec_result.clone(), cid);
     let _ = ev_tx.blocking_send(StreamEvent::Done {
         execution_result: exec_result,
         final_outputs: vec![preview],
@@ -1748,10 +2058,32 @@ fn run_standalone_stream(
     });
 }
 
+/// RAII 守护：客户端连接断开时自动调用 cleanup_client_resources 回收内存。
+///
+/// 无论 handle_client 以何种路径退出（正常 return、读帧错误、写帧失败、panic），
+/// 本 Guard 的 Drop 实现都会被触发，确保该客户端占用的 Debug 会话与执行记录被释放。
+struct ClientResourceGuard {
+    state: Arc<RuntimeState>,
+    client_id: ClientId,
+}
+
+impl Drop for ClientResourceGuard {
+    fn drop(&mut self) {
+        self.state.cleanup_client_resources(self.client_id);
+        println!("[runtime] 客户端 #{} 连接已关闭，资源清理完成", self.client_id);
+    }
+}
+
 /// 处理单个客户端连接
 async fn handle_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
     let peer = stream.peer_addr().ok();
-    println!("[runtime] 客户端连接: {:?}", peer);
+    // 1. 分配客户端 ID + 安装 RAII 守护（任何退出路径都会触发 drop 清理）
+    let client_id = state.alloc_client_id();
+    let _guard = ClientResourceGuard {
+        state: state.clone(),
+        client_id,
+    };
+    println!("[runtime] 客户端 #{} 连接: {:?}", client_id, peer);
 
     loop {
         let frame = match read_frame(&mut stream).await {
@@ -1786,15 +2118,23 @@ async fn handle_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
         // 拦截 ExecuteDag：流式推送节点进度（DagNodeProgress）与流式 chunk
         // （StreamChunk），最后推送终止帧 DagExecuted。其他请求仍走下方
         // spawn_blocking(handle_request) 单响应路径。
-        if let RuntimeRequest::ExecuteDag { dag } = request {
+        if let RuntimeRequest::ExecuteDag { dag, debug_session_id } = request {
             let request_id = state.alloc_request_id();
+            // 2. Debug 会话关联到当前客户端：若携带了 debug_session_id，则在执行前
+            //    注册到 client_id 下，确保客户端中途断开也能被 Guard 回收。
+            if let Some(sid) = &debug_session_id {
+                state.register_client_debug_session(client_id, sid.clone());
+            }
             let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<DagEvent>(32);
             let state_clone = state.clone();
+            // DAG 内所有节点的执行记录也归属于当前 client_id，execute_dag 内部
+            // set_executing/update_execution_result 时会用到。
+            let cid_for_dag = client_id;
 
             // spawn_blocking 跑同步 execute_dag，事件通过 ev_tx.blocking_send 推出；
             // 闭包退出时 ev_tx 随之 drop，async 端 recv 循环将收到 None 而退出。
             let exec_join = tokio::task::spawn_blocking(move || {
-                execute_dag(&state_clone, &dag, |ev| {
+                execute_dag(&state_clone, &dag, debug_session_id.as_deref(), cid_for_dag, |ev| {
                     // 接收端断开（写帧失败）时返回 Err，忽略即可，让 execute_dag 跑完
                     let _ = ev_tx.blocking_send(ev);
                 })
@@ -1884,8 +2224,9 @@ async fn handle_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
             let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<StreamEvent>(32);
             let state_clone = state.clone();
             let op_id = operator_id.clone();
+            let cid_for_stream = client_id;
             let exec_join = tokio::task::spawn_blocking(move || {
-                run_standalone_stream(&state_clone, &dll_path, &op_id, &inputs, &params_json, ev_tx)
+                run_standalone_stream(&state_clone, &dll_path, &op_id, &inputs, &params_json, ev_tx, cid_for_stream)
             });
 
             // async 端：把 StreamEvent 分派为 StreamChunk / StreamCompleted 响应帧
@@ -1935,8 +2276,9 @@ async fn handle_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
         let is_shutdown = matches!(request, RuntimeRequest::Shutdown);
 
         let state_clone = state.clone();
+        let cid_for_req = client_id;
         let response_json = tokio::task::spawn_blocking(move || {
-            let response = handle_request(state_clone, request);
+            let response = handle_request(state_clone, request, cid_for_req);
             to_string(&response).map_err(|e| format!("序列化响应失败: {}", e))
         })
         .await;

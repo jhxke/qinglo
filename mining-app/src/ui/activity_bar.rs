@@ -111,6 +111,10 @@ fn render_activity_button(
     response.on_hover_text(label);
 
     if clicked {
+        // 离开挖掘分析视图时释放所有 Debug 会话，避免服务端内存泄漏
+        if state.current_view == ViewType::MiningAnalysis && view_type != ViewType::MiningAnalysis {
+            super::mining_analysis_view::release_all_debug_sessions(&mut state.dag_editor);
+        }
         state.current_view = view_type;
     }
 }

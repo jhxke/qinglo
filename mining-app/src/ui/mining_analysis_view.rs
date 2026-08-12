@@ -428,6 +428,10 @@ fn render_tab_bar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                                             active_rect = Some(rect);
                                         }
                                         if click_close {
+                                            // 关闭 tab 前释放该 tab 持有的 Debug 会话
+                                            if let Some(tab) = editor_state.tabs.get_mut(i) {
+                                                release_debug_session_sync(tab);
+                                            }
                                             editor_state.close_tab(i);
                                             return;
                                         }
@@ -670,6 +674,74 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
             );
             ui.add_space(gap);
+        }
+
+        // ---- Debug 模式开关（虫子图标，切换后执行 DAG 会保留服务端数据供分页查询）----
+        if has_tab {
+            let debug_on = editor_state.active_tab().map_or(false, |t| t.debug_mode);
+            let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+            let painter = ui.painter();
+            if resp.hovered() {
+                painter.rect_filled(rect, 5.0, hover_bg);
+            }
+            // Debug 模式开启时用橙色高亮背景，关闭时仅描边
+            if debug_on {
+                painter.rect_filled(rect, 5.0, Color32::from_rgba_unmultiplied(255, 165, 0, 40));
+            }
+            // 虫子图标：圆头 + 身体 + 6 条腿
+            let bug_color = if debug_on {
+                Color32::from_rgb(255, 165, 0)
+            } else {
+                Color32::from_rgb(160, 160, 170)
+            };
+            let cx = rect.center().x;
+            let cy = rect.center().y;
+            let s = 4.0; // 缩放因子
+            // 头部（小圆）
+            painter.circle_filled(Pos2::new(cx, cy - s * 1.4), s * 0.5, bug_color);
+            // 身体（椭圆，用圆近似）
+            painter.circle_filled(Pos2::new(cx, cy + s * 0.3), s * 0.9, bug_color);
+            // 腿（左右各 3 条）
+            let stroke = Stroke::new(1.2, bug_color);
+            for i in 0..3 {
+                let y_off = (i as f32 - 1.0) * s * 0.5;
+                let body_y = cy + s * 0.3 + y_off;
+                // 左腿
+                painter.line_segment(
+                    [Pos2::new(cx - s * 0.8, body_y), Pos2::new(cx - s * 1.8, body_y - s * 0.3)],
+                    stroke,
+                );
+                // 右腿
+                painter.line_segment(
+                    [Pos2::new(cx + s * 0.8, body_y), Pos2::new(cx + s * 1.8, body_y - s * 0.3)],
+                    stroke,
+                );
+            }
+            let hover_text = if debug_on {
+                "Debug 模式已开启（点击关闭）：执行后数据保留在服务端，预览支持分页查询"
+            } else {
+                "Debug 模式已关闭（点击开启）：执行后保留服务端数据供分页调试"
+            };
+            resp = resp.on_hover_text(hover_text);
+            if resp.clicked() {
+                if let Some(tab) = editor_state.active_tab_mut() {
+                    tab.debug_mode = !tab.debug_mode;
+                    // 关闭 Debug 模式时立即释放服务端会话
+                    if !tab.debug_mode {
+                        release_debug_session_sync(tab);
+                        tab.debug_preview = None;
+                        tab.add_action_log(
+                            "Debug 模式已关闭，服务端会话已释放".to_string(),
+                            LogLevel::Info,
+                        );
+                    } else {
+                        tab.add_action_log(
+                            "Debug 模式已开启，下次执行将保留服务端数据".to_string(),
+                            LogLevel::Info,
+                        );
+                    }
+                }
+            }
         }
 
         // ---- 执行 DAG（绿色三角形 ▶，主操作，置于末尾）----
@@ -1611,6 +1683,12 @@ fn render_dialogs(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 ui.horizontal(|ui| {
                     if ui.button("确认删除").clicked() {
                         if let Some(id) = editor_state.delete_model_target_id.take() {
+                            // 删除建模前释放对应 tab 持有的 Debug 会话
+                            if let Some(pos) = editor_state.find_tab_by_model(&id) {
+                                if let Some(tab) = editor_state.tabs.get_mut(pos) {
+                                    release_debug_session_sync(tab);
+                                }
+                            }
                             editor_state.delete_model(&id);
                         }
                         editor_state.show_delete_model_dialog = false;
@@ -1645,6 +1723,30 @@ fn format_dag_name() -> String {
     format!("mining_{:02}{:02}{:02}", hh, mm, ss)
 }
 
+/// 同步释放 tab 当前持有的 Debug 会话（若存在）。
+///
+/// 在 UI 线程调用：通过全局 `RUNTIME_CLIENT` 发送 `EndDebugSession`，服务端释放
+/// 对应会话内存。失败仅打印日志（best-effort）——会话 ID 在客户端会被无条件清空，
+/// 即便服务端没收到释放请求，下次同 ID 会话也会被 `begin_debug_session` 覆盖。
+fn release_debug_session_sync(tab: &mut DagTab) {
+    if let Some(sid) = tab.debug_session_id.take() {
+        // 走全局 runtime client 的 best-effort 释放；连接断开等错误仅日志记录
+        let _ = crate::operator_executor::with_runtime_client(|client| {
+            client.end_debug_session(&sid)
+        });
+    }
+}
+
+/// 释放所有 tab 持有的 Debug 会话。
+///
+/// 用于切换视图（离开挖掘分析页）/ 应用退出等场景，避免服务端内存泄漏。
+/// 失败仅打印日志，不阻断调用方流程。
+pub fn release_all_debug_sessions(editor_state: &mut DagEditorState) {
+    for tab in &mut editor_state.tabs {
+        release_debug_session_sync(tab);
+    }
+}
+
 /// 启动后台执行整张 DAG（「执行 DAG」按钮入口）。
 ///
 /// 主线程仅做轻量准备（日志、重置 registry、克隆 graph、建通道），阻塞的
@@ -1659,7 +1761,7 @@ fn spawn_run_all(ctx: &Context, editor_state: &mut DagEditorState) {
         return;
     }
 
-    let (graph_clone, model_id, dag_name) = {
+    let (graph_clone, model_id, dag_name, debug_session_id) = {
         let tab = match editor_state.active_tab_mut() {
             Some(t) => t,
             None => return,
@@ -1675,6 +1777,25 @@ fn spawn_run_all(ctx: &Context, editor_state: &mut DagEditorState) {
         tab.io_registry.clear();
         let dag_name = format_dag_name();
 
+        // Debug 模式：生成新会话 ID，先释放旧会话（若存在）。
+        // 旧会话用同步 TCP 调用释放（快），新会话 ID 存入 tab 供预览窗口查询。
+        let debug_session_id = if tab.debug_mode {
+            release_debug_session_sync(tab);
+            // 清空旧预览状态，下次打开预览时重新查询新会话的 meta
+            tab.debug_preview = None;
+            let sid = uuid::Uuid::new_v4().to_string();
+            tab.debug_session_id = Some(sid.clone());
+            tab.add_runtime_log(
+                format!("Debug 模式已启用，会话 ID: {}", sid),
+                LogLevel::Info,
+            );
+            Some(sid)
+        } else {
+            // 非 Debug 模式也清理可能残留的旧会话
+            release_debug_session_sync(tab);
+            None
+        };
+
         // 记录即将下发到服务端的 DAG 定义 JSON（请求方向），便于排查协议问题。
         // 在 UI 线程内构造一次报文快照，工作线程仍走 execute_dag_on_server 自带的下发流程，
         // 避免修改 operator_executor 的接口；构造为纯内存操作，开销可忽略。
@@ -1689,7 +1810,7 @@ fn spawn_run_all(ctx: &Context, editor_state: &mut DagEditorState) {
         );
 
         tab.add_runtime_log("已将流程下发到服务端解析执行".to_string(), LogLevel::Info);
-        (tab.graph.clone(), tab.model_id.clone(), dag_name)
+        (tab.graph.clone(), tab.model_id.clone(), dag_name, debug_session_id)
     };
 
     let (tx, rx) = mpsc::channel::<DagExecMessage>();
@@ -1697,9 +1818,10 @@ fn spawn_run_all(ctx: &Context, editor_state: &mut DagEditorState) {
 
     std::thread::spawn(move || {
         // 阻塞的 TCP 下发 + 服务端执行在此工作线程完成；流式接收每个节点进度 + chunk
-        let res = crate::operator_executor::execute_dag_on_server_streaming(
+        let res = crate::operator_executor::execute_dag_on_server_streaming_debug(
             &graph_clone,
             &dag_name,
+            debug_session_id.as_deref(),
             |p| {
                 // 每条进度立即推给 UI 线程并唤醒重绘，实现「运行到哪个算子」的实时反馈
                 let _ = tx.send(DagExecMessage::NodeProgress(p.clone()));
@@ -1756,12 +1878,29 @@ pub fn spawn_run_up_to(
         return;
     }
 
-    let (graph_clone, model_id, target) = {
+    let (graph_clone, model_id, target, debug_session_id) = {
         let tab = match editor_state.active_tab_mut() {
             Some(t) => t,
             None => return,
         };
         tab.add_runtime_log(format!("开始运行到节点 {}...", target_node_id), LogLevel::Info);
+
+        // Debug 模式：生成新会话 ID，先释放旧会话（若存在）。
+        let debug_session_id = if tab.debug_mode {
+            release_debug_session_sync(tab);
+            // 清空旧预览状态，下次打开预览时重新查询新会话的 meta
+            tab.debug_preview = None;
+            let sid = uuid::Uuid::new_v4().to_string();
+            tab.debug_session_id = Some(sid.clone());
+            tab.add_runtime_log(
+                format!("Debug 模式已启用，会话 ID: {}", sid),
+                LogLevel::Info,
+            );
+            Some(sid)
+        } else {
+            release_debug_session_sync(tab);
+            None
+        };
 
         // 记录即将下发的子图 DAG 定义 JSON（请求方向）。
         // 与 execute_dag_up_to_detached 内部构造保持一致：取目标节点的上游子图（含自身）。
@@ -1794,7 +1933,7 @@ pub fn spawn_run_up_to(
             }
         }
 
-        (tab.graph.clone(), tab.model_id.clone(), target_node_id.to_string())
+        (tab.graph.clone(), tab.model_id.clone(), target_node_id.to_string(), debug_session_id)
     };
 
     let (tx, rx) = mpsc::channel::<DagExecMessage>();
@@ -1802,9 +1941,10 @@ pub fn spawn_run_up_to(
     let target_for_thread = target.clone();
 
     std::thread::spawn(move || {
-        let res = crate::operator_executor::execute_dag_up_to_detached_streaming(
+        let res = crate::operator_executor::execute_dag_up_to_detached_streaming_debug(
             &graph_clone,
             &target_for_thread,
+            debug_session_id.as_deref(),
             |p| {
                 let _ = tx.send(DagExecMessage::NodeProgress(p.clone()));
                 ctx_clone.request_repaint();

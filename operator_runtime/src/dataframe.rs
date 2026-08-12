@@ -398,6 +398,37 @@ impl DataFrame {
         DataFrame { columns, row_count: n }
     }
 
+    /// 构造包含行范围 `[start, start+count)` 的 DataFrame 副本，用于 Debug 模式分页。
+    ///
+    /// `start` 超过 `row_count` 时返回空 DataFrame（保留列结构）。`count` 自动按
+    /// `row_count - start` 截断。每列通过逐行 `get_*` / `push_*` 重建，避免在
+    /// `ColumnData` 层引入区间切片接口。
+    pub fn slice_rows(&self, start: usize, count: usize) -> DataFrame {
+        if start >= self.row_count || count == 0 {
+            // 保留列结构（列名/类型），行数为 0
+            let columns = self.columns.iter().map(|c| {
+                ColumnData::new(c.name.clone(), c.data_type.clone())
+            }).collect();
+            return DataFrame { columns, row_count: 0 };
+        }
+        let end = (start + count).min(self.row_count);
+        let take = end - start;
+        let new_columns: Vec<ColumnData> = self.columns.iter().map(|c| {
+            let mut new_col = ColumnData::new(c.name.clone(), c.data_type.clone());
+            for i in start..end {
+                match c.data_type {
+                    DataType::Float64 => new_col.push_f64(c.get_f64(i)),
+                    DataType::Int64 => new_col.push_i64(c.get_i64(i)),
+                    DataType::String => new_col.push_string(c.get_string(i)),
+                    DataType::Bool => new_col.push_bool(c.get_bool(i)),
+                    DataType::Null => {}
+                }
+            }
+            new_col
+        }).collect();
+        DataFrame { columns: new_columns, row_count: take }
+    }
+
     /// 按指定列对 DataFrame 行进行排序，返回新的排序后 DataFrame。
     ///
     /// `descending` 为 true 时降序，false 时升序。空值排到末尾。

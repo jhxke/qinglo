@@ -467,6 +467,25 @@ use operator_executor_client::runtime_client::DagStreamEvent;
 pub fn execute_dag_on_server_streaming<F, G>(
     graph: &DagGraph,
     name: &str,
+    on_progress: F,
+    on_chunk: G,
+) -> Result<DagExecutionResult, String>
+where
+    F: FnMut(&DagNodeResult),
+    G: FnMut(&str, &PortData),
+{
+    execute_dag_on_server_streaming_debug(graph, name, None, on_progress, on_chunk)
+}
+
+/// 与 [`execute_dag_on_server_streaming`] 相同，但额外可携带 `debug_session_id`。
+///
+/// 非 `None` 时服务端在执行结束后保留各节点完整输出（不截断、不释放），供客户端
+/// 通过 `RuntimeClient::query_debug_node_meta` / `query_debug_node_page` 分页查询。
+/// 调用方负责在离开 Debug 预览页时调用 `end_debug_session` 释放服务端内存。
+pub fn execute_dag_on_server_streaming_debug<F, G>(
+    graph: &DagGraph,
+    name: &str,
+    debug_session_id: Option<&str>,
     mut on_progress: F,
     mut on_chunk: G,
 ) -> Result<DagExecutionResult, String>
@@ -503,7 +522,7 @@ where
     }
 
     with_runtime_client(|client| {
-        client.execute_dag_streaming(&dag, |ev| match ev {
+        client.execute_dag_streaming_debug(&dag, debug_session_id, |ev| match ev {
             DagStreamEvent::NodeProgress(p) => on_progress(&p),
             DagStreamEvent::StreamChunk { node_id, chunk, .. } => {
                 on_chunk(&node_id, &chunk);
@@ -518,6 +537,21 @@ where
 pub fn execute_dag_up_to_detached_streaming<F, G>(
     graph: &DagGraph,
     target_node_id: &str,
+    on_progress: F,
+    on_chunk: G,
+) -> Result<DagExecutionResult, String>
+where
+    F: FnMut(&DagNodeResult),
+    G: FnMut(&str, &PortData),
+{
+    execute_dag_up_to_detached_streaming_debug(graph, target_node_id, None, on_progress, on_chunk)
+}
+
+/// 与 [`execute_dag_up_to_detached_streaming`] 相同，但额外可携带 `debug_session_id`。
+pub fn execute_dag_up_to_detached_streaming_debug<F, G>(
+    graph: &DagGraph,
+    target_node_id: &str,
+    debug_session_id: Option<&str>,
     mut on_progress: F,
     mut on_chunk: G,
 ) -> Result<DagExecutionResult, String>
@@ -532,7 +566,7 @@ where
     let subset = build_dag_definition_subset(graph, &dag_name, &ancestor_set);
 
     with_runtime_client(|client| {
-        client.execute_dag_streaming(&subset, |ev| match ev {
+        client.execute_dag_streaming_debug(&subset, debug_session_id, |ev| match ev {
             DagStreamEvent::NodeProgress(p) => on_progress(&p),
             DagStreamEvent::StreamChunk { node_id, chunk, .. } => {
                 on_chunk(&node_id, &chunk);

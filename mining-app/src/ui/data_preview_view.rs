@@ -4,6 +4,11 @@
 //! `egui::Window`，从 `cache/` 目录读取该节点最近一次执行写入的预览数据
 //! （前 [`MAX_PREVIEW_ROWS`] 行）并以表格形式展示。
 //!
+//! Debug 模式下（`tab.debug_mode && tab.debug_session_id.is_some()`），预览窗口
+//! 不再读本地缓存，而是直接向服务端分页查询完整输出数据：先查 meta 获取各端口
+//! 的类型/行数/页数，再按用户选择的端口+页码查询实际数据切片。这样可以在不
+//! 截断的情况下浏览大数据量，方便调试。
+//!
 //! 性能注意：
 //! - 浮动窗口最多展示前 [`MAX_GUI_RENDER_ROWS`] 行，避免一次性渲染上万 Label；
 //! - 表格单元格**不挂任何交互事件**（on_hover_text 等）。200 行 × N 列若每个单元
@@ -11,36 +16,56 @@
 
 use egui::{Color32, Grid, ScrollArea, Ui};
 use operator_executor_client::{ColumnData, DataFrame, DataType, PortData};
+use operator_executor_client::runtime_client::DebugNodeMeta;
 
-use super::state::DagTab;
+use super::state::{DagTab, DebugPreviewState};
 use crate::data_preview::{self, PreviewData, MAX_PREVIEW_ROWS};
 
 /// 浮动预览窗口实际渲染的最大行数（服务端截断仍为 MAX_PREVIEW_ROWS）。
 /// 渲染过多 Label 会导致 egui 布局/绘制开销过大，表现为拖动卡顿。
 const MAX_GUI_RENDER_ROWS: usize = 200;
 
+/// Debug 模式下 DataFrame 端口分页的每页行数（与服务端 PREVIEW_ROW_LIMIT 一致）。
+const DEBUG_PAGE_SIZE: usize = 200;
+
 /// 渲染数据预览浮动窗口。`preview_node_id` 为 None 时直接返回。
 pub fn render_data_preview_window(ui: &mut Ui, tab: &mut DagTab) {
     let node_id = match tab.preview_node_id.clone() {
         Some(id) => id,
-        None => return,
+        None => {
+            // 预览窗口关闭时清空 Debug 预览状态，下次打开重新查询
+            tab.debug_preview = None;
+            return;
+        }
     };
 
+    // 判断是否走 Debug 模式预览（服务端分页查询）
+    let debug_active = tab.debug_mode && tab.debug_session_id.is_some();
+    let session_id = tab.debug_session_id.clone();
+
     // 节点可能已被删除：优先用缓存里的名称，其次从图查找，最后回退到 ID。
-    let cache = data_preview::load_preview_cache(&node_id);
+    let cache = if debug_active { None } else { data_preview::load_preview_cache(&node_id) };
     let graph_name = tab
         .graph
         .get_node(&node_id)
         .map(|n| n.operator_type.name().to_string());
-    let node_name = cache
-        .as_ref()
-        .map(|c| c.node_name.clone())
-        .filter(|n| !n.is_empty())
-        .or(graph_name)
-        .unwrap_or_else(|| node_id.clone());
+    let node_name = if debug_active {
+        graph_name.clone().unwrap_or_else(|| node_id.clone())
+    } else {
+        cache
+            .as_ref()
+            .map(|c| c.node_name.clone())
+            .filter(|n| !n.is_empty())
+            .or(graph_name)
+            .unwrap_or_else(|| node_id.clone())
+    };
 
     let mut open = true;
-    let title = format!("数据预览 - {}", node_name);
+    let title = if debug_active {
+        format!("数据预览 [Debug] - {}", node_name)
+    } else {
+        format!("数据预览 - {}", node_name)
+    };
 
     // 限制窗口最大尺寸为屏幕 85%，避免内容过多撑开全屏。
     let screen = ui.ctx().screen_rect();
@@ -59,21 +84,26 @@ pub fn render_data_preview_window(ui: &mut Ui, tab: &mut DagTab) {
         .resizable(true)
         .collapsible(false)
         .show(ui.ctx(), |ui| {
-            match &cache {
-                None => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(24.0);
-                        ui.label("该节点尚无预览数据");
-                        ui.add_space(4.0);
-                        ui.label("请先执行该算子（右键「运行到此结点」或顶部运行）。");
-                    });
+            if debug_active {
+                render_debug_preview_body(ui, tab, &node_id, &session_id.unwrap(), &node_name);
+            } else {
+                match &cache {
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(24.0);
+                            ui.label("该节点尚无预览数据");
+                            ui.add_space(4.0);
+                            ui.label("请先执行该算子（右键「运行到此结点」或顶部运行）。");
+                        });
+                    }
+                    Some(data) => render_preview_body(ui, data, &node_id),
                 }
-                Some(data) => render_preview_body(ui, data, &node_id),
             }
         });
 
     if !open {
         tab.preview_node_id = None;
+        tab.debug_preview = None;
     }
 }
 
@@ -316,5 +346,317 @@ fn truncate_str(s: &str, max: usize) -> String {
         let mut t: String = s.chars().take(max).collect();
         t.push('…');
         t
+    }
+}
+
+// ============================================================================
+// Debug 模式：服务端分页查询
+// ============================================================================
+
+/// 向服务端查询 Debug 会话中某节点的输出元信息。
+fn query_meta_from_server(
+    session_id: &str,
+    node_id: &str,
+) -> Result<DebugNodeMeta, String> {
+    crate::operator_executor::with_runtime_client(|client| {
+        client.query_debug_node_meta(session_id, node_id, DEBUG_PAGE_SIZE)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 向服务端查询 Debug 会话中某节点指定端口、指定页的数据切片。
+fn query_page_from_server(
+    session_id: &str,
+    node_id: &str,
+    port_idx: usize,
+    page_idx: usize,
+) -> Result<Option<PortData>, String> {
+    crate::operator_executor::with_runtime_client(|client| {
+        client.query_debug_node_page(
+            session_id,
+            node_id,
+            port_idx,
+            page_idx,
+            DEBUG_PAGE_SIZE,
+        )
+    })
+    .map(|p| p.page_data)
+    .map_err(|e| e.to_string())
+}
+
+/// Debug 模式下数据预览主体：向服务端分页查询完整输出。
+///
+/// 流程：
+/// 1. 初始化 `debug_preview` 状态（节点 ID 变化时重新初始化）
+/// 2. 首次打开时从服务端查询 meta（端口数、类型、行数、页数）
+/// 3. 渲染端口选择器（多端口时）+ 页码导航
+/// 4. 若缓存的页与当前选择不匹配，向服务端查询新页数据
+/// 5. 渲染当前页数据
+fn render_debug_preview_body(
+    ui: &mut Ui,
+    tab: &mut DagTab,
+    node_id: &str,
+    session_id: &str,
+    node_name: &str,
+) {
+    // ---- 1. 初始化 / 重置状态 ----
+    let needs_init = tab
+        .debug_preview
+        .as_ref()
+        .map_or(true, |s| s.node_id != node_id);
+    if needs_init {
+        tab.debug_preview = Some(DebugPreviewState {
+            node_id: node_id.to_string(),
+            ..Default::default()
+        });
+    }
+
+    // ---- 2. 查询 meta（仅一次，失败后记录 error 不再重试）----
+    let need_meta = tab
+        .debug_preview
+        .as_ref()
+        .map_or(true, |s| s.meta.is_none() && s.error.is_none());
+    if need_meta {
+        match query_meta_from_server(session_id, node_id) {
+            Ok(meta) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.meta = Some(meta);
+                    state.error = None;
+                }
+            }
+            Err(e) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.error = Some(format!("查询节点元信息失败: {}", e));
+                }
+            }
+        }
+    }
+
+    // ---- 3. 渲染 ----
+    // 分离借用：先取出需要的字段值（Clone），再渲染，避免跨调用借用冲突
+    let meta_opt = tab.debug_preview.as_ref().and_then(|s| s.meta.clone());
+    let error_opt = tab.debug_preview.as_ref().and_then(|s| s.error.clone());
+
+    // 顶部信息栏
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(format!("节点: {}", node_name));
+        ui.separator();
+        ui.colored_label(
+            Color32::from_rgb(100, 200, 255),
+            format!("Debug 会话: {}…{}", &session_id[..8], &session_id[session_id.len()-4..]),
+        );
+    });
+    ui.separator();
+
+    // 错误展示
+    if let Some(err) = &error_opt {
+        ui.colored_label(Color32::from_rgb(231, 76, 60), err);
+        ui.add_space(8.0);
+        if ui.button("重试").clicked() {
+            if let Some(state) = &mut tab.debug_preview {
+                state.meta = None;
+                state.error = None;
+            }
+        }
+        return;
+    }
+
+    let meta = match &meta_opt {
+        Some(m) => m,
+        None => {
+            ui.label("正在查询节点元信息...");
+            return;
+        }
+    };
+
+    // 节点不在 Debug 会话中（端口数为 0）
+    if meta.port_types.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(220, 180, 80),
+            "该节点不在 Debug 会话中（可能未执行或执行失败）。请先在 Debug 模式下执行该算子。",
+        );
+        return;
+    }
+
+    // ---- 端口选择器 ----
+    let port_count = meta.port_types.len();
+    let mut current_port = tab
+        .debug_preview
+        .as_ref()
+        .map_or(0, |s| s.current_port_idx);
+    if current_port >= port_count {
+        current_port = 0;
+        if let Some(state) = &mut tab.debug_preview {
+            state.current_port_idx = 0;
+        }
+    }
+
+    if port_count > 1 {
+        ui.horizontal(|ui| {
+            ui.strong("输出端口:");
+            egui::ComboBox::from_id_source("debug_port_combo")
+                .selected_text(format!(
+                    "#{} ({})",
+                    current_port,
+                    meta.port_types.get(current_port).map_or("?", |s| s.as_str())
+                ))
+                .show_ui(ui, |ui| {
+                    for i in 0..port_count {
+                        let ptype = meta.port_types.get(i).map_or("?", |s| s.as_str());
+                        let rows = meta.port_row_counts.get(i).copied().unwrap_or(0);
+                        let pages = meta.port_page_counts.get(i).copied().unwrap_or(0);
+                        ui.selectable_value(
+                            &mut current_port,
+                            i,
+                            format!("#{} {} ({} 行 / {} 页)", i, ptype, rows, pages),
+                        );
+                    }
+                });
+        });
+        ui.separator();
+        if let Some(state) = &mut tab.debug_preview {
+            state.current_port_idx = current_port;
+        }
+    }
+
+    // ---- 页码导航 ----
+    let page_count = meta
+        .port_page_counts
+        .get(current_port)
+        .copied()
+        .unwrap_or(1);
+    let port_type = meta
+        .port_types
+        .get(current_port)
+        .map_or("?", |s| s.as_str());
+    let port_rows = meta
+        .port_row_counts
+        .get(current_port)
+        .copied()
+        .unwrap_or(0);
+
+    let mut current_page = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.current_pages.get(&current_port).copied())
+        .unwrap_or(0);
+    if current_page >= page_count {
+        current_page = 0;
+    }
+
+    // DataFrameArray 端口：page_idx = DataFrame 下标
+    // DataFrame 端口：page_idx = 行页号
+    // 标量端口：page_count = 1，不显示导航
+    let is_scalar = !matches!(port_type, "DataFrameArray" | "DataFrame");
+
+    if !is_scalar && page_count > 1 {
+        ui.horizontal(|ui| {
+            ui.strong(if port_type == "DataFrameArray" {
+                format!("DataFrame 切换 (共 {} 个)", page_count)
+            } else {
+                format!("行分页 (共 {} 页)", page_count)
+            });
+            ui.separator();
+            if ui.button("‹").on_hover_text("上一页").clicked() {
+                current_page = if current_page == 0 { page_count - 1 } else { current_page - 1 };
+            }
+            ui.label(format!("[{}/{}]", current_page + 1, page_count));
+            if ui.button("›").on_hover_text("下一页").clicked() {
+                current_page = (current_page + 1) % page_count;
+            }
+            ui.separator();
+            if port_type == "DataFrame" {
+                ui.colored_label(
+                    Color32::from_rgb(180, 200, 220),
+                    format!("总 {} 行 / 每页 {} 行", port_rows, DEBUG_PAGE_SIZE),
+                );
+            } else {
+                ui.colored_label(
+                    Color32::from_rgb(180, 200, 220),
+                    format!("共 {} 个 DataFrame", page_count),
+                );
+            }
+        });
+        ui.separator();
+    }
+
+    // 写回当前页码
+    if let Some(state) = &mut tab.debug_preview {
+        state.current_pages.insert(current_port, current_page);
+    }
+
+    // ---- 4. 查询页数据（缓存不匹配时）----
+    let cache_valid = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.cached_page.as_ref())
+        .map_or(false, |(p, pg, _)| *p == current_port && *pg == current_page);
+
+    if !cache_valid {
+        match query_page_from_server(session_id, node_id, current_port, current_page) {
+            Ok(data) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.cached_page = Some((current_port, current_page, data));
+                }
+            }
+            Err(e) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.cached_page = None;
+                    state.error = Some(format!("查询页数据失败: {}", e));
+                }
+                ui.colored_label(Color32::from_rgb(231, 76, 60), format!("查询页数据失败: {}", e));
+                return;
+            }
+        }
+    }
+
+    // ---- 5. 渲染当前页数据 ----
+    let cached_data = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.cached_page.as_ref())
+        .map(|(_, _, d)| d.clone());
+
+    match cached_data {
+        None => {
+            ui.label("正在查询页数据...");
+        }
+        Some(None) => {
+            ui.colored_label(
+                Color32::from_rgb(220, 180, 80),
+                "该页无数据（端口或页号越界）。",
+            );
+        }
+        Some(Some(data)) => {
+            render_debug_port_data(ui, &data, node_id, current_port);
+        }
+    }
+}
+
+/// Debug 模式下渲染单个端口当前页的数据。
+///
+/// 服务端对 DataFrame / DataFrameArray 端口都返回 `PortData::DataFrame`（单个
+/// DataFrame 切片），对标量端口返回原标量。复用 [`render_port_data`] 的渲染逻辑。
+fn render_debug_port_data(ui: &mut Ui, data: &PortData, node_id: &str, port_idx: usize) {
+    match data {
+        PortData::Float(v) => {
+            ui.label(format!("Float: {}", v));
+        }
+        PortData::Int(v) => {
+            ui.label(format!("Int: {}", v));
+        }
+        PortData::String(s) => {
+            ui.label(format!("String ({} chars): {}", s.chars().count(), truncate_str(s, 200)));
+        }
+        PortData::Bool(b) => {
+            ui.label(format!("Bool: {}", b));
+        }
+        PortData::DataFrame(df) => {
+            render_dataframe_table(ui, df, &format!("debug_df_{}_{}", node_id, port_idx));
+        }
+        PortData::DataFrameArray(dfs) => {
+            // 服务端不应返回 DataFrameArray（已拆为单个 DataFrame），但做兜底处理
+            render_dataframe_array(ui, dfs, &format!("debug_dfa_{}_{}", node_id, port_idx));
+        }
     }
 }
