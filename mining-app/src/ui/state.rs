@@ -236,6 +236,14 @@ pub struct DagTab {
     pub name: String,
     pub graph: DagGraph,
     pub selected_node_id: Option<String>,
+    /// 多选节点 ID 列表（Ctrl+Click 切换）。
+    /// 与 `selected_node_id` 相互独立：单选仍走 `selected_node_id`（驱动参数面板等），
+    /// 多选仅用于批量对齐等操作。普通 Click 会清空此列表回到单选语义。
+    pub selected_node_ids: Vec<String>,
+    /// 节点位置快照栈（用于撤销对齐操作）。
+    /// 每次执行对齐前压入当前所有节点的 (id, position) 快照；
+    /// 撤销时弹出栈顶恢复。容量上限 50，超出丢弃最旧。
+    pub node_position_history: Vec<Vec<(String, Vec2)>>,
     /// 用户是否手动隐藏了右侧「算子运行参数」面板（点击面板标题栏 × 按钮后置 true；
     /// 选中不同节点时自动重置为 false，使新节点的参数重新展示）。
     pub hide_params_panel: bool,
@@ -311,6 +319,8 @@ impl DagTab {
             name,
             graph,
             selected_node_id: None,
+            selected_node_ids: Vec::new(),
+            node_position_history: Vec::new(),
             hide_params_panel: false,
             dragging_node_id: None,
             drag_offset: Vec2::ZERO,

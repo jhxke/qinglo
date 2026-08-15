@@ -768,6 +768,154 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             ui.add_space(gap);
         }
 
+        // ---- 多选对齐分组：左对齐 / 上对齐 / 撤销 ----
+        // Ctrl+Click 选中 ≥2 个节点后，左/上对齐按钮才可用；
+        // 撤销按钮在对齐历史栈非空时可用（可连续撤销）。
+        if has_tab {
+            let (multi_count, has_history) = editor_state
+                .active_tab()
+                .map(|t| (t.selected_node_ids.len(), !t.node_position_history.is_empty()))
+                .unwrap_or((0, false));
+            let align_enabled = multi_count >= 2;
+            let undo_enabled = has_history;
+            // 禁用态统一降暗，hover 与 click 仅在 enabled 时生效
+            let active_color = icon_color;
+            let disabled_color = Color32::from_rgb(80, 80, 84);
+
+            // 左对齐：左侧一条竖直基准线 + 三条向左收齐的水平短线
+            {
+                let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+                let painter = ui.painter();
+                if align_enabled && resp.hovered() {
+                    painter.rect_filled(rect, 5.0, hover_bg);
+                }
+                let col = if align_enabled { active_color } else { disabled_color };
+                let stroke = Stroke::new(1.4, col);
+                let cx = rect.center().x;
+                let cy = rect.center().y;
+                // 左侧基准竖线
+                painter.line_segment(
+                    [Pos2::new(cx - 6.0, cy - 7.0), Pos2::new(cx - 6.0, cy + 7.0)],
+                    stroke,
+                );
+                // 三条水平短线（长度递减/等长，向左收齐到基准线右侧）
+                for i in 0..3 {
+                    let y = cy - 5.0 + i as f32 * 5.0;
+                    painter.line_segment(
+                        [Pos2::new(cx - 6.0, y), Pos2::new(cx + 6.0, y)],
+                        stroke,
+                    );
+                }
+                let tip = if align_enabled {
+                    format!("左对齐（已选 {} 个节点，Ctrl+Click 多选）", multi_count)
+                } else {
+                    "左对齐（需先 Ctrl+Click 选中 ≥2 个节点）".to_string()
+                };
+                resp = resp.on_hover_text(tip);
+                if align_enabled && resp.clicked() {
+                    if let Some(tab) = editor_state.active_tab_mut() {
+                        super::dag_canvas::align_left(tab);
+                    }
+                }
+            }
+
+            // 上对齐：顶部一条水平基准线 + 三条向上收齐的短竖线
+            {
+                let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+                let painter = ui.painter();
+                if align_enabled && resp.hovered() {
+                    painter.rect_filled(rect, 5.0, hover_bg);
+                }
+                let col = if align_enabled { active_color } else { disabled_color };
+                let stroke = Stroke::new(1.4, col);
+                let cx = rect.center().x;
+                let cy = rect.center().y;
+                // 顶部基准横线
+                painter.line_segment(
+                    [Pos2::new(cx - 7.0, cy - 6.0), Pos2::new(cx + 7.0, cy - 6.0)],
+                    stroke,
+                );
+                // 三条短竖线（向下，顶端对齐基准线）
+                for i in 0..3 {
+                    let x = cx - 5.0 + i as f32 * 5.0;
+                    painter.line_segment(
+                        [Pos2::new(x, cy - 6.0), Pos2::new(x, cy + 6.0)],
+                        stroke,
+                    );
+                }
+                let tip = if align_enabled {
+                    format!("上对齐（已选 {} 个节点，Ctrl+Click 多选）", multi_count)
+                } else {
+                    "上对齐（需先 Ctrl+Click 选中 ≥2 个节点）".to_string()
+                };
+                resp = resp.on_hover_text(tip);
+                if align_enabled && resp.clicked() {
+                    if let Some(tab) = editor_state.active_tab_mut() {
+                        super::dag_canvas::align_top(tab);
+                    }
+                }
+            }
+
+            // 撤销：逆时针弧形箭头（撤销上次对齐）
+            {
+                let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+                let painter = ui.painter();
+                if undo_enabled && resp.hovered() {
+                    painter.rect_filled(rect, 5.0, hover_bg);
+                }
+                let col = if undo_enabled { active_color } else { disabled_color };
+                let stroke = Stroke::new(1.4, col);
+                let cx = rect.center().x;
+                let cy = rect.center().y;
+                // 弧形主体：用 4 段短线近似 3/4 圆弧（逆时针，从右下起绕到左下）
+                let r = 6.0;
+                // 起点：右侧（角度 0），逆时针绕到下方（角度 -90°即270°）
+                // 这里画上半弧 + 左侧 + 下侧，箭头指向左下
+                let pts: [Pos2; 5] = [
+                    Pos2::new(cx + r, cy),                       // 右
+                    Pos2::new(cx + r * 0.7071, cy - r * 0.7071), // 右上
+                    Pos2::new(cx, cy - r),                       // 上
+                    Pos2::new(cx - r * 0.7071, cy - r * 0.7071), // 左上
+                    Pos2::new(cx - r, cy),                       // 左
+                ];
+                for i in 0..pts.len() - 1 {
+                    painter.line_segment([pts[i], pts[i + 1]], stroke);
+                }
+                // 箭头头部：在左端点指向下方（表示逆时针绕回）
+                let tip = pts[pts.len() - 1];
+                painter.line_segment(
+                    [tip, Pos2::new(tip.x - 3.0, tip.y - 2.0)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [tip, Pos2::new(tip.x, tip.y + 3.0)],
+                    stroke,
+                );
+                let tip_text = if undo_enabled {
+                    "撤销对齐"
+                } else {
+                    "撤销对齐（无可撤销操作）"
+                };
+                resp = resp.on_hover_text(tip_text);
+                if undo_enabled && resp.clicked() {
+                    if let Some(tab) = editor_state.active_tab_mut() {
+                        super::dag_canvas::undo_align(tab);
+                    }
+                }
+            }
+        }
+
+        // 分隔线：多选对齐分组与执行 DAG 主操作分组
+        if has_tab {
+            ui.add_space(gap);
+            let (r, _) = ui.allocate_exact_size(Vec2::new(1.0, btn_size - 6.0), Sense::hover());
+            ui.painter().line_segment(
+                [r.center_top(), r.center_bottom()],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+            );
+            ui.add_space(gap);
+        }
+
         // ---- Debug 模式开关（虫子图标，切换后执行 DAG 会保留服务端数据供分页查询）----
         if has_tab {
             let debug_on = editor_state.active_tab().map_or(false, |t| t.debug_mode);

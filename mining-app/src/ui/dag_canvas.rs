@@ -97,7 +97,8 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
             rect.min + (node_rect.max.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
         );
 
-        let is_selected = tab.selected_node_id.as_deref() == Some(&node.id);
+        let is_selected = tab.selected_node_id.as_deref() == Some(&node.id)
+            || tab.selected_node_ids.iter().any(|id| id == &node.id);
         let border_color = if is_selected {
             Color32::YELLOW
         } else {
@@ -392,9 +393,16 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 tab.hide_params_panel = false;
                 tab.error_message = None;
             } else if response.clicked() {
-                tab.selected_node_id = Some(node_id.clone());
-                tab.hide_params_panel = true;
-                tab.error_message = None;
+                // Ctrl+Click 切换多选；普通 Click 回到单选并清空多选集合
+                if ui.input(|i| i.modifiers.ctrl) {
+                    toggle_multi_select(tab, node_id);
+                    tab.error_message = None;
+                } else {
+                    tab.selected_node_ids.clear();
+                    tab.selected_node_id = Some(node_id.clone());
+                    tab.hide_params_panel = true;
+                    tab.error_message = None;
+                }
             }
             if response.dragged() {
                 tab.dragging_node_id = Some(node_id.clone());
@@ -965,4 +973,111 @@ pub fn zoom_canvas_at_point(tab: &mut DagTab, factor: f32, anchor_screen_pos: Po
     // 反推新 offset, 使该锚点仍对应同一屏幕位置
     tab.canvas_offset = (anchor_screen_pos - canvas_rect.min) / new_zoom - anchor;
     tab.canvas_zoom = new_zoom;
+}
+
+/// Ctrl+Click 切换某节点在多选集合中的状态。
+///
+/// 若该节点已在多选集合中 → 移除；否则加入。
+/// 同时把当前单选 `selected_node_id` 也合并进多选集合后再切换，
+/// 保证用户先单击 A、再 Ctrl+Click B 时 A 也参与对齐。
+/// 切换后清空 `selected_node_id`，避免参数面板与多选状态混淆。
+fn toggle_multi_select(tab: &mut DagTab, node_id: &str) {
+    // 把当前单选节点先并入多选集合
+    if let Some(single) = tab.selected_node_id.take() {
+        if !tab.selected_node_ids.iter().any(|id| id == &single) {
+            tab.selected_node_ids.push(single);
+        }
+    }
+    // 切换目标节点
+    if let Some(pos) = tab.selected_node_ids.iter().position(|id| id == node_id) {
+        tab.selected_node_ids.remove(pos);
+    } else {
+        tab.selected_node_ids.push(node_id.to_string());
+    }
+}
+
+/// 对选中的多个节点执行左对齐。
+///
+/// 取多选节点中最小的 x 坐标作为对齐基准，把所有选中节点的 position.x 设为该值。
+/// 对齐前会把当前所有节点的位置快照压入撤销栈。选中节点数 < 2 时无效。
+pub fn align_left(tab: &mut DagTab) {
+    if tab.selected_node_ids.len() < 2 {
+        return;
+    }
+    push_position_snapshot(tab);
+    let target_x = match tab
+        .selected_node_ids
+        .iter()
+        .filter_map(|id| tab.graph.get_node(id))
+        .map(|n| n.position.x)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        Some(x) => x,
+        None => return,
+    };
+    for id in tab.selected_node_ids.clone() {
+        if let Some(node) = tab.graph.get_node_mut(&id) {
+            node.position.x = target_x;
+        }
+    }
+    tab.dirty = true;
+}
+
+/// 对选中的多个节点执行上对齐。
+///
+/// 取多选节点中最小的 y 坐标作为对齐基准，把所有选中节点的 position.y 设为该值。
+/// 对齐前会把当前所有节点的位置快照压入撤销栈。选中节点数 < 2 时无效。
+pub fn align_top(tab: &mut DagTab) {
+    if tab.selected_node_ids.len() < 2 {
+        return;
+    }
+    push_position_snapshot(tab);
+    let target_y = match tab
+        .selected_node_ids
+        .iter()
+        .filter_map(|id| tab.graph.get_node(id))
+        .map(|n| n.position.y)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        Some(y) => y,
+        None => return,
+    };
+    for id in tab.selected_node_ids.clone() {
+        if let Some(node) = tab.graph.get_node_mut(&id) {
+            node.position.y = target_y;
+        }
+    }
+    tab.dirty = true;
+}
+
+/// 撤销最近一次对齐操作。
+///
+/// 从撤销栈弹出最近一次快照，恢复所有节点的位置。
+/// 撤销后不清空多选集合，便于连续对齐/撤销试错。
+pub fn undo_align(tab: &mut DagTab) {
+    if let Some(snapshot) = tab.node_position_history.pop() {
+        for (id, pos) in snapshot {
+            if let Some(node) = tab.graph.get_node_mut(&id) {
+                node.position = pos;
+            }
+        }
+        tab.dirty = true;
+    }
+}
+
+/// 把当前所有节点的 (id, position) 快照压入撤销栈。
+///
+/// 容量上限 50，超出丢弃最旧快照，避免无限增长。
+fn push_position_snapshot(tab: &mut DagTab) {
+    const MAX_HISTORY: usize = 50;
+    let snapshot: Vec<(String, Vec2)> = tab
+        .graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.position))
+        .collect();
+    tab.node_position_history.push(snapshot);
+    while tab.node_position_history.len() > MAX_HISTORY {
+        tab.node_position_history.remove(0);
+    }
 }
