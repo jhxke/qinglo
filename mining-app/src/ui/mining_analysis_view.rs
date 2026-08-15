@@ -778,8 +778,10 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 .unwrap_or((0, false));
             let align_enabled = multi_count >= 2;
             let undo_enabled = has_history;
-            // 禁用态统一降暗，hover 与 click 仅在 enabled 时生效
-            let active_color = icon_color;
+            // 启用态 = 图标用主题强调色（蓝色）点亮，跟保存按钮风格一致；
+            // 禁用态 = 图标降暗灰色，视觉上一眼看出不能点。
+            // 背景只在 hover 时才画一层浅色，常态透明。
+            let accent = super::theme::ACCENT;
             let disabled_color = Color32::from_rgb(80, 80, 84);
 
             // 左对齐：左侧一条竖直基准线 + 三条向左收齐的水平短线
@@ -789,8 +791,8 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 if align_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
                 }
-                let col = if align_enabled { active_color } else { disabled_color };
-                let stroke = Stroke::new(1.4, col);
+                let col = if align_enabled { accent } else { disabled_color };
+                let stroke = Stroke::new(1.6, col);
                 let cx = rect.center().x;
                 let cy = rect.center().y;
                 // 左侧基准竖线
@@ -798,7 +800,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                     [Pos2::new(cx - 6.0, cy - 7.0), Pos2::new(cx - 6.0, cy + 7.0)],
                     stroke,
                 );
-                // 三条水平短线（长度递减/等长，向左收齐到基准线右侧）
+                // 三条水平短线（向左收齐到基准线右侧）
                 for i in 0..3 {
                     let y = cy - 5.0 + i as f32 * 5.0;
                     painter.line_segment(
@@ -826,8 +828,8 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 if align_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
                 }
-                let col = if align_enabled { active_color } else { disabled_color };
-                let stroke = Stroke::new(1.4, col);
+                let col = if align_enabled { accent } else { disabled_color };
+                let stroke = Stroke::new(1.6, col);
                 let cx = rect.center().x;
                 let cy = rect.center().y;
                 // 顶部基准横线
@@ -863,14 +865,12 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 if undo_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
                 }
-                let col = if undo_enabled { active_color } else { disabled_color };
-                let stroke = Stroke::new(1.4, col);
+                let col = if undo_enabled { accent } else { disabled_color };
+                let stroke = Stroke::new(1.6, col);
                 let cx = rect.center().x;
                 let cy = rect.center().y;
-                // 弧形主体：用 4 段短线近似 3/4 圆弧（逆时针，从右下起绕到左下）
+                // 弧形主体：用 4 段短线近似 3/4 圆弧（逆时针，从右 → 上 → 左）
                 let r = 6.0;
-                // 起点：右侧（角度 0），逆时针绕到下方（角度 -90°即270°）
-                // 这里画上半弧 + 左侧 + 下侧，箭头指向左下
                 let pts: [Pos2; 5] = [
                     Pos2::new(cx + r, cy),                       // 右
                     Pos2::new(cx + r * 0.7071, cy - r * 0.7071), // 右上
