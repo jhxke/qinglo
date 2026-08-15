@@ -8,10 +8,212 @@
 //! 输出，解析为 [`KlineDoc`] 后以 tab 形式渲染各 `kline` 块。
 
 use egui::{Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2, Align2};
-use operator_executor_client::PortData;
+use operator_executor_client::{DataFrame, DataType, PortData};
+use operator_executor_client::runtime_client::DebugNodeMeta;
 
-use super::state::DagTab;
+use super::state::{DagTab, DebugPreviewState};
 use crate::data_preview;
+
+// ============================================================================
+// Debug 模式前端渲染：从上游 DataFrame 按算子参数直接生成 DSL
+// ============================================================================
+
+/// K线算子参数（与 operator/kline_visualization_operator 定义一致，均为 String）。
+#[derive(Debug, Clone, Default)]
+struct KlineFrontendParams {
+    pub indices: String,
+    pub open_col: String,
+    pub high_col: String,
+    pub low_col: String,
+    pub close_col: String,
+    pub date_col: String,
+    pub ma5_col: String,
+    pub ma10_col: String,
+}
+
+impl KlineFrontendParams {
+    fn with_defaults(self) -> KlineFrontendParams {
+        KlineFrontendParams {
+            indices: self.indices,
+            open_col: if self.open_col.is_empty() { "open".to_string() } else { self.open_col },
+            high_col: if self.high_col.is_empty() { "high".to_string() } else { self.high_col },
+            low_col: if self.low_col.is_empty() { "low".to_string() } else { self.low_col },
+            close_col: if self.close_col.is_empty() { "close".to_string() } else { self.close_col },
+            date_col: if self.date_col.is_empty() { "date".to_string() } else { self.date_col },
+            ma5_col: if self.ma5_col.is_empty() { "ma5".to_string() } else { self.ma5_col },
+            ma10_col: if self.ma10_col.is_empty() { "ma10".to_string() } else { self.ma10_col },
+        }
+    }
+}
+
+/// 从节点的 operator_type 中提取 K线算子参数。
+fn extract_kline_params(tab: &DagTab, node_id: &str) -> KlineFrontendParams {
+    use crate::dag::{OperatorPortParamDef, PortDirection};
+    let Some(node) = tab.graph.get_node(node_id) else {
+        return KlineFrontendParams::default().with_defaults();
+    };
+    let def = match &node.operator_type {
+        crate::dag::OperatorType::Custom(d) => d,
+    };
+    let get = |name: &str| -> String {
+        def.port_params
+            .iter()
+            .find(|p: &&OperatorPortParamDef| {
+                p.direction == PortDirection::Param && p.name == name
+            })
+            .map(|p| p.default_value.clone())
+            .unwrap_or_default()
+    };
+    KlineFrontendParams {
+        indices: get("indices"),
+        open_col: get("open_col"),
+        high_col: get("high_col"),
+        low_col: get("low_col"),
+        close_col: get("close_col"),
+        date_col: get("date_col"),
+        ma5_col: get("ma5_col"),
+        ma10_col: get("ma10_col"),
+    }
+    .with_defaults()
+}
+
+/// 在 DAG 中查找 `(target_node_id, target_port_idx)` 连接的源节点和源输出端口。
+fn find_upstream_source(
+    tab: &DagTab,
+    target_node_id: &str,
+    target_port: usize,
+) -> Option<(String, usize)> {
+    tab.graph
+        .get_edges_to_node(target_node_id)
+        .into_iter()
+        .find(|e| e.target_port == target_port)
+        .map(|e| (e.source_node_id.clone(), e.source_port))
+}
+
+// ---------- 前端 emit_chart（从 DataFrame + 参数生成单个 kline 块 DSL）----------
+
+fn extract_f64_col(df: &DataFrame, name: &str) -> Option<Vec<Option<f64>>> {
+    let col = df.column(name)?;
+    if !matches!(col.data_type, DataType::Float64) {
+        return None;
+    }
+    Some(col.to_f64_vec())
+}
+
+fn extract_date_col(df: &DataFrame, name: &str, n: usize) -> Vec<String> {
+    if let Some(col) = df.column(name) {
+        match col.data_type {
+            DataType::String => (0..n).map(|i| col.get_string(i).unwrap_or("").to_string()).collect(),
+            DataType::Int64 => (0..n).map(|i| col.get_i64(i).map(|v| v.to_string()).unwrap_or_default()).collect(),
+            DataType::Float64 => (0..n).map(|i| col.get_f64(i).map(format_float).unwrap_or_default()).collect(),
+            _ => (0..n).map(|i| format!("#{}", i)).collect(),
+        }
+    } else {
+        (0..n).map(|i| format!("#{}", i)).collect()
+    }
+}
+
+fn format_float(v: f64) -> String {
+    if v.is_nan() || v.is_infinite() {
+        format!("{:?}", v)
+    } else {
+        format!("{:?}", v)
+    }
+}
+
+fn escape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn push_ma_values(out: &mut String, values: Vec<Option<f64>>, n: usize) {
+    let len = values.len().min(n);
+    for i in 0..len {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        match values[i] {
+            Some(v) if v.is_finite() => out.push_str(&format_float(v)),
+            _ => out.push('_'),
+        }
+    }
+}
+
+/// 前端版 emit_chart：为单个 DataFrame 生成 `kline "标题" { ... }` 块。
+///
+/// 返回 `Ok(String)`：成功，含 0 行也返回空块（便于调试）。
+/// 返回 `Err(String)`：缺少 OHLC 四列中任意一列。
+fn emit_chart_frontend(
+    df: &DataFrame,
+    params: &KlineFrontendParams,
+    title: &str,
+) -> Result<String, String> {
+    let n = df.row_count;
+    if n == 0 {
+        return Ok(format!("kline {} {{\n}}\n", escape_str(title)));
+    }
+
+    let open = extract_f64_col(df, &params.open_col)
+        .ok_or_else(|| format!("缺少开盘价列 '{}' (Float64)", params.open_col))?;
+    let high = extract_f64_col(df, &params.high_col)
+        .ok_or_else(|| format!("缺少最高价列 '{}' (Float64)", params.high_col))?;
+    let low = extract_f64_col(df, &params.low_col)
+        .ok_or_else(|| format!("缺少最低价列 '{}' (Float64)", params.low_col))?;
+    let close = extract_f64_col(df, &params.close_col)
+        .ok_or_else(|| format!("缺少收盘价列 '{}' (Float64)", params.close_col))?;
+
+    let dates = extract_date_col(df, &params.date_col, n);
+    let ma5 = extract_f64_col(df, &params.ma5_col);
+    let ma10 = extract_f64_col(df, &params.ma10_col);
+
+    let mut out = String::new();
+    out.push_str(&format!("kline {} {{\n", escape_str(title)));
+
+    for i in 0..n {
+        let (o, h, l, c) = match (open[i], high[i], low[i], close[i]) {
+            (Some(o), Some(h), Some(l), Some(c))
+                if o.is_finite() && h.is_finite() && l.is_finite() && c.is_finite() =>
+            {
+                (o, h, l, c)
+            }
+            _ => continue,
+        };
+        out.push_str(&format!(
+            "  candle {} {} {} {} {}\n",
+            escape_str(&dates[i]),
+            format_float(o),
+            format_float(h),
+            format_float(l),
+            format_float(c),
+        ));
+    }
+
+    if let Some(ma) = ma5 {
+        out.push_str(&format!("  line {} \"#FFD700\" [", escape_str("MA5")));
+        push_ma_values(&mut out, ma, n);
+        out.push_str("]\n");
+    }
+    if let Some(ma) = ma10 {
+        out.push_str(&format!("  line {} \"#9370DB\" [", escape_str("MA10")));
+        push_ma_values(&mut out, ma, n);
+        out.push_str("]\n");
+    }
+
+    out.push_str("}\n");
+    Ok(out)
+}
 
 // =============================== 词法器 ===============================
 
@@ -561,7 +763,7 @@ fn render_chart(
     if state.visible_count == 0 {
         state.visible_count = total;
     }
-    let visible_count = state.visible_count.clamp(MIN_VISIBLE, total);
+    let visible_count = state.visible_count.clamp(MIN_VISIBLE.min(total), total);
     if state.first_visible + visible_count > total {
         state.first_visible = total.saturating_sub(visible_count);
     }
@@ -576,7 +778,7 @@ fn render_chart(
         if scroll.abs() > 0.0 {
             let factor = if scroll > 0.0 { 0.9 } else { 1.1 };
             let new_vc = ((visible_count as f32) * factor).round() as usize;
-            let new_vc = new_vc.clamp(MIN_VISIBLE, total);
+            let new_vc = new_vc.clamp(MIN_VISIBLE.min(total), total);
             // 以中心为锚保持
             let center = state.first_visible as f64 + visible_count as f64 / 2.0;
             state.visible_count = new_vc;
@@ -883,28 +1085,49 @@ fn truncate_date(s: &str) -> String {
 
 // =============================== 预览窗口 ===============================
 
+/// Debug 模式下 DataFrame 端口分页的每页行数（与服务端 PREVIEW_ROW_LIMIT 一致）。
+/// K 线算子输出为 String，服务端对 String 端口不分页，但常量保持一致以便复用查询函数。
+const DEBUG_PAGE_SIZE: usize = 200;
+
 /// 渲染 K线图预览浮动窗口。`tab.kline_preview_node_id` 为 None 时直接返回。
+///
+/// Debug 模式下（`tab.debug_mode && tab.debug_session_id.is_some()`），不再读本地
+/// `cache/{node_id}.json`（仅含截断预览），而是向服务端 debug session 查询完整
+/// DSL（K 线算子输出端口固定为 0，String 类型 page_idx=0 一次性返回完整内容），
+/// 这样可以展示所有 K 线并支持多图表 ComboBox 切换。
 pub fn render_kline_preview_window(ui: &mut Ui, tab: &mut DagTab) {
     let node_id = match tab.kline_preview_node_id.clone() {
         Some(id) => id,
         None => return,
     };
 
+    // 判断是否走 Debug 模式预览（服务端查询）
+    let debug_active = tab.debug_mode && tab.debug_session_id.is_some();
+    let session_id = tab.debug_session_id.clone();
+
     // 节点可能已删除：优先用缓存里的名称，其次从图查找，最后回退到 ID。
-    let cache = data_preview::load_preview_cache(&node_id);
+    let cache = if debug_active { None } else { data_preview::load_preview_cache(&node_id) };
     let graph_name = tab
         .graph
         .get_node(&node_id)
         .map(|n| n.operator_type.name().to_string());
-    let node_name = cache
-        .as_ref()
-        .map(|c| c.node_name.clone())
-        .filter(|n| !n.is_empty())
-        .or(graph_name)
-        .unwrap_or_else(|| node_id.clone());
+    let node_name = if debug_active {
+        graph_name.clone().unwrap_or_else(|| node_id.clone())
+    } else {
+        cache
+            .as_ref()
+            .map(|c| c.node_name.clone())
+            .filter(|n| !n.is_empty())
+            .or(graph_name)
+            .unwrap_or_else(|| node_id.clone())
+    };
 
     let mut open = true;
-    let title = format!("K线图预览 - {}", node_name);
+    let title = if debug_active {
+        format!("K线图预览 [Debug] - {}", node_name)
+    } else {
+        format!("K线图预览 - {}", node_name)
+    };
 
     let screen = ui.ctx().screen_rect();
     let max_w = (screen.width() * 0.85).max(560.0);
@@ -922,21 +1145,27 @@ pub fn render_kline_preview_window(ui: &mut Ui, tab: &mut DagTab) {
         .resizable(true)
         .collapsible(false)
         .show(ui.ctx(), |ui| {
-            match &cache {
-                None => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(24.0);
-                        ui.label("该节点尚无预览数据");
-                        ui.add_space(4.0);
-                        ui.label("请先执行该算子（右键「运行到此结点」或顶部运行）。");
-                    });
+            if debug_active {
+                render_kline_debug_body(ui, tab, &node_id, &session_id.unwrap(), &node_name);
+            } else {
+                match &cache {
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(24.0);
+                            ui.label("该节点尚无预览数据");
+                            ui.add_space(4.0);
+                            ui.label("请先执行该算子（右键「运行到此结点」或顶部运行）。");
+                        });
+                    }
+                    Some(data) => render_kline_body(ui, data, &node_id),
                 }
-                Some(data) => render_kline_body(ui, data, &node_id),
             }
         });
 
     if !open {
         tab.kline_preview_node_id = None;
+        // Debug 预览状态清空，避免下次打开其它节点时复用旧状态
+        tab.debug_preview = None;
     }
 }
 
@@ -975,6 +1204,12 @@ fn render_kline_body(ui: &mut Ui, data: &data_preview::PreviewData, node_id: &st
         }
     };
 
+    render_dsl_body(ui, dsl_str, node_id);
+}
+
+/// 由 DSL 字符串直接渲染 K 线图主体（多图表 ComboBox 切换 + 解析错误展示）。
+/// 供本地缓存模式与 Debug 模式共用。
+fn render_dsl_body(ui: &mut Ui, dsl_str: &str, node_id: &str) {
     match parse(dsl_str) {
         Err(e) => {
             ui.colored_label(
@@ -1026,6 +1261,503 @@ fn render_kline_body(ui: &mut Ui, data: &data_preview::PreviewData, node_id: &st
                 ui.ctx().data_mut(|d| *d.get_temp_mut_or_default::<usize>(tab_id) = current);
                 ui.separator();
                 render_chart(ui, &doc.charts[current], node_id, current);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Debug 模式：服务端查询完整 DSL
+// ============================================================================
+
+/// 向服务端查询 Debug 会话中某节点的输出元信息。
+fn query_meta_from_server(
+    session_id: &str,
+    node_id: &str,
+) -> Result<DebugNodeMeta, String> {
+    crate::operator_executor::with_runtime_client(|client| {
+        client.query_debug_node_meta(session_id, node_id, DEBUG_PAGE_SIZE)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 向服务端查询 Debug 会话中某节点指定端口、指定页的数据切片。
+fn query_page_from_server(
+    session_id: &str,
+    node_id: &str,
+    port_idx: usize,
+    page_idx: usize,
+) -> Result<Option<PortData>, String> {
+    crate::operator_executor::with_runtime_client(|client| {
+        client.query_debug_node_page(
+            session_id,
+            node_id,
+            port_idx,
+            page_idx,
+            DEBUG_PAGE_SIZE,
+        )
+    })
+    .map(|p| p.page_data)
+    .map_err(|e| e.to_string())
+}
+
+/// Debug 模式下 K 线预览主体。
+///
+/// 两条分支（由参数 `indices` 是否为空决定）：
+/// - **传了 indices**：沿用旧逻辑，从 K线算子自身输出端口读取完整 DSL（String）。
+/// - **不传 indices**：从上游节点（K线算子输入端口 0 的源节点）输出端口的
+///   DebugSession 中按 DataFrameArray 分页查询原始数据，根据算子参数
+///   （open_col/high_col/...）在前端按需生成单个 kline 块 DSL 并渲染。
+///   用户可通过顶部导航在各 DataFrame 间切换，避免一次性渲染成百上千个 K线图。
+fn render_kline_debug_body(
+    ui: &mut Ui,
+    tab: &mut DagTab,
+    node_id: &str,
+    session_id: &str,
+    node_name: &str,
+) {
+    // ---- 从节点定义读取参数（每次都读，参数可能改了）----
+    let params = extract_kline_params(tab, node_id);
+    let use_frontend_render = params.indices.trim().is_empty();
+
+    // ---- 1. 初始化 / 重置状态 ----
+    let needs_init = tab
+        .debug_preview
+        .as_ref()
+        .map_or(true, |s| s.node_id != node_id);
+    if needs_init {
+        tab.debug_preview = Some(DebugPreviewState {
+            node_id: node_id.to_string(),
+            ..Default::default()
+        });
+    }
+
+    // ---- 1b. 检测渲染模式切换（indices 空↔非空）----
+    // 两条分支查询的节点不同（算子自身 vs 上游），meta / cached_page 类型不兼容。
+    // 模式切换时必须清空旧缓存，否则 port_type 校验会误判（如把 String DSL
+    // 的 cached_page 当成 DataFrame 使用，导致"无法切换"或显示错误）。
+    let mode_key = ui.id().with("kline_debug_render_mode").with(node_id);
+    let prev_mode: Option<bool> = ui.ctx().data(|d| d.get_temp::<bool>(mode_key));
+    if prev_mode.is_some() && prev_mode != Some(use_frontend_render) {
+        if let Some(state) = &mut tab.debug_preview {
+            state.meta = None;
+            state.cached_page = None;
+            state.error = None;
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(mode_key, use_frontend_render));
+
+    // 顶部信息栏
+    ui.horizontal_wrapped(|ui| {
+        ui.strong(format!("节点: {}", node_name));
+        ui.separator();
+        ui.colored_label(
+            Color32::from_rgb(100, 200, 255),
+            format!("Debug 会话: {}…{}", &session_id[..8], &session_id[session_id.len()-4..]),
+        );
+        ui.separator();
+        if use_frontend_render {
+            ui.colored_label(
+                Color32::from_rgb(88, 166, 120),
+                "前端渲染（indices 为空，按 DataFrame 切换）",
+            );
+        } else {
+            ui.colored_label(
+                Color32::from_rgb(210, 140, 80),
+                format!("算子 DSL（indices={})", params.indices),
+            );
+        }
+    });
+    ui.separator();
+
+    if use_frontend_render {
+        render_kline_debug_frontend(ui, tab, node_id, session_id, &params);
+    } else {
+        render_kline_debug_operator(ui, tab, node_id, session_id);
+    }
+}
+
+// ---------- 分支 A：使用算子输出的 DSL（indices 非空）----------
+
+fn render_kline_debug_operator(
+    ui: &mut Ui,
+    tab: &mut DagTab,
+    node_id: &str,
+    session_id: &str,
+) {
+    // ---- 1. 查询 K线算子节点自身输出 meta ----
+    let need_meta = tab
+        .debug_preview
+        .as_ref()
+        .map_or(true, |s| s.meta.is_none() && s.error.is_none());
+    if need_meta {
+        match query_meta_from_server(session_id, node_id) {
+            Ok(meta) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.meta = Some(meta);
+                    state.error = None;
+                }
+            }
+            Err(e) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.error = Some(format!("查询节点元信息失败: {}", e));
+                }
+            }
+        }
+    }
+
+    let meta_opt = tab.debug_preview.as_ref().and_then(|s| s.meta.clone());
+    let error_opt = tab.debug_preview.as_ref().and_then(|s| s.error.clone());
+
+    if let Some(err) = &error_opt {
+        ui.colored_label(Color32::from_rgb(231, 76, 60), err);
+        ui.add_space(8.0);
+        if ui.button("重试").clicked() {
+            if let Some(state) = &mut tab.debug_preview {
+                state.meta = None;
+                state.error = None;
+                state.cached_page = None;
+            }
+        }
+        return;
+    }
+
+    let meta = match &meta_opt {
+        Some(m) => m,
+        None => {
+            ui.label("正在查询节点元信息...");
+            return;
+        }
+    };
+
+    if meta.port_types.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(220, 180, 80),
+            "该节点不在 Debug 会话中（可能未执行或执行失败）。请先在 Debug 模式下执行该算子。",
+        );
+        return;
+    }
+
+    let first_type = meta.port_types.first().map(|s| s.as_str()).unwrap_or("");
+    if first_type != "String" {
+        let types: Vec<&str> = meta.port_types.iter().map(|s| s.as_str()).collect();
+        ui.colored_label(
+            Color32::from_rgb(231, 76, 60),
+            format!("该节点首端口非 String（实际: {}）。K线图预览仅适用于「K线可视化算子」节点。", types.join(", ")),
+        );
+        return;
+    }
+
+    // ---- 2. 查询 port_idx=0, page_idx=0 的完整 DSL ----
+    let cache_valid = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.cached_page.as_ref())
+        .map_or(false, |(p, _pg, _)| *p == 0);
+
+    if !cache_valid {
+        match query_page_from_server(session_id, node_id, 0, 0) {
+            Ok(data) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.cached_page = Some((0, 0, data));
+                }
+            }
+            Err(e) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.cached_page = None;
+                    state.error = Some(format!("查询 DSL 数据失败: {}", e));
+                }
+                ui.colored_label(Color32::from_rgb(231, 76, 60), format!("查询 DSL 数据失败: {}", e));
+                return;
+            }
+        }
+    }
+
+    let cached_data = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.cached_page.as_ref())
+        .map(|(_, _, d)| d.clone());
+
+    match cached_data {
+        None => {
+            ui.label("正在查询 DSL 数据...");
+        }
+        Some(None) => {
+            ui.colored_label(
+                Color32::from_rgb(220, 180, 80),
+                "该节点无 DSL 数据（端口或页号越界）。",
+            );
+        }
+        Some(Some(PortData::String(dsl))) => {
+            ui.horizontal(|ui| {
+                ui.label(format!("DSL 长度: {} 字符", dsl.chars().count()));
+            });
+            ui.separator();
+            render_dsl_body(ui, dsl.as_str(), node_id);
+        }
+        Some(Some(other)) => {
+            ui.colored_label(
+                Color32::from_rgb(231, 76, 60),
+                format!("服务端返回非 String 数据（类型: {}）。", other.type_name()),
+            );
+        }
+    }
+}
+
+// ---------- 分支 B：前端直接从上游 DataFrame 生成 DSL（indices 为空）----------
+
+fn render_kline_debug_frontend(
+    ui: &mut Ui,
+    tab: &mut DagTab,
+    node_id: &str,
+    session_id: &str,
+    params: &KlineFrontendParams,
+) {
+    // ---- 1. 找到上游节点 ----
+    let Some((upstream_id, upstream_port)) = find_upstream_source(tab, node_id, 0) else {
+        ui.colored_label(
+            Color32::from_rgb(220, 180, 80),
+            "K线算子的输入端口未连接，无法获取上游 DataFrame。",
+        );
+        return;
+    };
+
+    // ---- 2. 查询上游节点输出 meta ----
+    let need_meta = tab
+        .debug_preview
+        .as_ref()
+        .map_or(true, |s| s.meta.is_none() && s.error.is_none());
+    if need_meta {
+        match query_meta_from_server(session_id, &upstream_id) {
+            Ok(meta) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.meta = Some(meta);
+                    state.error = None;
+                }
+            }
+            Err(e) => {
+                if let Some(state) = &mut tab.debug_preview {
+                    state.error = Some(format!("查询上游节点元信息失败: {}", e));
+                }
+            }
+        }
+    }
+
+    let meta_opt = tab.debug_preview.as_ref().and_then(|s| s.meta.clone());
+    let error_opt = tab.debug_preview.as_ref().and_then(|s| s.error.clone());
+
+    if let Some(err) = &error_opt {
+        ui.colored_label(Color32::from_rgb(231, 76, 60), err);
+        ui.add_space(8.0);
+        if ui.button("重试").clicked() {
+            if let Some(state) = &mut tab.debug_preview {
+                state.meta = None;
+                state.error = None;
+                state.cached_page = None;
+            }
+        }
+        return;
+    }
+
+    let meta = match &meta_opt {
+        Some(m) => m,
+        None => {
+            ui.label("正在查询上游节点元信息...");
+            return;
+        }
+    };
+
+    if meta.port_types.is_empty() {
+        ui.colored_label(
+            Color32::from_rgb(220, 180, 80),
+            "上游节点不在 Debug 会话中（可能未执行或执行失败）。请先在 Debug 模式下执行。",
+        );
+        return;
+    }
+
+    let port_type = meta.port_types.get(upstream_port).map(|s| s.as_str()).unwrap_or("");
+    let is_dfa = port_type == "DataFrameArray";
+    let is_df = port_type == "DataFrame";
+    if !is_dfa && !is_df {
+        ui.colored_label(
+            Color32::from_rgb(231, 76, 60),
+            format!(
+                "上游节点端口 #{} 非 DataFrameArray/DataFrame（实际: {}）。",
+                upstream_port, port_type
+            ),
+        );
+        return;
+    }
+
+    // ---- 3. DataFrame 切换导航 ----
+    let df_count = if is_dfa {
+        meta.port_page_counts.get(upstream_port).copied().unwrap_or(0)
+    } else {
+        1
+    };
+
+    if df_count == 0 {
+        ui.colored_label(
+            Color32::from_rgb(220, 180, 80),
+            "上游无 DataFrame 数据。",
+        );
+        return;
+    }
+
+    let mut current_df = tab
+        .debug_preview
+        .as_ref()
+        .and_then(|s| s.current_pages.get(&upstream_port).copied())
+        .unwrap_or(0);
+    if current_df >= df_count {
+        current_df = 0;
+    }
+
+    if df_count > 1 {
+        ui.horizontal(|ui| {
+            ui.strong(format!("DataFrame 切换 (共 {} 个)", df_count));
+            ui.separator();
+            if ui.button("‹").on_hover_text("上一个").clicked() {
+                current_df = if current_df == 0 { df_count - 1 } else { current_df - 1 };
+            }
+            ui.label(format!("[{}/{}]", current_df + 1, df_count));
+            if ui.button("›").on_hover_text("下一个").clicked() {
+                current_df = (current_df + 1) % df_count;
+            }
+            ui.separator();
+            let total_rows = meta.port_row_counts.get(upstream_port).copied().unwrap_or(0);
+            ui.colored_label(
+                Color32::from_rgb(180, 200, 220),
+                format!("合计 {} 行 / {} 个 DataFrame", total_rows, df_count),
+            );
+        });
+        ui.separator();
+    }
+
+    // ---- 4. 查询当前 DataFrame（DataFrameArray: page_idx = df_idx；DataFrame: page_idx = 0 全部返回）----
+    // 关键修复：把 `current_pages` 写回放在 cache_valid 检查之前，
+    // 确保本帧内 state 与 current_df 保持同步，避免重绘时被旧缓存覆盖。
+    let page_idx = if is_dfa { current_df } else { 0 };
+    let cached_data: Option<Option<PortData>> = {
+        // 先用局部 current_df（而不是 state 中的旧值）做缓存命中判断
+        let cache_valid = tab
+            .debug_preview
+            .as_ref()
+            .and_then(|s| s.cached_page.as_ref())
+            .map_or(false, |(p, pg, _)| *p == upstream_port && *pg == page_idx);
+
+        if cache_valid {
+            // 直接用 state 里的当前缓存（命中）
+            tab.debug_preview
+                .as_ref()
+                .and_then(|s| s.cached_page.as_ref())
+                .map(|(_, _, d)| d.clone())
+        } else {
+            // 缓存未命中：同步查询服务端，拿到本帧内唯一可信的 data
+            match query_page_from_server(session_id, &upstream_id, upstream_port, page_idx) {
+                Ok(data) => {
+                    if let Some(state) = &mut tab.debug_preview {
+                        state.cached_page = Some((upstream_port, page_idx, data.clone()));
+                        state.error = None;
+                        // 查询成功后再写回 current_pages，保证 state 与数据一致
+                        state.current_pages.insert(upstream_port, current_df);
+                    }
+                    Some(data)
+                }
+                Err(e) => {
+                    if let Some(state) = &mut tab.debug_preview {
+                        state.cached_page = None;
+                        state.error = Some(format!("查询 DataFrame 失败: {}", e));
+                        // 查询失败：把 current_pages 回滚到上一次成功的位置
+                        // 避免下一次重绘时 state 页码领先于实际缓存
+                    }
+                    ui.colored_label(
+                        Color32::from_rgb(231, 76, 60),
+                        format!("查询 DataFrame 失败: {}", e),
+                    );
+                    return;
+                }
+            }
+        }
+    };
+
+    let df = match cached_data {
+        None => {
+            ui.label("正在查询 DataFrame 数据...");
+            return;
+        }
+        Some(None) => {
+            ui.colored_label(
+                Color32::from_rgb(220, 180, 80),
+                format!("DataFrame #{} 不存在（越界）。", current_df),
+            );
+            return;
+        }
+        Some(Some(PortData::DataFrame(df))) => df,
+        // 防御性兜底：服务端通常返回 DataFrame，但若返回 DataFrameArray 取首个
+        Some(Some(PortData::DataFrameArray(dfs))) => {
+            if dfs.is_empty() {
+                ui.colored_label(
+                    Color32::from_rgb(220, 180, 80),
+                    "上游返回空 DataFrameArray。",
+                );
+                return;
+            }
+            dfs.into_iter().next().unwrap()
+        }
+        Some(Some(other)) => {
+            ui.colored_label(
+                Color32::from_rgb(231, 76, 60),
+                format!("服务端返回非 DataFrame（类型: {}）。", other.type_name()),
+            );
+            return;
+        }
+    };
+
+    // ---- 5. 前端按参数生成 DSL 并渲染 ----
+    let title = format!("DataFrame #{}", current_df + 1);
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "当前 DF: {} 行 × {} 列",
+            df.row_count,
+            df.columns.len()
+        ));
+        ui.separator();
+        ui.label(format!(
+            "列配置: open={} high={} low={} close={}",
+            params.open_col, params.high_col, params.low_col, params.close_col
+        ));
+    });
+    ui.separator();
+
+    match emit_chart_frontend(&df, params, &title) {
+        Ok(dsl) => {
+            // 传入带 df_idx 后缀的 node_id，让每个 DataFrame 拥有独立的缩放/滚动
+            // 状态。否则切换 DF 后图表仍用旧 DF 的缩放位置，新蜡烛可能在可见范围
+            // 之外，用户看到空白以为"无法切换"。
+            let chart_node_id = format!("{}_df{}", node_id, current_df);
+            render_dsl_body(ui, dsl.as_str(), &chart_node_id);
+        }
+        Err(e) => {
+            ui.colored_label(
+                Color32::from_rgb(231, 76, 60),
+                format!("生成 K线 DSL 失败: {}", e),
+            );
+            ui.add_space(4.0);
+            ui.label("请检查列名配置（open_col/high_col/low_col/close_col 必须为 Float64 列）。");
+            ui.separator();
+            // 列出 DataFrame 的所有列名和类型，方便排查
+            ui.label(format!("当前 DataFrame 列列表（共 {} 列）：", df.columns.len()));
+            for col in &df.columns {
+                let tname = match col.data_type {
+                    DataType::Float64 => "Float64",
+                    DataType::Int64 => "Int64",
+                    DataType::String => "String",
+                    DataType::Bool => "Bool",
+                    DataType::Null => "Null",
+                };
+                ui.label(format!("  {} ({})", col.name, tname));
             }
         }
     }

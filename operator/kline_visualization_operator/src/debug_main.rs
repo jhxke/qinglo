@@ -96,24 +96,37 @@ fn main() {
         df_b.row_count, df_b.columns.len(),
     );
 
-    // ---------- 1. 默认参数（全选） ----------
-    println!("\n########## 测试 1: 默认参数（全选）##########");
-    let json = r#"{}"#;
+    // ---------- 1. indices="0,1"（显式选两个 DF）----------
+    println!("\n########## 测试 1: indices=\"0,1\"（显式选 2 个 DF）##########");
+    let json = r#"{ "indices": "0,1" }"#;
     if let Some(PortData::String(dsl)) = run_kline(vec![df_a.clone(), df_b.clone()], json) {
         println!("--- DSL 输出 ({} 字符) ---\n{}", dsl.chars().count(), dsl);
     } else {
         println!("未得到 String 输出");
     }
 
-    // ---------- 2. indices="1" ----------
-    println!("\n########## 测试 2: indices=\"1\"（只取第 2 个）##########");
+    // ---------- 2. indices=""（空=不选，直接返回空 DSL，Debug 模式下由前端切换渲染）----------
+    println!("\n########## 测试 2: indices=\"\"（空=直接返回空 DSL）##########");
+    let json = r#"{}"#;
+    if let Some(PortData::String(dsl)) = run_kline(vec![df_a.clone(), df_b.clone()], json) {
+        if dsl.is_empty() {
+            println!("按预期返回空 DSL（空 indices 不再全选，避免大批量场景卡死）");
+        } else {
+            println!("--- DSL 输出 ({} 字符) ---\n{}", dsl.chars().count(), dsl);
+        }
+    } else {
+        println!("未得到 String 输出");
+    }
+
+    // ---------- 3. indices="1"（只取第 2 个）----------
+    println!("\n########## 测试 3: indices=\"1\"（只取第 2 个）##########");
     let json = r#"{ "indices": "1" }"#;
     if let Some(PortData::String(dsl)) = run_kline(vec![df_a.clone(), df_b.clone()], json) {
         println!("--- DSL 输出 ---\n{}", dsl);
     }
 
-    // ---------- 3. 自定义列名 ----------
-    println!("\n########## 测试 3: 自定义列名 ##########");
+    // ---------- 4. 自定义列名（显式 indices="0" 触发生成）----------
+    println!("\n########## 测试 4: 自定义列名 ##########");
     let mut df_c = DataFrame::new();
     let dates: Vec<Option<&str>> = (0..5).map(|i| Some(["d1", "d2", "d3", "d4", "d5"][i])).collect();
     df_c.add_column(DataFrame::new_string_column("dt", dates));
@@ -121,13 +134,13 @@ fn main() {
     df_c.add_column(DataFrame::new_float64_column("h", vec![Some(1.5); 5]));
     df_c.add_column(DataFrame::new_float64_column("l", vec![Some(0.5); 5]));
     df_c.add_column(DataFrame::new_float64_column("c", vec![Some(1.2); 5]));
-    let json = r#"{ "open_col": "o", "high_col": "h", "low_col": "l", "close_col": "c", "date_col": "dt", "ma5_col": "", "ma10_col": "" }"#;
+    let json = r#"{ "indices": "0", "open_col": "o", "high_col": "h", "low_col": "l", "close_col": "c", "date_col": "dt", "ma5_col": "", "ma10_col": "" }"#;
     if let Some(PortData::String(dsl)) = run_kline(vec![df_c], json) {
         println!("--- DSL 输出 ---\n{}", dsl);
     }
 
-    // ---------- 4. 缺 MA10 列 ----------
-    println!("\n########## 测试 4: 缺 MA10 列（应只输出 MA5 线）##########");
+    // ---------- 5. 缺 MA10 列 ----------
+    println!("\n########## 测试 5: 缺 MA10 列（应只输出 MA5 线）##########");
     let json = r#"{ "indices": "0" }"#;
     if let Some(PortData::String(dsl)) = run_kline(vec![df_a], json) {
         println!("--- DSL 输出 ---\n{}", dsl);

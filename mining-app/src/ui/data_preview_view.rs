@@ -32,11 +32,7 @@ const DEBUG_PAGE_SIZE: usize = 200;
 pub fn render_data_preview_window(ui: &mut Ui, tab: &mut DagTab) {
     let node_id = match tab.preview_node_id.clone() {
         Some(id) => id,
-        None => {
-            // 预览窗口关闭时清空 Debug 预览状态，下次打开重新查询
-            tab.debug_preview = None;
-            return;
-        }
+        None => return,
     };
 
     // 判断是否走 Debug 模式预览（服务端分页查询）

@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 
 /// K线可视化算子参数（全部 String，与前端字符串输入一致）。
 ///
-/// `indices` 为 0 基逗号分隔下标，空表示选取全部 DataFrame；
+/// `indices` 为 0 基逗号分隔下标，空表示不选（直接返回空 DSL）；
 /// 各 `*_col` 指定列名，空字符串表示使用默认列名。
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct KlineParams {
-    /// 选取 DataFrameArray 的 0 基下标，逗号分隔，如 "1,2"；空 = 全选
+    /// 选取 DataFrameArray 的 0 基下标，逗号分隔，如 "1,2"；空 = 不选（返回空 DSL）
     #[serde(default)]
     pub indices: String,
     /// 开盘价列名（默认 "open"）
@@ -233,15 +233,25 @@ fn push_ma_values(out: &mut String, values: Vec<Option<f64>>, n: usize) {
 
 /// K线可视化算子的执行函数（C ABI）。
 ///
-/// 支持 DataFrameArray 输入：按 `indices` 选取子数组（空=全选），逐个 DataFrame
-/// 生成 `kline` 块，拼成完整 DSL 文本，以 `PortData::String` 输出。
+/// 支持 DataFrameArray 输入：
+/// - 显式指定 `indices`（如 "0" 或 "0,1,5"）→ 仅对选中的下标逐个 DataFrame
+///   生成 `kline` 块，拼成完整 DSL 文本，以 `PortData::String` 输出。
+/// - `indices` 为空 → **直接返回空 DSL**（不再「全选」全部 DF）。
+///   原因：大 DataFrameArray（成百上千个 DF）场景下全选会导致：
+///     ① 算子 CPU/内存暴涨，执行时间过长（用户感知「卡、不出结果」）
+///     ② 返回 DSL 字符串巨大、服务端 Debug 缓存膨胀
+///     ③ 下游 DSL 解析 / 渲染端阻塞
+///   对应解决方案：**Debug 模式 + 空 indices** 触发前端预览窗口走
+///   「前端渲染分支」——从上游节点 Debug 会话中分页取 DataFrame，
+///   根据算子参数在前端按需生成单个 kline 块 DSL，并提供 DF 切换导航
+///   查看任意一个。
 ///
 /// 返回值:
-/// - 0: 成功
+/// - 0: 成功（包括空 indices 返回空 DSL、所有 DF 都生成失败但没硬错）
 /// - -1: runtime 加载失败
 /// - -3: 缺少输入数据
-/// - -4: 输入不是 DataFrame / DataFrameArray 类型
-/// - -5: 输入 DataFrame 数组为空
+/// - -4: 输入不是 DataFrame / DataFrameArray 类型，或全部选中 DF 无法生成有效图表
+/// - -5: 输入 DataFrame 数组为空 / 显式 indices 未选中任何 DF
 #[no_mangle]
 pub extern "C" fn execute_operator(
     inputs: *const CPortData,
@@ -296,10 +306,44 @@ pub extern "C" fn execute_operator(
         return -5;
     }
 
-    // 按 indices 选取子集（空 = 全选）
+    // 按 indices 选取子集（空 = 不选）
+    //
+    // 空 indices 的语义：不再像过去那样「全选」，而是直接返回空 DSL。
+    // 原因：
+    //   1. DataFrameArray 可能有成百上千个 DF，一次性生成 DSL 会导致算子
+    //      执行时间过长（CPU 耗死、返回 DSL 字符串巨大、服务端缓存膨胀），
+    //      表现为用户感知的「算子一直在进行，不出结果」。
+    //   2. 前端 Debug 模式下如果检测到 indices 为空，会走「前端渲染分支」
+    //      ——从上游节点的 Debug 会话中按需分页取 DataFrame，再根据算子参数
+    //      在前端生成单个 kline 块 DSL，并提供 DF 切换导航来查看任意一个，
+    //      不需要算子本身生成完整大 DSL。
+    //   3. 非 Debug 模式（或用户想让算子生成多图 DSL）时，必须显式指定
+    //      indices，如 "0" 或 "0,1,5"，避免误触发大批量生成。
     let indices = parse_indices(&params.indices);
     let selected: Vec<&DataFrame> = if indices.is_empty() {
-        input_dfs.iter().collect()
+        println!(
+            "K线算子: indices 为空，跳过 DSL 生成（共 {} 个 DataFrame）。\n\
+             → Debug 模式下请使用前端预览窗口逐个查看 DataFrame。\n\
+             → 非 Debug 模式下如需算子生成多图 DSL，请显式设置 indices，例如 indices=\"0\" 或 indices=\"0,1,5\"。",
+            input_dfs.len()
+        );
+        // 清空错误信息：空 DSL 仍视为成功（算子正常结束）
+        let c_msg = CString::new("").unwrap_or_default();
+        c_set_last_error(c_msg.as_ptr());
+        let port_data = PortData::String(String::new());
+        if !outputs.is_null() && output_cap > 0 {
+            let c_pd = operator_runtime::c_abi::portdata_to_c_owned(port_data);
+            unsafe {
+                *outputs = c_pd;
+                if output_cap > 1 {
+                    *outputs.add(1) = CPortData {
+                        type_tag: TYPE_NULL,
+                        value: CPortValue { str_ptr: std::ptr::null_mut() },
+                    };
+                }
+            }
+        }
+        return 0;
     } else {
         indices
             .iter()
@@ -324,7 +368,7 @@ pub extern "C" fn execute_operator(
 
     println!(
         "K线算子: indices={:?}, 选中 {} 个 DataFrame (共 {}), 列配置 open={}/high={}/low={}/close={}/date={}/ma5={}/ma10={}",
-        if indices.is_empty() { "全部".to_string() } else { params.indices.clone() },
+        params.indices,
         selected.len(),
         input_dfs.len(),
         params.open_col, params.high_col, params.low_col, params.close_col,
