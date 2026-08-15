@@ -79,6 +79,9 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     // 用于 Executing 状态的脉冲动画（节点边框/徽标随时间正弦变化）
     let time = ui.input(|i| i.time) as f32;
 
+    // 先画连线、后画节点：节点盖住穿过其主体的线段，避免连线浮在节点
+    // 之上遮挡文字/端口。曲线两端的控制点已做水平外伸处理，连接点
+    // （端口圆点）仍在节点边缘外侧可见，不会被节点矩形覆盖。
     for edge in &tab.graph.edges {
         render_edge(&painter, edge, &tab.graph, rect.min, tab.canvas_zoom, tab.canvas_offset);
     }
@@ -583,6 +586,68 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         }
     }
 
+    // ===== 方向键移动选中节点 =====
+    // 选中节点后, 上/下/左/右方向键可移动节点:
+    //   - 单击方向键 → 立即移动一步 (ARROW_STEP 画布单位)
+    //   - 长按方向键 → 停顿 ARROW_INITIAL_DELAY 后, 以 ARROW_REPEAT_INTERVAL 间隔连续移动
+    // 仅在没有文本输入框聚焦时响应, 避免与参数面板 / 搜索框的文本编辑冲突。
+    const ARROW_STEP: f32 = 10.0;
+    const ARROW_INITIAL_DELAY: f64 = 0.3;
+    const ARROW_REPEAT_INTERVAL: f64 = 0.05;
+
+    let arrow_ok = tab.selected_node_id.is_some() && !ui.ctx().wants_keyboard_input();
+    if arrow_ok {
+        let (now, up_p, up_d, down_p, down_d, left_p, left_d, right_p, right_d) = ui.input(|i| (
+            i.time,
+            i.key_pressed(egui::Key::ArrowUp),    i.key_down(egui::Key::ArrowUp),
+            i.key_pressed(egui::Key::ArrowDown),  i.key_down(egui::Key::ArrowDown),
+            i.key_pressed(egui::Key::ArrowLeft),  i.key_down(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight), i.key_down(egui::Key::ArrowRight),
+        ));
+
+        let mut delta = Vec2::ZERO;
+        let mut any_pressed = false;
+        let mut any_down = false;
+
+        // 首次按下: 立即移动一步
+        if up_p { delta.y -= ARROW_STEP; any_pressed = true; }
+        if down_p { delta.y += ARROW_STEP; any_pressed = true; }
+        if left_p { delta.x -= ARROW_STEP; any_pressed = true; }
+        if right_p { delta.x += ARROW_STEP; any_pressed = true; }
+        if up_d || down_d || left_d || right_d { any_down = true; }
+
+        if any_pressed {
+            tab.arrow_move_timer = Some((now, now));
+        } else if any_down {
+            // 长按节流: 超过初始延迟后, 以固定间隔连续移动当前所有按下的方向键
+            if let Some((start, last)) = tab.arrow_move_timer {
+                if now - start > ARROW_INITIAL_DELAY && now - last > ARROW_REPEAT_INTERVAL {
+                    if up_d { delta.y -= ARROW_STEP; }
+                    if down_d { delta.y += ARROW_STEP; }
+                    if left_d { delta.x -= ARROW_STEP; }
+                    if right_d { delta.x += ARROW_STEP; }
+                    tab.arrow_move_timer = Some((start, now));
+                }
+            } else {
+                // 焦点恢复时键已处于按下状态 (如切 tab 回来): 初始化计时器, 不立即移动
+                tab.arrow_move_timer = Some((now, now));
+            }
+        } else {
+            tab.arrow_move_timer = None;
+        }
+
+        if delta != Vec2::ZERO {
+            if let Some(node_id) = tab.selected_node_id.clone() {
+                if let Some(node) = tab.graph.get_node_mut(&node_id) {
+                    node.position += delta;
+                    tab.dirty = true;
+                }
+            }
+        }
+    } else {
+        tab.arrow_move_timer = None;
+    }
+
     if let Some(msg) = &tab.error_message {
         let is_error = msg.contains("失败") || msg.contains("错误");
         let color = if is_error { Color32::RED } else { Color32::GREEN };
@@ -684,19 +749,25 @@ fn render_edge(
                 || node_horizontal_span <= small_span_threshold)
                 && vertical_span > screen_node_h * 0.6;
 
+            // 贝塞尔控制点策略：两端都保证一小段「水平直线」接入端口，
+            // 这样曲线在出口/入口处与节点边缘清晰分离，不会被矩形遮挡。
+            //   - 出口端口在节点右侧 → control1 向屏幕右侧伸 (x + offset)
+            //   - 入口端口在节点左侧 → control2 向屏幕左侧伸 (x - offset)
+            // 当中段再通过两个控制点的水平位置形成平滑的 S / C 过渡。
+            let horizontal_arm = screen_node_w * 0.4; // 两端水平臂的伸出长度
             let (control1, control2) = if is_vertical_parallel {
-                // 垂直平行时，两端控制点都推到端口右侧，形成双曲线：
-                // 出口水平拐出，入口水平拐入，两端都清晰可见.
-                let offset = screen_node_w * 0.3;
+                // 垂直平行（节点上下紧挨、水平跨度小）：形成 C 形绕路，
+                // 出口右拐出、入口左拐入，两端在节点外都有可见的水平连接段。
+                let loop_out = horizontal_arm + screen_node_w * 0.2; // 额外再伸出一些，避免贴脸
                 (
-                    Pos2::new(screen_start.x + offset, screen_start.y),
-                    Pos2::new(screen_end.x + offset * 0.5, screen_end.y),
+                    Pos2::new(screen_start.x + loop_out, screen_start.y),
+                    Pos2::new(screen_end.x - loop_out, screen_end.y),
                 )
             } else {
-                let mid_x = (screen_start.x + screen_end.x) / 2.0;
+                // 常规水平布局：出口右侧伸出、入口左侧伸出，形成平滑 S 形。
                 (
-                    Pos2::new(mid_x, screen_start.y),
-                    Pos2::new(mid_x, screen_end.y),
+                    Pos2::new(screen_start.x + horizontal_arm, screen_start.y),
+                    Pos2::new(screen_end.x - horizontal_arm, screen_end.y),
                 )
             };
 
@@ -810,17 +881,18 @@ fn edge_hit_test(
         || node_horizontal_span <= small_span_threshold)
         && vertical_span > screen_node_h * 0.6;
 
+    // 与 render_edge 中的控制点计算完全一致，保证点击命中区域与实际绘制的曲线重合。
+    let horizontal_arm = screen_node_w * 0.4;
     let (control1, control2) = if is_vertical_parallel {
-        let offset = screen_node_w * 0.3;
+        let loop_out = horizontal_arm + screen_node_w * 0.2;
         (
-            Pos2::new(screen_start.x + offset, screen_start.y),
-            Pos2::new(screen_end.x + offset * 0.5, screen_end.y),
+            Pos2::new(screen_start.x + loop_out, screen_start.y),
+            Pos2::new(screen_end.x - loop_out, screen_end.y),
         )
     } else {
-        let mid_x = (screen_start.x + screen_end.x) / 2.0;
         (
-            Pos2::new(mid_x, screen_start.y),
-            Pos2::new(mid_x, screen_end.y),
+            Pos2::new(screen_start.x + horizontal_arm, screen_start.y),
+            Pos2::new(screen_end.x - horizontal_arm, screen_end.y),
         )
     };
 

@@ -298,6 +298,9 @@ pub struct DagTab {
     pub debug_session_id: Option<String>,
     /// Debug 模式下数据预览的分页查询状态。预览窗口打开时初始化，关闭时清空。
     pub debug_preview: Option<DebugPreviewState>,
+    /// 方向键连续移动选中节点的节流计时器: (首次按下时间, 上次移动时间)
+    /// None 表示当前没有方向键被按住; 单击移动一步, 长按超过初始延迟后连续移动。
+    pub arrow_move_timer: Option<(f64, f64)>,
 }
 
 impl DagTab {
@@ -340,6 +343,7 @@ impl DagTab {
             debug_mode: false,
             debug_session_id: None,
             debug_preview: None,
+            arrow_move_timer: None,
         }
     }
 
