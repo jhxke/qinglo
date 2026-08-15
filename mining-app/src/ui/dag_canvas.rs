@@ -1,4 +1,8 @@
-use egui::{Painter, Rect, Pos2, Stroke, Shape, Ui, Vec2, Color32};
+use egui::{
+    Painter, Rect, Pos2, Stroke, Shape, Ui, Vec2, Color32, FontFamily, Align,
+    text::{LayoutJob, LayoutSection, TextFormat, TextWrapping},
+};
+use std::sync::Arc;
 use crate::dag::{DagGraph, Edge, Node};
 use operator_executor_client::protocol::OperatorExecutionStatus;
 use super::state::DagTab;
@@ -7,6 +11,68 @@ const NODE_WIDTH: f32 = 140.0;
 const NODE_HEIGHT: f32 = 60.0;
 const PORT_RADIUS: f32 = 6.0;
 const PORT_PADDING: f32 = 8.0;
+
+/// 在给定矩形内适配渲染文字：
+///   1. 每行内部水平居中 (LayoutJob.halign = Center)，
+///   2. 整体自动换行 (TextWrapping.max_width = 内边距矩形宽度)，
+///   3. 换行后若仍超出高度则逐级缩小字号，
+///   4. 最终整个 galley 在节点矩形内垂直居中 + 水平居中。
+///
+/// 注意 epaint 0.26 的 Galley 坐标系与 halign 绑定：
+///   - LEFT:  galley.rect.left()   == 0  (原点 = 文字块左上)
+///   - Center: galley.rect.center().x == 0  (原点 = 文字块中上)
+///   - RIGHT: galley.rect.right()  == 0  (原点 = 文字块右上)
+/// 所以 halign=Center 时，绘制起点的 x 必须是目标中心的 x，而不是左边界。
+fn fit_text_in_rect(
+    painter: &Painter,
+    text: &str,
+    rect: Rect,
+    padding: f32,
+    base_font_size: f32,
+    min_font_size: f32,
+    color: Color32,
+) -> (Arc<egui::Galley>, Pos2) {
+    let inner_rect = rect.shrink(padding);
+    let max_width = inner_rect.width().max(1.0);
+    let max_height = inner_rect.height().max(1.0);
+    let text_owned = text.to_string();
+    let text_len = text_owned.len();
+
+    // 从基准字号开始尝试，若超过高度则逐级缩小，直到不超高或达到最小字号
+    let mut font_size = base_font_size;
+    let step = 1.0;
+    loop {
+        let font_id = egui::FontId::new(font_size, FontFamily::Proportional);
+        let job = LayoutJob {
+            text: text_owned.clone(),
+            sections: vec![LayoutSection {
+                leading_space: 0.0,
+                byte_range: 0..text_len,
+                format: TextFormat {
+                    font_id: font_id.clone(),
+                    color,
+                    ..Default::default()
+                },
+            }],
+            wrap: TextWrapping {
+                max_width,
+                ..Default::default()
+            },
+            halign: Align::Center,
+            ..Default::default()
+        };
+        let galley = painter.ctx().fonts(|fonts| fonts.layout_job(job));
+        if galley.size().y <= max_height || font_size <= min_font_size {
+            // 垂直居中：起点 y = inner_rect.top + (max_height - galley_height) / 2
+            // 水平居中：因为 halign=Center 时 galley.rect.center().x == 0，
+            //           起点 x 必须设为内边距矩形的中心 x。
+            let offset_y = (max_height - galley.size().y) * 0.5;
+            let pos = Pos2::new(inner_rect.center().x, inner_rect.top() + offset_y);
+            return (galley, pos);
+        }
+        font_size = (font_size - step).max(min_font_size);
+    }
+}
 
 // 输入端口 (节点左侧) 与输出端口 (节点右侧) 使用不同颜色, 便于区分方向.
 const INPUT_PORT_COLOR: Color32 = Color32::from_rgb(90, 160, 255);   // 蓝色
@@ -122,13 +188,21 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
             node.operator_type.color(),
         );
 
-        painter.text(
-            screen_rect.center(),
-            egui::Align2::CENTER_CENTER,
+        // 算子名字：先按屏幕缩放调整基准字号，再在节点矩形内自动换行+缩字号，
+        // 保证长名称也不会超出节点边框。默认字号约 14px，随画布整体缩放调整。
+        let text_padding = 6.0 * tab.canvas_zoom;
+        let base_fs = (14.0 * tab.canvas_zoom).max(6.0);
+        let min_fs = (8.0 * tab.canvas_zoom).max(5.0);
+        let (galley, gpos) = fit_text_in_rect(
+            &painter,
             node.operator_type.name(),
-            egui::FontId::default(),
+            screen_rect,
+            text_padding,
+            base_fs,
+            min_fs,
             Color32::WHITE,
         );
+        painter.galley(gpos, galley, Color32::WHITE);
 
         // Executing 状态：节点边框脉冲高亮（黄色，线宽随时间正弦变化），
         // 让用户实时看到当前正在运行哪个算子。
@@ -342,13 +416,20 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                     preview_inner_radius,
                     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 90),
                 );
-                painter.text(
-                    preview_rect.center(),
-                    egui::Align2::CENTER_CENTER,
+                // 拖拽预览算子名：与正式节点使用相同的自动换行+缩放逻辑
+                let preview_text_padding = 6.0 * tab.canvas_zoom;
+                let preview_base_fs = (14.0 * tab.canvas_zoom).max(6.0);
+                let preview_min_fs = (8.0 * tab.canvas_zoom).max(5.0);
+                let (preview_galley, preview_gpos) = fit_text_in_rect(
+                    &painter,
                     op.name(),
-                    egui::FontId::default(),
+                    preview_rect,
+                    preview_text_padding,
+                    preview_base_fs,
+                    preview_min_fs,
                     Color32::WHITE,
                 );
+                painter.galley(preview_gpos, preview_galley, Color32::WHITE);
             } else {
                 // 不在画布上时, 在鼠标旁绘制小标签提示当前拖拽的算子
                 let label_text = format!("拖拽: {}", op.name());
