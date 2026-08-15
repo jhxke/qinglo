@@ -83,9 +83,29 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     // 记录画布屏幕矩形, 供算子面板计算点击添加位置 (下一帧生效)
     tab.canvas_viewport_rect = Some(rect);
 
+    // 画布拖动前预扫描节点 hit-test: 判断 pointer 是否落在任意节点 rect 上。
+    // 必要性: 画布拖动在下方第 ~95 行执行, 早于节点 interact(第 ~478 行); 节点拖动
+    // 第一帧 dragging_node_id 尚为 None, 若仅靠该标志判断, 画布会误跟随移动, 导致
+    // 节点首帧位移 = drag_delta + drag_delta*zoom(zoom=1 时跳 2 倍), 后续帧才正常,
+    // 视觉上即"节点不跟鼠标"。预扫描用与渲染时一致的 screen_rect 公式做 hit-test。
+    let pointer_on_node = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| {
+        tab.graph.nodes.iter().any(|n| {
+            let nr = Rect::from_center_size(
+                n.position.to_pos2(),
+                Vec2::new(NODE_WIDTH, NODE_HEIGHT),
+            );
+            let sr = Rect::from_min_max(
+                rect.min + (nr.min.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
+                rect.min + (nr.max.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
+            );
+            sr.contains(p)
+        })
+    });
+
     if response.dragged()
         && tab.dragging_node_id.is_none()
         && tab.dragging_operator.is_none()
+        && !pointer_on_node
     {
         tab.canvas_offset += response.drag_delta();
         // 拖动画布平移时, 把鼠标切换为抓取手型(Grabbing), 直观提示正在拖拽画布.
@@ -134,26 +154,35 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
 
     let grid_size = 20.0;
     let grid_color = super::theme::CANVAS_GRID;
+    let grid_stroke = Stroke::new(1.0, grid_color);
 
-    for x in (rect.left().floor() as i32..rect.right().ceil() as i32).step_by(grid_size as usize) {
-        painter.line_segment(
-            [
-                Pos2::new(x as f32, rect.top()),
-                Pos2::new(x as f32, rect.bottom()),
-            ],
-            Stroke::new(1.0, grid_color),
-        );
-    }
+    // 网格线合并为 2 条折线（所有竖线一条、所有横线一条），用 NAN 断点分隔
+    // 各线段。把原本 ~70 个独立 Shape::line_segment 压成 2 个 Shape::line，
+    // epaint tessellator 只需处理 2 个 path、生成 2 个连续 vertex buffer，
+    // 显著减少 draw call 与每帧 tessellate 工作量（拖动/平移画布时 GPU 占用
+    // 明显下降）。epaint 的 path_to_compound_polygons 原生按 NAN 切分 sub-path。
+    let nan = Pos2::new(f32::NAN, f32::NAN);
+    let step = grid_size as i32;
 
-    for y in (rect.top().floor() as i32..rect.bottom().ceil() as i32).step_by(grid_size as usize) {
-        painter.line_segment(
-            [
-                Pos2::new(rect.left(), y as f32),
-                Pos2::new(rect.right(), y as f32),
-            ],
-            Stroke::new(1.0, grid_color),
-        );
+    let mut vpoints: Vec<Pos2> = Vec::new();
+    let mut x = rect.left().floor() as i32;
+    while x <= rect.right().ceil() as i32 {
+        vpoints.push(Pos2::new(x as f32, rect.top()));
+        vpoints.push(Pos2::new(x as f32, rect.bottom()));
+        vpoints.push(nan);
+        x += step;
     }
+    painter.add(Shape::line(vpoints, grid_stroke));
+
+    let mut hpoints: Vec<Pos2> = Vec::new();
+    let mut y = rect.top().floor() as i32;
+    while y <= rect.bottom().ceil() as i32 {
+        hpoints.push(Pos2::new(rect.left(), y as f32));
+        hpoints.push(Pos2::new(rect.right(), y as f32));
+        hpoints.push(nan);
+        y += step;
+    }
+    painter.add(Shape::line(hpoints, grid_stroke));
 
     let mut node_interactions = Vec::new();
     // 用于 Executing 状态的脉冲动画（节点边框/徽标随时间正弦变化）
@@ -480,6 +509,12 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     for interaction in &node_interactions {
         if let NodeInteraction::Node { node_id, rect, canvas_zoom } = interaction {
             let response = ui.interact(*rect, egui::Id::new(format!("node_{}", node_id)), egui::Sense::click_and_drag());
+            // 悬停算子节点时显示食指小手, 提示可点击选中/双击编辑/拖拽移动
+            // (后续 response.double_clicked()/clicked()/dragged() 等仍借用 response,
+            //  故用 ctx.set_cursor_icon 而非消费所有权的 on_hover_cursor)
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             // 双击才弹出参数面板，单击仅选中、拖动仅移动节点，三者解耦避免操作冲突。
             // 双击的第一次 click 会先走 clicked 分支隐藏面板，第二次 click 那帧
             // double_clicked 命中再显示，最终参数面板正常弹出。
@@ -503,6 +538,9 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 tab.dragging_node_id = Some(node_id.clone());
                 update_node_position(tab, &node_id, response.drag_delta() / *canvas_zoom);
                 tab.dirty = true;
+                // 拖动节点期间显示抓取手型(Grabbing), 与画布平移拖动光标一致;
+                // 覆盖悬停时的 PointingHand, 且即便指针移出节点原 rect 仍持续显示
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
             // 仅在拖拽真正结束时释放, 避免其他节点的循环把 dragging_node_id 错误清空
             // (那会导致画布在拖节点时也跟随移动)
@@ -512,6 +550,9 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 }
             }
             response.context_menu(|ui| {
+                // 菜单项悬停显示食指小手: 显式设置 interact_cursor, 防止 popup
+                // visuals 未继承全局值导致 Button 光标失效
+                ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                 if ui.button("运行到此结点").clicked() {
                     ui.close_menu();
                     // 跨借用：闭包内无法持有 &mut DagEditorState，写入 pending 标志，
@@ -607,6 +648,7 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                 let hit_rect = Rect::from_center_size(mouse_pos, Vec2::new(16.0, 16.0));
                 let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
                 response.context_menu(|ui| {
+                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                     if ui.button("删除连线").clicked() {
                         ui.close_menu();
                         tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
@@ -632,6 +674,7 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                     handle_port_click(tab, node_id, *port_index, false);
                 }
                 response.context_menu(|ui| {
+                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                     ui.label(format!("输入端口 #{}", port_index));
                     if let Some(node) = tab.graph.get_node(node_id) {
                         // 显示该输入端口的名字（如 input_0）便于识别
@@ -682,6 +725,7 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
                     handle_port_click(tab, node_id, *port_index, true);
                 }
                 response.context_menu(|ui| {
+                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                     ui.label(format!("输出端口 #{}", port_index));
                 });
             }

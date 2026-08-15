@@ -100,6 +100,11 @@ fn setup_dark_theme(ctx: &egui::Context) {
     visuals.widgets.active.bg_fill = theme::HOVER_BG;
     visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::ACCENT);
 
+    // 全局交互光标: 所有 Button(含右键菜单项/对话框按钮/设置页按钮等)悬停时
+    // 显示食指指向小手, 统一可点击交互的视觉提示. egui 的 Button widget 内部
+    // 会读取 visuals.interact_cursor 并在 hovered 时调用 set_cursor_icon.
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+
     ctx.set_visuals(visuals);
 }
 

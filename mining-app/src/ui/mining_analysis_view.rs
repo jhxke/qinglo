@@ -258,6 +258,10 @@ fn render_dag_tab(
 ) -> (bool, bool, Rect) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let hovered = response.hovered();
+    // 悬停标签体时显示食指小手, 提示可点击切换 tab
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let painter = ui.painter();
 
     // 背景：激活与内容区一致，悬停略提亮，其余沉入标签条底色
@@ -500,6 +504,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let lens_cx = rect.center().x - 2.0;
             let lens_cy = rect.center().y - 2.0;
@@ -534,6 +539,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let lens_cx = rect.center().x - 2.0;
             let lens_cy = rect.center().y - 2.0;
@@ -592,6 +598,9 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             if bg != Color32::TRANSPARENT {
                 painter.rect_filled(rect, 5.0, bg);
             }
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             let col = if on { super::theme::ACCENT } else { icon_color };
             let stroke = Stroke::new(1.4, col);
             // 侧边栏图标：方框 + 中间竖线
@@ -625,6 +634,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let cx = rect.center().x;
             let cy = rect.center().y;
@@ -654,6 +664,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let cx = rect.center().x;
             let cy = rect.center().y;
@@ -718,6 +729,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             let r = rect.center();
             // 保存按钮使用蓝色（主题强调色），与其他工具栏图标区分，强调「安全写入」语义
@@ -790,6 +802,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 let painter = ui.painter();
                 if align_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 let col = if align_enabled { accent } else { disabled_color };
                 let stroke = Stroke::new(1.6, col);
@@ -827,6 +840,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 let painter = ui.painter();
                 if align_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 let col = if align_enabled { accent } else { disabled_color };
                 let stroke = Stroke::new(1.6, col);
@@ -864,6 +878,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 let painter = ui.painter();
                 if undo_enabled && resp.hovered() {
                     painter.rect_filled(rect, 5.0, hover_bg);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 let col = if undo_enabled { accent } else { disabled_color };
                 let stroke = Stroke::new(1.6, col);
@@ -923,6 +938,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             // Debug 模式开启时用橙色高亮背景，关闭时仅描边
             if debug_on {
@@ -991,6 +1007,7 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             let painter = ui.painter();
             if resp.hovered() && !running {
                 painter.rect_filled(rect, 5.0, hover_bg);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             // 绿色三角形（播放图标），强调「开始执行」语义；执行中略暗以示忙碌
             let run_color = if running {
@@ -1206,6 +1223,7 @@ fn render_models_panel(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 }
             }
             response.context_menu(|ui| {
+                ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                 if ui.button("重命名").clicked() {
                     ui.close_menu();
                     editor_state.rename_target_id = Some(meta.id.clone());
@@ -2429,9 +2447,15 @@ pub fn poll_dag_exec_task(ctx: &Context, editor_state: &mut DagEditorState) {
                 break (task.kind.clone(), res);
             }
             Err(mpsc::TryRecvError::Empty) => {
-                // 还在执行，放回任务并请求持续刷新（保持「执行中」指示动画/持续轮询）
+                // 还在执行，放回任务并请求持续刷新（保持「执行中」指示动画/持续轮询）。
+                // 节流为 50ms（20 FPS）：执行期间唯一需要重绘的是 Executing 节点的
+                // 脉冲动画（边框 sin 周期 ~2.5s、角标圆环 sin 周期 ~2.1s），20 FPS 下
+                // 每周期 ~50 个采样点，视觉完全平滑。若用 request_repaint()（立即下一帧）
+                // 会让整个执行期间以满帧（60-144 FPS）持续重绘，GPU 占用居高不下。
+                // 真实进度事件（NodeProgress/StreamChunk/Finished）由工作线程的
+                // request_repaint() 即时唤醒 UI 线程排空通道，不受此节流影响。
                 editor_state.dag_exec_task = Some(task);
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 return;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
