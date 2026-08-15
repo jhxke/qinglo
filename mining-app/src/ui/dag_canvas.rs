@@ -79,6 +79,10 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     // 用于 Executing 状态的脉冲动画（节点边框/徽标随时间正弦变化）
     let time = ui.input(|i| i.time) as f32;
 
+    for edge in &tab.graph.edges {
+        render_edge(&painter, edge, &tab.graph, rect.min, tab.canvas_zoom, tab.canvas_offset);
+    }
+
     for node in &tab.graph.nodes {
         let node_rect = Rect::from_center_size(
             node.position.to_pos2(),
@@ -267,10 +271,6 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
             rect: screen_rect,
             canvas_zoom: tab.canvas_zoom,
         });
-    }
-
-    for edge in &tab.graph.edges {
-        render_edge(&painter, edge, &tab.graph, rect.min, tab.canvas_zoom, tab.canvas_offset);
     }
 
     if let Some((source_node_id, source_port, is_output)) = &tab.connecting_from {
@@ -493,21 +493,22 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         }
     }
 
-    // 第二轮: 连线右键删除 — 中优先级。连线 hit-rect 覆盖其两端端口, 但端口在第三轮
-    // 后 interact, 优先级更高, 故连线端点处的点击会让位给端口 (保证已连线端口仍可
-    // 扇出); 删除连线请在线段中段右键。
-    for edge in tab.graph.edges.clone() {
-        if let Some(hit_rect) = edge_hit_rect(&tab.graph, edge.id.clone(), rect.min, tab.canvas_zoom, tab.canvas_offset) {
-            let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
-            response.context_menu(|ui| {
-                if ui.button("删除连线").clicked() {
-                    ui.close_menu();
-                    // 删除连线时，级联失效目标节点及其所有下游节点
-                    tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
-                    tab.graph.remove_edge(&edge.id);
-                    tab.dirty = true;
-                }
-            });
+    // 第二轮: 连线右键删除 — 仅当鼠标靠近贝塞尔曲线时才响应,
+    // 不会出现大包围盒遮挡节点的问题.
+    if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
+        for edge in tab.graph.edges.clone() {
+            if edge_hit_test(&tab.graph, edge.id.clone(), mouse_pos, rect.min, tab.canvas_zoom, tab.canvas_offset) {
+                let hit_rect = Rect::from_center_size(mouse_pos, Vec2::new(16.0, 16.0));
+                let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
+                response.context_menu(|ui| {
+                    if ui.button("删除连线").clicked() {
+                        ui.close_menu();
+                        tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
+                        tab.graph.remove_edge(&edge.id);
+                        tab.dirty = true;
+                    }
+                });
+            }
         }
     }
 
@@ -668,9 +669,36 @@ fn render_edge(
             let screen_start = canvas_offset + (start.to_vec2() + view_offset) * canvas_zoom;
             let screen_end = canvas_offset + (end.to_vec2() + view_offset) * canvas_zoom;
 
-            let mid_x = (screen_start.x + screen_end.x) / 2.0;
-            let control1 = Pos2::new(mid_x, screen_start.y);
-            let control2 = Pos2::new(mid_x, screen_end.y);
+            let screen_node_w = NODE_WIDTH * canvas_zoom;
+            let screen_node_h = NODE_HEIGHT * canvas_zoom;
+
+            // 当源节点的输出端口 x 坐标已经接近或超过目标节点的输入端口 x 坐标,
+            // 或源/目标节点的水平跨度相对于节点宽度非常小（近似上下对齐）,
+            // 并且在垂直方向上有明显跨度时，将控制点推到节点外侧形成 C 形绕路,
+            // 避免贝塞尔曲线穿过节点矩形本身.
+            let port_horizontal_gap = screen_end.x - screen_start.x;
+            let node_horizontal_span = (screen_end.x - screen_start.x).abs();
+            let vertical_span = (screen_end.y - screen_start.y).abs();
+            let small_span_threshold = screen_node_w * 0.3;
+            let is_vertical_parallel = (port_horizontal_gap <= small_span_threshold
+                || node_horizontal_span <= small_span_threshold)
+                && vertical_span > screen_node_h * 0.6;
+
+            let (control1, control2) = if is_vertical_parallel {
+                // 垂直平行时，两端控制点都推到端口右侧，形成双曲线：
+                // 出口水平拐出，入口水平拐入，两端都清晰可见.
+                let offset = screen_node_w * 0.3;
+                (
+                    Pos2::new(screen_start.x + offset, screen_start.y),
+                    Pos2::new(screen_end.x + offset * 0.5, screen_end.y),
+                )
+            } else {
+                let mid_x = (screen_start.x + screen_end.x) / 2.0;
+                (
+                    Pos2::new(mid_x, screen_start.y),
+                    Pos2::new(mid_x, screen_end.y),
+                )
+            };
 
             // 曲线完整绘制到目标端口
             let curve = Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
@@ -718,18 +746,52 @@ fn render_edge(
     }
 }
 
-/// 计算连线在屏幕坐标下的命中区域 (用于右键删除).
-/// 以贝塞尔曲线起终点的包围盒为基础, 上下各留一定厚度便于点击.
-fn edge_hit_rect(
+/// 计算贝塞尔曲线上参数 t 对应的点.
+fn bezier_point(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+    let inv = 1.0 - t;
+    let inv2 = inv * inv;
+    let t2 = t * t;
+    inv2 * inv * p0 + 3.0 * inv2 * t * p1 + 3.0 * inv * t2 * p2 + t2 * t * p3
+}
+
+/// 计算点到贝塞尔曲线的最近距离.
+/// 通过采样 + 局部微调（牛顿法细化）获得高精度结果.
+fn bezier_min_distance(p: Vec2, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> f32 {
+    let samples = 32;
+    let mut best = f32::MAX;
+    for i in 0..=samples {
+        let t = i as f32 / samples as f32;
+        let bp = bezier_point(p0, p1, p2, p3, t);
+        let dist = (bp - p).length();
+        if dist < best {
+            best = dist;
+        }
+    }
+    best
+}
+
+/// 检测鼠标点是否在连线的可点击范围内.
+/// 仅当鼠标距贝塞尔曲线小于阈值时才命中，避免大包围盒遮挡节点.
+fn edge_hit_test(
     graph: &DagGraph,
     edge_id: String,
+    mouse_pos: Pos2,
     view_min: Pos2,
     canvas_zoom: f32,
     view_offset: Vec2,
-) -> Option<Rect> {
-    let edge = graph.edges.iter().find(|e| e.id == edge_id)?;
-    let source_node = graph.get_node(&edge.source_node_id)?;
-    let target_node = graph.get_node(&edge.target_node_id)?;
+) -> bool {
+    let edge = match graph.edges.iter().find(|e| e.id == edge_id) {
+        Some(e) => e,
+        None => return false,
+    };
+    let source_node = match graph.get_node(&edge.source_node_id) {
+        Some(n) => n,
+        None => return false,
+    };
+    let target_node = match graph.get_node(&edge.target_node_id) {
+        Some(n) => n,
+        None => return false,
+    };
 
     let start = get_port_position(source_node, edge.source_port, true);
     let end = get_port_position(target_node, edge.target_port, false);
@@ -737,16 +799,41 @@ fn edge_hit_rect(
     let screen_start = view_min + (start.to_vec2() + view_offset) * canvas_zoom;
     let screen_end = view_min + (end.to_vec2() + view_offset) * canvas_zoom;
 
-    let min_x = screen_start.x.min(screen_end.x);
-    let max_x = screen_start.x.max(screen_end.x);
-    let min_y = screen_start.y.min(screen_end.y);
-    let max_y = screen_start.y.max(screen_end.y);
+    let screen_node_w = NODE_WIDTH * canvas_zoom;
+    let screen_node_h = NODE_HEIGHT * canvas_zoom;
 
-    let padding = 6.0;
-    Some(Rect::from_min_max(
-        Pos2::new(min_x - padding, min_y - padding),
-        Pos2::new(max_x + padding, max_y + padding),
-    ))
+    let port_horizontal_gap = screen_end.x - screen_start.x;
+    let node_horizontal_span = (screen_end.x - screen_start.x).abs();
+    let vertical_span = (screen_end.y - screen_start.y).abs();
+    let small_span_threshold = screen_node_w * 0.3;
+    let is_vertical_parallel = (port_horizontal_gap <= small_span_threshold
+        || node_horizontal_span <= small_span_threshold)
+        && vertical_span > screen_node_h * 0.6;
+
+    let (control1, control2) = if is_vertical_parallel {
+        let offset = screen_node_w * 0.3;
+        (
+            Pos2::new(screen_start.x + offset, screen_start.y),
+            Pos2::new(screen_end.x + offset * 0.5, screen_end.y),
+        )
+    } else {
+        let mid_x = (screen_start.x + screen_end.x) / 2.0;
+        (
+            Pos2::new(mid_x, screen_start.y),
+            Pos2::new(mid_x, screen_end.y),
+        )
+    };
+
+    let threshold = 8.0 * canvas_zoom;
+    let mouse = mouse_pos.to_vec2();
+    let d = bezier_min_distance(
+        mouse,
+        screen_start.to_vec2(),
+        control1.to_vec2(),
+        control2.to_vec2(),
+        screen_end.to_vec2(),
+    );
+    d < threshold
 }
 
 fn get_port_position(node: &Node, port_index: usize, is_output: bool) -> Pos2 {
