@@ -491,6 +491,98 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
 
+        // ---- 视图缩放：放大 / 缩小 + 当前比例 ----
+        // 以画布屏幕中心为锚点缩放，避免简单缩放造成内容偏移到画布外。
+        // 镜头（圆环）+ 右下方手柄，镜头内 + / - 区分放大与缩小。
+        if has_tab {
+            // 放大按钮
+            let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+            let painter = ui.painter();
+            if resp.hovered() {
+                painter.rect_filled(rect, 5.0, hover_bg);
+            }
+            let lens_cx = rect.center().x - 2.0;
+            let lens_cy = rect.center().y - 2.0;
+            let lens_r = 5.5;
+            let stroke = Stroke::new(1.4, icon_color);
+            painter.circle_stroke(Pos2::new(lens_cx, lens_cy), lens_r, stroke);
+            // 手柄：从镜头右下 45° 延伸
+            let h_sin_cos = std::f32::consts::FRAC_PI_4.cos();
+            let h_start = Pos2::new(lens_cx + lens_r * h_sin_cos, lens_cy + lens_r * h_sin_cos);
+            let h_end = Pos2::new(h_start.x + 4.0 * h_sin_cos, h_start.y + 4.0 * h_sin_cos);
+            painter.line_segment([h_start, h_end], stroke);
+            // 镜头内 + 号
+            painter.line_segment(
+                [Pos2::new(lens_cx - 2.0, lens_cy), Pos2::new(lens_cx + 2.0, lens_cy)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(lens_cx, lens_cy - 2.0), Pos2::new(lens_cx, lens_cy + 2.0)],
+                stroke,
+            );
+            resp = resp.on_hover_text("放大画布（也可滚轮缩放）");
+            if resp.clicked() {
+                if let Some(tab) = editor_state.active_tab_mut() {
+                    if let Some(canvas_rect) = tab.canvas_viewport_rect {
+                        super::dag_canvas::zoom_canvas_at_point(tab, 1.2, canvas_rect.center());
+                    }
+                }
+            }
+
+            // 缩小按钮
+            let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
+            let painter = ui.painter();
+            if resp.hovered() {
+                painter.rect_filled(rect, 5.0, hover_bg);
+            }
+            let lens_cx = rect.center().x - 2.0;
+            let lens_cy = rect.center().y - 2.0;
+            let lens_r = 5.5;
+            let stroke = Stroke::new(1.4, icon_color);
+            painter.circle_stroke(Pos2::new(lens_cx, lens_cy), lens_r, stroke);
+            let h_sin_cos = std::f32::consts::FRAC_PI_4.cos();
+            let h_start = Pos2::new(lens_cx + lens_r * h_sin_cos, lens_cy + lens_r * h_sin_cos);
+            let h_end = Pos2::new(h_start.x + 4.0 * h_sin_cos, h_start.y + 4.0 * h_sin_cos);
+            painter.line_segment([h_start, h_end], stroke);
+            // 镜头内 - 号（仅水平线）
+            painter.line_segment(
+                [Pos2::new(lens_cx - 2.0, lens_cy), Pos2::new(lens_cx + 2.0, lens_cy)],
+                stroke,
+            );
+            resp = resp.on_hover_text("缩小画布（也可滚轮缩放）");
+            if resp.clicked() {
+                if let Some(tab) = editor_state.active_tab_mut() {
+                    if let Some(canvas_rect) = tab.canvas_viewport_rect {
+                        super::dag_canvas::zoom_canvas_at_point(tab, 1.0 / 1.2, canvas_rect.center());
+                    }
+                }
+            }
+
+            // 当前缩放比例：放大/缩小按钮右侧紧贴显示，让用户直观看到当前 zoom 值。
+            // 滚轮连续缩放时该值每帧刷新。宽度固定 36px，避免数字位数变化导致抖动。
+            let zoom = editor_state.active_tab().map(|t| t.canvas_zoom).unwrap_or(1.0);
+            let (zr, _) = ui.allocate_exact_size(Vec2::new(36.0, btn_size), Sense::hover());
+            let painter = ui.painter();
+            painter.text(
+                zr.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", zoom * 100.0),
+                egui::FontId::proportional(11.0),
+                icon_color,
+            );
+        }
+
+        // 分隔线：视图缩放与其他工具按钮分组
+        if has_tab {
+            ui.add_space(gap);
+            let (r, _) = ui.allocate_exact_size(Vec2::new(1.0, btn_size - 6.0), Sense::hover());
+            ui.painter().line_segment(
+                [r.center_top(), r.center_bottom()],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+            );
+            ui.add_space(gap);
+        }
+
         // ---- 算子面板切换 ----
         if has_tab {
             let on = editor_state.active_tab().unwrap().show_operator_panel;

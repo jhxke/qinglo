@@ -24,6 +24,19 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         tab.canvas_offset += response.drag_delta();
     }
 
+    // 鼠标滚轮缩放: 鼠标悬停在画布上时, 以鼠标位置为锚点缩放.
+    // 滚轮向上 (delta.y > 0) → 放大, 向下 (delta.y < 0) → 缩小;
+    // 以鼠标位置为锚点 (而非画布中心) 更符合直觉, 鼠标指向的节点保持在原位.
+    let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+    if scroll_delta != 0.0 && response.hovered() {
+        if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+            // |delta| 一般在 1..50 之间, 取较温和的 ±10% 步长,
+            // 用 1 + 0.01 * delta 让小幅滑动也能连续缩放.
+            let factor = 1.0 + 0.01 * scroll_delta;
+            zoom_canvas_at_point(tab, factor, pointer);
+        }
+    }
+
     // 用裁剪到画布矩形的 painter 绘制画布内容。算子列表 / 运行日志 / 算子参数等
     // 面板先于 CentralPanel 声明，画布内容后绘制；若不裁剪，平移画布时移出边界的
     // 节点与连线会越过画布边界绘制到相邻面板之上（即「算子和线跑到面板上层」）。
@@ -368,12 +381,16 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     for interaction in &node_interactions {
         if let NodeInteraction::Node { node_id, rect, canvas_zoom } = interaction {
             let response = ui.interact(*rect, egui::Id::new(format!("node_{}", node_id)), egui::Sense::click_and_drag());
-            if response.clicked() {
-                // 选中不同节点时，重置参数面板的隐藏状态，使新节点的参数重新展示
-                if tab.selected_node_id.as_deref() != Some(node_id.as_str()) {
-                    tab.hide_params_panel = false;
-                }
+            // 双击才弹出参数面板，单击仅选中、拖动仅移动节点，三者解耦避免操作冲突。
+            // 双击的第一次 click 会先走 clicked 分支隐藏面板，第二次 click 那帧
+            // double_clicked 命中再显示，最终参数面板正常弹出。
+            if response.double_clicked() {
                 tab.selected_node_id = Some(node_id.clone());
+                tab.hide_params_panel = false;
+                tab.error_message = None;
+            } else if response.clicked() {
+                tab.selected_node_id = Some(node_id.clone());
+                tab.hide_params_panel = true;
                 tab.error_message = None;
             }
             if response.dragged() {
@@ -764,4 +781,29 @@ fn get_port_position(node: &Node, port_index: usize, is_output: bool) -> Pos2 {
     };
 
     Pos2::new(x, y)
+}
+
+/// 以画布屏幕坐标点 `anchor_screen_pos` 为锚点缩放画布。
+///
+/// 通过同步调整 `canvas_offset`，使该屏幕点对应的画布坐标点在缩放前后保持不变——
+/// 视觉上表现为「以鼠标位置为中心向外扩张/向内收缩」，而非简单的「以画布左上角
+/// 为锚点缩放」造成内容偏移到画布外。供鼠标滚轮缩放（锚点 = 鼠标位置）和工具栏
+/// 放大/缩小按钮（锚点 = 画布屏幕中心）复用。
+///
+/// 缩放范围限制在 [0.2, 3.0]：过小则节点不可见，过大则连线精度损失。
+pub fn zoom_canvas_at_point(tab: &mut DagTab, factor: f32, anchor_screen_pos: Pos2) {
+    const MIN_ZOOM: f32 = 0.2;
+    const MAX_ZOOM: f32 = 3.0;
+    let old_zoom = tab.canvas_zoom;
+    let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    if new_zoom == old_zoom {
+        return; // 已达缩放边界
+    }
+    // 画布屏幕矩形在 render_dag_canvas 中已刷新; 首帧尚未渲染时跳过.
+    let Some(canvas_rect) = tab.canvas_viewport_rect else { return; };
+    // 屏幕锚点对应的画布坐标点 (缩放前后保持不变)
+    let anchor = (anchor_screen_pos - canvas_rect.min) / old_zoom - tab.canvas_offset;
+    // 反推新 offset, 使该锚点仍对应同一屏幕位置
+    tab.canvas_offset = (anchor_screen_pos - canvas_rect.min) / new_zoom - anchor;
+    tab.canvas_zoom = new_zoom;
 }
