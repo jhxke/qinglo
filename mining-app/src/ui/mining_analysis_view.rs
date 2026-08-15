@@ -1120,6 +1120,12 @@ fn render_models_panel(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 Vec2::new(ui.available_width(), 48.0),
                 egui::Sense::click(),
             );
+            // 悬停建模列表项时显示食指小手, 提示可点击打开
+            // (后续 response.clicked()/context_menu() 仍需借用 response, 故用
+            //  ctx.set_cursor_icon 而非消费所有权的 on_hover_cursor)
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             let painter = ui.painter();
             let bg = if is_active {
                 // 选中态：实心蓝底，确保白色文字清晰无模糊
@@ -1351,6 +1357,12 @@ fn render_category_tree(ui: &mut Ui, category: &OperatorCategory, tab: &mut DagT
         Vec2::new(ui.available_width(), header_h),
         egui::Sense::click(),
     );
+    // 悬停算子目录头时显示食指小手, 提示可点击展开/折叠
+    // (后续 show_body_indented(&header_resp, ...) 借用 header_resp, 故用
+    //  ctx.set_cursor_icon 而非消费所有权的 on_hover_cursor)
+    if header_resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     if header_resp.clicked() {
         state.toggle(ui);
     }
@@ -1505,6 +1517,10 @@ fn render_operator_card(ui: &mut Ui, op_type: OperatorType, tab: &mut DagTab) {
             0.0,
             op_color,
         ));
+        // 悬停算子卡片时显示食指指向小手, 提示可点击/拖拽添加
+        // (用 ctx.set_cursor_icon 而非 response.on_hover_cursor, 后者消费 response
+        //  所有权, 会导致下方 response.clicked()/dragged() 编译失败)
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
     // 第一行基准 y（名称与颜色点对齐到此行中心）

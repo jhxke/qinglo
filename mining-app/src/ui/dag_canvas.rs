@@ -88,6 +88,20 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         && tab.dragging_operator.is_none()
     {
         tab.canvas_offset += response.drag_delta();
+        // 拖动画布平移时, 把鼠标切换为抓取手型(Grabbing), 直观提示正在拖拽画布.
+        // 注: Windows 系统光标只有 IDC_HAND(食指指向小手), 无原生五指抓取手,
+        // egui 0.26 经 winit 映射 Grabbing → IDC_HAND, 这是系统限制下最贴近"抓取"语义的光标.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if response.hovered()
+        && !ui.input(|i| i.pointer.primary_down())
+        && tab.dragging_node_id.is_none()
+        && tab.dragging_operator.is_none()
+    {
+        // 悬停于画布空白处(未按下、未拖节点/算子)时显示手型(Grab), 提示可拖拽平移画布.
+        // 节点/端口等子区域在后续 interact 中会覆盖此光标, 不会受影响.
+        // 注意: 用 ctx.set_cursor_icon 而非 response.on_hover_cursor, 后者会消费
+        // response 所有权, 导致后续 response.hovered() 等调用编译失败.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
 
     // 鼠标滚轮缩放: 鼠标悬停在画布上时, 以鼠标位置为锚点缩放.
