@@ -5,7 +5,7 @@ use std::path::Path;
 
 use mining_app::ui::{
     UiState, ViewType, poll_dag_exec_task, render_activity_bar, render_mining_analysis_view,
-    render_operator_development_view, render_settings_view, render_status_bar, theme,
+    render_settings_view, render_status_bar, theme,
 };
 
 struct MyApp {
@@ -243,7 +243,6 @@ impl eframe::App for MyApp {
             .show(ctx, |ui| {
                 match self.ui_state.current_view {
                     ViewType::MiningAnalysis => render_mining_analysis_view(ui, &mut self.ui_state.dag_editor),
-                    ViewType::OperatorDevelopment => render_operator_development_view(ui, &mut self.ui_state.operator_development),
                     ViewType::Settings => render_settings_view(ui, &mut self.ui_state),
                 }
             });

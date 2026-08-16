@@ -10,15 +10,13 @@ const ICON_SIZE: f32 = 22.0;
 enum IconKind {
     /// 节点图（DAG 编辑器）—— 挖掘分析
     Graph,
-    /// `</>` 代码 —— 算子开发
-    Code,
     /// 齿轮 —— 系统设置
     Gear,
 }
 
 /// 渲染 Trae / VS Code 风格的活动栏（最左侧窄竖条）。
 ///
-/// 顶部为主功能入口（挖掘分析、算子开发），底部为系统设置；
+/// 顶部为主功能入口（挖掘分析），底部为系统设置；
 /// 激活项左侧有蓝色指示条且图标提亮，非激活项灰色，悬停时背景高亮。
 pub fn render_activity_bar(ui: &mut Ui, state: &mut UiState) {
     let bar_rect = ui.max_rect();
@@ -29,9 +27,8 @@ pub fn render_activity_bar(ui: &mut Ui, state: &mut UiState) {
     let width = bar_rect.width();
 
     // 顶部主功能入口，自上而下排列
-    let top_items: [(ViewType, IconKind, &str); 2] = [
+    let top_items: [(ViewType, IconKind, &str); 1] = [
         (ViewType::MiningAnalysis, IconKind::Graph, "挖掘分析"),
-        (ViewType::OperatorDevelopment, IconKind::Code, "算子开发"),
     ];
     // 底部入口，自下而上排列
     let bottom_items: [(ViewType, IconKind, &str); 1] = [
@@ -100,7 +97,6 @@ fn render_activity_button(
     let center = rect.center();
     match icon {
         IconKind::Graph => draw_graph_icon(painter, center, ICON_SIZE, icon_color),
-        IconKind::Code => draw_code_icon(painter, center, ICON_SIZE, icon_color),
         IconKind::Gear => {
             draw_gear_icon(painter, center, ICON_SIZE, icon_color, theme::ACTIVITY_BAR_BG)
         }
@@ -134,21 +130,6 @@ fn draw_graph_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Colo
     painter.circle_filled(n1, r, color);
     painter.circle_filled(n2, r, color);
     painter.circle_filled(n3, r, color);
-}
-
-/// `</>` 代码图标。
-fn draw_code_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    let s = size / 24.0;
-    let p = |x: f32, y: f32| Pos2::new(center.x + (x - 12.0) * s, center.y + (y - 12.0) * s);
-    let stroke = Stroke::new(1.8 * s, color);
-    // <
-    painter.line_segment([p(7.0, 7.0), p(3.0, 12.0)], stroke);
-    painter.line_segment([p(3.0, 12.0), p(7.0, 17.0)], stroke);
-    // /
-    painter.line_segment([p(10.5, 17.5), p(13.5, 6.5)], stroke);
-    // >
-    painter.line_segment([p(17.0, 7.0), p(21.0, 12.0)], stroke);
-    painter.line_segment([p(21.0, 12.0), p(17.0, 17.0)], stroke);
 }
 
 /// 齿轮图标：圆环 + 8 个齿 + 中心孔。

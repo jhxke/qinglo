@@ -1,13 +1,11 @@
 use egui::{Align, Color32, Layout, Pos2, RichText, Sense, Stroke, Ui, Vec2};
 use crate::dag::{Node, NodeIORegistry, ParamType, PortDirection};
-use super::state::CustomOperatorDebugState;
 
 /// 渲染自定义算子参数编辑器。返回 `(是否发生修改, 是否点击了关闭按钮)`：
 /// 修改用于标记 tab dirty；关闭按钮由外层据此隐藏整个参数面板。
 pub fn render_custom_operator_editor(
     ui: &mut Ui,
     node: &mut Node,
-    _debug_state: &mut CustomOperatorDebugState,
     io_registry: &mut NodeIORegistry,
     node_id: &str,
 ) -> (bool, bool) {

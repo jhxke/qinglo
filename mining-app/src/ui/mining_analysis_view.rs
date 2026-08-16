@@ -3,7 +3,7 @@ use egui::{Align, Area, Color32, Context, Id, Layout, Pos2, Rect, RichText, Scro
 use operator_executor_client::protocol::{DagExecutionResult, OperatorCategory, OperatorExecutionStatus};
 use crate::dag::{get_all_operator_types, get_operator_categories, Node, OperatorType};
 use crate::dag_store;
-use super::state::{DagEditorState, DagExecKind, DagExecMessage, DagExecTask, DagTab, JsonDirection, JsonLogEntry, LogCategory, LogLevel, RunLogEntry};
+use super::state::{DagEditorState, DagExecKind, DagExecMessage, DagExecTask, DagTab, JsonDirection, JsonLogEntry, LogCategory, LogLevel, RunLogEntry, SidebarTab};
 use super::dag_canvas::render_dag_canvas;
 use super::operator_params_editor::render_custom_operator_editor;
 
@@ -13,12 +13,13 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
         editor_state.refresh_models();
     }
 
-    // 左侧建模列表面板（最左，占满全高）
+    // 左侧融合侧边栏：建模列表 / 算子列表 通过顶部 tab 切换，共用一块侧边栏空间，
+    // 避免两者并排占用过多横向宽度（原先 220 + 240 = 460px，融合后仅 240px）。
     // 用 exact_width 而非 default_width：exact_width 每帧强制使用指定宽度，不写入
     // egui 的面板宽度记忆。这样窗口缩小被 clamp 压缩显示、但不回写 memory，窗口放大
-    // 后仍以 220.0 为准——避免「缩小再放大后宽度不还原」。
-    egui::SidePanel::left("models_panel")
-        .exact_width(220.0)
+    // 后仍以 240.0 为准——避免「缩小再放大后宽度不还原」。
+    egui::SidePanel::left("sidebar_panel")
+        .exact_width(240.0)
         .frame(
             egui::Frame::none()
                 .fill(super::theme::SIDEBAR_BG)
@@ -27,31 +28,8 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
                 .stroke(egui::Stroke::new(1.0, super::theme::TITLE_BAR_BG)),
         )
         .show_inside(ui, |ui| {
-            render_models_panel(ui, editor_state);
+            render_sidebar_panel(ui, editor_state);
         });
-
-    // 算子面板（次左，仅在当前 tab 需要显示时）
-    // 先于中央面板渲染，确保中央画布占据算子面板右侧的正确宽度
-    let show_op = editor_state
-        .active_tab()
-        .map(|t| t.show_operator_panel)
-        .unwrap_or(false);
-    if show_op {
-        egui::SidePanel::left("operator_panel")
-            .exact_width(240.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(super::theme::SIDEBAR_BG)
-                    .inner_margin(egui::Margin::same(8.0))
-                    .rounding(super::theme::CARD_ROUNDING)
-                    .stroke(egui::Stroke::new(1.0, super::theme::TITLE_BAR_BG)),
-            )
-            .show_inside(ui, |ui| {
-                if let Some(tab) = editor_state.active_tab_mut() {
-                    render_operator_panel(ui, tab);
-                }
-            });
-    }
 
     // 右侧算子参数编辑器（选中自定义算子节点时显示；可由标题栏 × 按钮隐藏）
     // 必须在 CentralPanel 之前声明：egui 中 CentralPanel 会消费所有剩余空间，
@@ -77,13 +55,12 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
                             .stroke(egui::Stroke::new(1.0, super::theme::TITLE_BAR_BG)),
                     )
                     .show_inside(ui, |ui| {
-                        // 分离借用 graph / io_registry / custom_op_debug，避免同时持有整个 tab
+                        // 分离借用 graph / io_registry，避免同时持有整个 tab
                         let tab = &mut editor_state.tabs[idx];
                         let graph = &mut tab.graph;
                         let io_registry = &mut tab.io_registry;
-                        let debug_state = &mut tab.custom_op_debug;
                         if let Some(node) = graph.get_node_mut(&selected_node_id) {
-                            render_custom_operator_editor(ui, node, debug_state, io_registry, &selected_node_id)
+                            render_custom_operator_editor(ui, node, io_registry, &selected_node_id)
                         } else {
                             (false, false)
                         }
@@ -589,9 +566,9 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
             ui.add_space(gap);
         }
 
-        // ---- 算子面板切换 ----
+        // ---- 侧边栏子页切换（建模 / 算子）----
         if has_tab {
-            let on = editor_state.active_tab().unwrap().show_operator_panel;
+            let on = editor_state.active_sidebar_tab == SidebarTab::Operators;
             let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(btn_size, btn_size), Sense::click());
             let painter = ui.painter();
             let bg = if on { active_bg } else if resp.hovered() { hover_bg } else { Color32::TRANSPARENT };
@@ -609,11 +586,9 @@ fn render_canvas_toolbar(ui: &mut Ui, editor_state: &mut DagEditorState) {
                 [Pos2::new(rect.center().x, rect.min.y + 8.0), Pos2::new(rect.center().x, rect.max.y - 8.0)],
                 stroke,
             );
-            resp = resp.on_hover_text(if on { "隐藏算子面板" } else { "显示算子面板" });
+            resp = resp.on_hover_text(if on { "切换到建模列表" } else { "切换到算子列表" });
             if resp.clicked() {
-                if let Some(tab) = editor_state.active_tab_mut() {
-                    tab.show_operator_panel = !on;
-                }
+                editor_state.active_sidebar_tab = if on { SidebarTab::Models } else { SidebarTab::Operators };
             }
         }
 
@@ -1104,10 +1079,74 @@ fn paint_trash_icon(painter: &egui::Painter, c: Pos2, color: Color32) {
     );
 }
 
+/// 渲染左侧融合侧边栏：顶部 tab（建模 / 算子）切换子页，下方为对应内容。
+///
+/// 将原先并排的「建模列表」(220px) 与「算子列表」(240px) 两个左侧面板合并为单个
+/// 240px 面板，通过 tab 切换显示，节省约 220px 横向空间。
+fn render_sidebar_panel(ui: &mut Ui, editor_state: &mut DagEditorState) {
+    // ---- 顶部 tab 头：建模 / 算子 ----
+    let tab_h = 26.0;
+    let gap = 4.0;
+    let w = (ui.available_width() - gap) / 2.0;
+    let tabs = [(SidebarTab::Models, "建模"), (SidebarTab::Operators, "算子")];
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (tab, label) in tabs {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, tab_h), Sense::click());
+            let painter = ui.painter();
+            let active = editor_state.active_sidebar_tab == tab;
+            let bg = if active {
+                super::theme::ACCENT
+            } else if resp.hovered() {
+                super::theme::HOVER_BG
+            } else {
+                Color32::TRANSPARENT
+            };
+            if bg != Color32::TRANSPARENT {
+                painter.rect_filled(rect, super::theme::WIDGET_ROUNDING, bg);
+            }
+            let col = if active { Color32::WHITE } else { super::theme::TEXT_HOVER };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(13.0),
+                col,
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                editor_state.active_sidebar_tab = tab;
+            }
+        }
+    });
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    // ---- 子页内容 ----
+    // tab 头的借用已释放，此处可重新可变借用 editor_state 渲染子页。
+    match editor_state.active_sidebar_tab {
+        SidebarTab::Models => {
+            render_models_panel(ui, editor_state);
+        }
+        SidebarTab::Operators => {
+            if let Some(tab) = editor_state.active_tab_mut() {
+                render_operator_panel(ui, tab);
+            } else {
+                // 无打开的建模时占位提示，避免算子面板空悬
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label(RichText::new("请先打开建模").weak());
+                });
+            }
+        }
+    }
+}
+
 /// 左侧建模列表面板：新建按钮 + 磁盘历史列表，点击打开/切换，右键重命名/删除。
 fn render_models_panel(ui: &mut Ui, editor_state: &mut DagEditorState) {
-    ui.heading("建模列表");
-    ui.add_space(4.0);
     if ui.button("+ 新建建模").clicked() {
         editor_state.show_new_model_dialog = true;
         editor_state.new_model_name_input = String::new();

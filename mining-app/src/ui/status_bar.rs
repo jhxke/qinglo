@@ -36,7 +36,6 @@ pub fn render_status_bar(ui: &mut Ui, state: &UiState) {
             // 当前视图名
             let view_name = match state.current_view {
                 ViewType::MiningAnalysis => "挖掘分析",
-                ViewType::OperatorDevelopment => "算子开发",
                 ViewType::Settings => "系统设置",
             };
             status_item(ui, view_name);
@@ -82,20 +81,7 @@ fn current_status(state: &UiState) -> (LogLevel, String) {
                 }
             }
         }
-        ViewType::OperatorDevelopment => {
-            if let Some(err) = &state.operator_development.error_message {
-                return (LogLevel::Error, err.clone());
-            }
-            if let Some(last) = state.operator_development.run_logs.last() {
-                return (last.level.clone(), last.message.clone());
-            }
-        }
-        ViewType::Settings => {
-            if let Some((ok, msg)) = &state.settings.last_result {
-                let level = if *ok { LogLevel::Success } else { LogLevel::Error };
-                return (level, msg.clone());
-            }
-        }
+        ViewType::Settings => {}
     }
 
     // 3. 无任何提醒时显示就绪

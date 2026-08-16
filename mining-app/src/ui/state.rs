@@ -5,10 +5,8 @@ use egui::{Rect, Vec2};
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
-use crate::dag::{DagGraph, OperatorType, NodeIORegistry, CustomOperatorDef};
+use crate::dag::{DagGraph, OperatorType, NodeIORegistry};
 use crate::dag_store::{self, DagModelMeta, DagModelRecord};
-
-use crate::debug_executor::DebugDiagnostics;
 
 /// 后台 DAG 执行任务的工作线程 → UI 线程消息。
 ///
@@ -83,6 +81,25 @@ impl Default for LogCategory {
     }
 }
 
+/// 左侧融合侧边栏的当前激活子页：建模列表 / 算子列表。
+///
+/// 两者共享同一块侧边栏空间，通过顶部 tab 切换，避免同时并排占用横向宽度
+/// （原先 220 + 240 = 460px，融合后仅 240px）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTab {
+    /// 建模列表：磁盘建模历史，新建 / 打开 / 删除建模。
+    Models,
+    /// 算子列表：按分类树展示可用算子，拖拽 / 点击添加节点。
+    Operators,
+}
+
+impl Default for SidebarTab {
+    /// 默认聚焦「建模列表」：进入视图首先看到建模历史，便于打开或新建。
+    fn default() -> Self {
+        SidebarTab::Models
+    }
+}
+
 /// JSON 通信报文方向，用于在「通信报文」子页区分请求与响应。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JsonDirection {
@@ -106,63 +123,12 @@ pub struct JsonLogEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
     MiningAnalysis,
-    OperatorDevelopment,
     Settings,
-}
-
-/// 自定义算子编辑器的 Debug 面板状态。
-///
-/// `input_text` 是 Debug 输入框中的文本 (逗号分隔数字、分号分隔多路输入)；
-/// `diagnostics` 是最近一次 Debug 运行的诊断结果，`Option` 表示尚未运行过。
-#[derive(Clone, Default)]
-pub struct CustomOperatorDebugState {
-    pub input_text: String,
-    pub diagnostics: Option<DebugDiagnostics>,
-}
-
-#[derive(Clone)]
-pub struct OperatorDevelopmentState {
-    pub current_operator: CustomOperatorDef,
-    pub debug_state: CustomOperatorDebugState,
-    pub error_message: Option<String>,
-    pub run_logs: Vec<RunLogEntry>,
-}
-
-impl Default for OperatorDevelopmentState {
-    fn default() -> Self {
-        Self {
-            current_operator: CustomOperatorDef::default(),
-            debug_state: CustomOperatorDebugState {
-                input_text: "1, 2, 3, 4, 5".to_string(),
-                diagnostics: None,
-            },
-            error_message: None,
-            run_logs: Vec::new(),
-        }
-    }
-}
-
-impl OperatorDevelopmentState {
-    pub fn add_log(&mut self, message: String, level: LogLevel) {
-        self.run_logs.push(RunLogEntry {
-            timestamp: format_now_timestamp(),
-            message,
-            level,
-        });
-        if self.run_logs.len() > 1000 {
-            self.run_logs.remove(0);
-        }
-    }
-
-    pub fn clear_logs(&mut self) {
-        self.run_logs.clear();
-    }
 }
 
 pub struct UiState {
     pub current_view: ViewType,
     pub dag_editor: DagEditorState,
-    pub operator_development: OperatorDevelopmentState,
     pub settings: SettingsState,
 }
 
@@ -171,36 +137,14 @@ impl Default for UiState {
         Self {
             current_view: ViewType::MiningAnalysis,
             dag_editor: DagEditorState::default(),
-            operator_development: OperatorDevelopmentState::default(),
             settings: SettingsState::default(),
         }
     }
 }
 
-/// 系统设置视图的本地状态。
-///
-/// `rust_path_input` 是 Rust 工具链路径文本框中的内容（可能尚未保存）；
-/// `compile_dir_input` 是编译目录文本框中的内容（可能尚未保存）；
-/// `initialized` 用于首次进入设置页时从磁盘配置懒加载输入框内容；
-/// `last_result` 记录最近一次「测试 / 保存 / 自动检测」操作的结果。
-#[derive(Clone)]
-pub struct SettingsState {
-    pub rust_path_input: String,
-    pub compile_dir_input: String,
-    pub initialized: bool,
-    pub last_result: Option<(bool, String)>,
-}
-
-impl Default for SettingsState {
-    fn default() -> Self {
-        Self {
-            rust_path_input: String::new(),
-            compile_dir_input: String::new(),
-            initialized: false,
-            last_result: None,
-        }
-    }
-}
+/// 系统设置视图的本地状态（预留扩展，当前为空）。
+#[derive(Clone, Default)]
+pub struct SettingsState;
 
 /// Debug 模式下数据预览的分页查询状态。
 ///
@@ -256,7 +200,6 @@ pub struct DagTab {
     pub connecting_from: Option<(String, usize, bool)>,
     pub canvas_offset: Vec2,
     pub canvas_zoom: f32,
-    pub show_operator_panel: bool,
     pub error_message: Option<String>,
     pub operator_search_filter: String,
     /// 节点 I/O 全局注册表，集中管理所有节点的输入、输出、执行状态和缓存失效
@@ -280,8 +223,6 @@ pub struct DagTab {
     /// 由算子右键菜单「直方图预览」触发，读取该节点预览缓存中的首个 DataFrame
     /// （直方图展示算子返回的 DataFrame）并按 x_col/y_col/left_col/right_col 渲染柱状图。
     pub histogram_preview_node_id: Option<String>,
-    /// 自定义算子编辑器的 Debug 面板状态 (输入文本与最近一次诊断结果)
-    pub custom_op_debug: CustomOperatorDebugState,
     /// 提醒日志：用户点击保存、验证、清空等 UI 操作的直接反馈。
     pub action_logs: Vec<RunLogEntry>,
     /// 算子运行日志：服务端 DAG 执行进度与节点结果回填日志。
@@ -329,7 +270,6 @@ impl DagTab {
             connecting_from: None,
             canvas_offset: Vec2::ZERO,
             canvas_zoom: 1.0,
-            show_operator_panel: true,
             error_message: None,
             operator_search_filter: String::new(),
             io_registry: NodeIORegistry::new(),
@@ -339,10 +279,6 @@ impl DagTab {
             line_chart_preview_node_id: None,
             chat_preview_node_id: None,
             histogram_preview_node_id: None,
-            custom_op_debug: CustomOperatorDebugState {
-                input_text: "1, 2, 3, 4, 5".to_string(),
-                diagnostics: None,
-            },
             action_logs: Vec::new(),
             runtime_logs: Vec::new(),
             json_logs: Vec::new(),
@@ -432,6 +368,8 @@ pub struct DagEditorState {
     pub models: Vec<DagModelMeta>,
     /// models 是否已从磁盘加载
     pub models_loaded: bool,
+    /// 左侧融合侧边栏当前激活子页（建模列表 / 算子列表）。
+    pub active_sidebar_tab: SidebarTab,
     /// 新建模对话框：是否显示
     pub show_new_model_dialog: bool,
     /// 新建模对话框：名字输入框内容
@@ -460,6 +398,7 @@ impl Default for DagEditorState {
             active_tab_index: None,
             models: Vec::new(),
             models_loaded: false,
+            active_sidebar_tab: SidebarTab::default(),
             show_new_model_dialog: false,
             new_model_name_input: String::new(),
             rename_target_id: None,

@@ -1,14 +1,13 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use operator_executor_client::{
     self as executor_lib,
-    runtime_client::{RuntimeClient, RuntimeClientError, DEFAULT_RUNTIME_ADDR, ExecuteResult},
-    CargoBuildResult,
+    runtime_client::{RuntimeClient, RuntimeClientError, DEFAULT_RUNTIME_ADDR},
 };
 use operator_executor_client::protocol::{
     OperatorExecutionStatus,
@@ -18,8 +17,8 @@ use operator_executor_client::PortData;
 
 use crate::config::get_compile_directory;
 use crate::dag::{
-    DagGraph, Node, OperatorType, NodeIORegistry,
-    OperatorPortParamDef, PortDirection, CustomOperatorDef, ParamType,
+    DagGraph, OperatorType, NodeIORegistry,
+    PortDirection, CustomOperatorDef, ParamType,
 };
 
 /// 全局 Runtime 客户端（持久连接，所有请求复用以避免端口不断变化的短连接）。
@@ -219,59 +218,6 @@ fn get_runtime_search_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// 根据算子定义和参数定义生成完整的代码（注入参数常量和运行时导入）
-pub fn inject_params_into_code(code: &str, params: &[&OperatorPortParamDef]) -> String {
-    let params_vec: Vec<executor_lib::OperatorPortParamDef> = params
-        .iter()
-        .map(|p| executor_lib::OperatorPortParamDef {
-            name: p.name.clone(),
-            param_type: match p.param_type {
-                crate::dag::ParamType::Float => executor_lib::ParamType::Float,
-                crate::dag::ParamType::Int => executor_lib::ParamType::Int,
-                crate::dag::ParamType::Bool => executor_lib::ParamType::Bool,
-                crate::dag::ParamType::String => executor_lib::ParamType::String,
-                crate::dag::ParamType::DataFrame => executor_lib::ParamType::DataFrame,
-                crate::dag::ParamType::DataFrameArray => executor_lib::ParamType::DataFrameArray,
-            },
-            default_value: p.default_value.clone(),
-        })
-        .collect();
-
-    executor_lib::inject_params_into_code(code, &params_vec)
-}
-
-/// 使用 cargo build 编译临时项目（在本地进行编译，编译后 DLL 可通过 TCP 执行）
-pub fn cargo_project_build(
-    code: &str,
-    algorithm_name: &str,
-    compile_base_dir: &Path,
-    debug: bool,
-    temp_dir_prefix: &str,
-) -> CargoBuildResult {
-    let runtime_path = match executor_lib::find_runtime_path() {
-        Ok(p) => p,
-        Err(e) => {
-            return CargoBuildResult {
-                success: false,
-                lib_path: None,
-                temp_dir: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                error: Some(e),
-            };
-        }
-    };
-
-    executor_lib::cargo_project_build(code, algorithm_name, compile_base_dir, debug, temp_dir_prefix, &runtime_path)
-}
-
-/// 只编译自定义算子代码，不执行测试。
-pub fn compile_only(code: &str, algorithm_name: &str) -> Result<PathBuf, String> {
-    let compile_base_dir = get_compile_directory();
-    let runtime_path = executor_lib::find_runtime_path()?;
-    executor_lib::compile_only(code, algorithm_name, &compile_base_dir, &runtime_path)
-}
-
 /// 从算子定义的参数列表构造运行时参数 JSON
 ///
 /// 将 `direction == Param` 的端口参数按 `(name, default_value)` 序列化为 JSON 对象，
@@ -306,114 +252,6 @@ fn build_params_json(def: &CustomOperatorDef) -> String {
         map.insert(p.name.clone(), value);
     }
     serde_json::Value::Object(map).to_string()
-}
-
-/// 执行节点（通过 TCP 发送给 runtime）- 返回完整的执行结果
-pub fn execute_node_with_result(node: &Node, inputs: &[PortData]) -> Result<ExecuteResult, String> {
-    match &node.operator_type {
-        OperatorType::Custom(def) => {
-            let params: Vec<_> = def
-                .port_params
-                .iter()
-                .filter(|p| p.direction == PortDirection::Param)
-                .collect();
-            let code_with_params = inject_params_into_code(&def.code, &params);
-
-            let output_count = node.operator_type.output_count();
-            let algorithm_name = node.operator_type.name();
-            // 从算子定义中构造运行时参数 JSON，传递给算子（数据源算子等需要读取连接参数）
-            let params_json = build_params_json(def);
-
-            // 优先从服务器缓存的算子分类中查找 DLL 路径
-            if let Some(dll_path) = crate::dag::find_operator_dll_path(algorithm_name) {
-                let dll_path_buf = std::path::PathBuf::from(&dll_path);
-                if dll_path_buf.exists() {
-                    return with_runtime_client(|client| {
-                        let _ = client.load_operator(algorithm_name, &dll_path);
-                        client.execute_node(algorithm_name, inputs, output_count, &params_json)
-                    })
-                    .map_err(|e| e.to_string());
-                }
-            }
-
-            // 检查是否有已启用的本地预编译算子
-            let operator_dir = crate::config::get_operator_directory();
-            let sanitized_name = executor_lib::sanitize_algorithm_name(algorithm_name);
-            let op_dir = operator_dir.join(&sanitized_name);
-
-            with_runtime_client(|client| {
-                if op_dir.exists() {
-                    // 使用预编译的 DLL
-                    let dll_ext = match env::consts::OS {
-                        "windows" => "dll",
-                        "linux" => "so",
-                        "macos" => "dylib",
-                        _ => "so",
-                    };
-                    let dll_path = op_dir.join(format!("{}.{}", sanitized_name, dll_ext));
-                    if dll_path.exists() {
-                        let dll_path_str = dll_path.to_string_lossy().to_string();
-                        // 先加载算子（如果还没加载）
-                        let _ = client.load_operator(algorithm_name, &dll_path_str);
-                        return client.execute_node(algorithm_name, inputs, output_count, &params_json);
-                    }
-                }
-
-                // 否则：通过 TCP 发送代码进行远程编译并执行
-                client.compile_and_execute(&code_with_params, algorithm_name, inputs, output_count)
-            })
-            .map_err(|e| e.to_string())
-        }
-    }
-}
-
-/// 执行节点（通过 TCP 发送给 runtime）- 仅返回输出数据（兼容旧接口）
-pub fn execute_node(node: &Node, inputs: &[PortData]) -> Result<Vec<PortData>, String> {
-    execute_node_with_result(node, inputs).map(|r| r.outputs)
-}
-
-/// 启用自定义算子：编译并将 DLL 和 JSON 复制到 operator/算子名称/ 目录
-pub fn enable_operator(def: &CustomOperatorDef) -> Result<String, String> {
-    let params: Vec<_> = def
-        .port_params
-        .iter()
-        .filter(|p| p.direction == PortDirection::Param)
-        .collect();
-    let code_with_params = inject_params_into_code(&def.code, &params);
-
-    let dll_path = compile_only(&code_with_params, &def.name)?;
-
-    let dll_ext = match env::consts::OS {
-        "windows" => "dll",
-        "linux" => "so",
-        "macos" => "dylib",
-        _ => "so",
-    };
-
-    let operator_dir = crate::config::get_operator_directory();
-    let sanitized_name = executor_lib::sanitize_algorithm_name(&def.name);
-    let op_target_dir = operator_dir.join(&sanitized_name);
-    fs::create_dir_all(&op_target_dir).map_err(|e| format!("创建算子目录失败: {}", e))?;
-
-    let target_dll_path = op_target_dir.join(format!("{}.{}", sanitized_name, dll_ext));
-
-    fs::copy(&dll_path, &target_dll_path).map_err(|e| format!("复制算子 DLL 失败: {}", e))?;
-
-    // 通过 TCP 通知 runtime 加载新算子
-    let _ = with_runtime_client(|client| {
-        let dll_path_str = target_dll_path.to_string_lossy().to_string();
-        client.load_operator(&def.name, &dll_path_str)
-    });
-
-    let json_path = op_target_dir.join("operator.json");
-    let json_content = serde_json::to_string_pretty(def).map_err(|e| format!("序列化算子定义失败: {}", e))?;
-    fs::write(&json_path, json_content).map_err(|e| format!("保存 JSON 失败: {}", e))?;
-
-    crate::dag::refresh_operator_types_cache();
-    // 同步失效服务器侧算子分类缓存，使新算子在下次渲染时立即出现
-    crate::dag::refresh_operator_categories();
-
-    Ok(format!("算子启用成功!\n算子目录: {}", op_target_dir.display()))
 }
 
 /// 「运行到此结点」的工作线程部分：构造目标节点的上游子图（含自身）并下发
@@ -870,31 +708,6 @@ pub fn execute_dag_on_server(graph: &DagGraph, name: &str) -> Result<DagExecutio
     execute_dag_on_server_with_progress(graph, name, |_| {})
 }
 
-/// 执行预编译的 DLL（通过 TCP 直接指定路径）- 返回完整执行结果
-pub fn execute_native_operator_with_result(
-    dll_path: &Path,
-    inputs: &[PortData],
-    max_outputs: usize,
-    params_json: &str,
-) -> Result<ExecuteResult, String> {
-    with_runtime_client(|client| {
-        let dll_path_str = dll_path.to_string_lossy().to_string();
-        client.execute_dll(&dll_path_str, inputs, max_outputs, params_json)
-    })
-    .map_err(|e| e.to_string())
-}
-
-/// 执行预编译的 DLL（通过 TCP 直接指定路径）- 仅返回输出数据（兼容旧接口）
-pub fn execute_native_operator(
-    dll_path: &Path,
-    inputs: &[PortData],
-    max_outputs: usize,
-    params_json: &str,
-) -> Result<Vec<PortData>, String> {
-    execute_native_operator_with_result(dll_path, inputs, max_outputs, params_json)
-        .map(|r| r.outputs)
-}
-
 /// 关闭 runtime 服务（可选）
 pub fn shutdown_runtime() {
     let _ = with_runtime_client(|client| client.shutdown());
@@ -911,18 +724,4 @@ pub fn register_cleanup() {
         // 注意：在实际 GUI 应用中，可以通过 at_exit 或窗口关闭回调来触发
         // 这里只是预留接口
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_inject_params() {
-        // 简单测试参数注入
-        let code = "fn main() {}";
-        let params = vec![];
-        let result = inject_params_into_code(code, &params);
-        assert!(result.contains("fn main()"));
-    }
 }
