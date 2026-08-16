@@ -143,46 +143,67 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     // 裁剪后，所有画布绘制（底色 / 网格 / 节点 / 连线 / 拖拽预览）都被限制在画布内。
     let painter = ui.painter().with_clip_rect(rect);
 
-    // 画布底色与其余功能面板（建模列表 / 算子列表 / 运行日志 / 算子运行参数）统一为
-    // SIDEBAR_BG，避免各区域深浅不一造成视觉割裂；网格线（CANVAS_GRID）仍比底色亮，
-    // 可清晰辨识。
+    // 画布底色: 用更深的 CANVAS_BG (#0F0F0F) 而非 SIDEBAR_BG (#161616),
+    // 与网格线 (CANVAS_GRID #3C4252) 形成最大对比, 让网格清晰可见.
     painter.rect_filled(
         rect,
         0.0,
-        super::theme::SIDEBAR_BG,
+        super::theme::CANVAS_BG,
     );
 
+    // 网格固定在屏幕坐标上: 平移画布时网格不动, 只有节点/算子跟着平移.
+    // 类似 Figma 网格 — 网格是参考系, 节点在网格上滑动.
     let grid_size = 20.0;
-    let grid_color = super::theme::CANVAS_GRID;
-    let grid_stroke = Stroke::new(1.0, grid_color);
+    let major_grid_size = grid_size * 5.0;
 
-    // 网格线合并为 2 条折线（所有竖线一条、所有横线一条），用 NAN 断点分隔
-    // 各线段。把原本 ~70 个独立 Shape::line_segment 压成 2 个 Shape::line，
-    // epaint tessellator 只需处理 2 个 path、生成 2 个连续 vertex buffer，
-    // 显著减少 draw call 与每帧 tessellate 工作量（拖动/平移画布时 GPU 占用
-    // 明显下降）。epaint 的 path_to_compound_polygons 原生按 NAN 切分 sub-path。
-    let nan = Pos2::new(f32::NAN, f32::NAN);
-    let step = grid_size as i32;
+    // 网格线对齐到屏幕像素整数倍, 与画布 rect 左上角对齐.
+    // 使用 rect.left() % grid_size 计算偏移, 让网格覆盖整个画布.
+    let minor_stroke = Stroke::new(1.0, super::theme::CANVAS_GRID);
+    let major_stroke = Stroke::new(1.5, super::theme::CANVAS_GRID_MAJOR);
 
-    let mut vpoints: Vec<Pos2> = Vec::new();
-    let mut x = rect.left().floor() as i32;
-    while x <= rect.right().ceil() as i32 {
-        vpoints.push(Pos2::new(x as f32, rect.top()));
-        vpoints.push(Pos2::new(x as f32, rect.bottom()));
-        vpoints.push(nan);
-        x += step;
+    // 次网格 (每条 20px)
+    let minor_offset_x = rect.left().rem_euclid(grid_size);
+    let minor_offset_y = rect.top().rem_euclid(grid_size);
+    {
+        let mut x = rect.left() - minor_offset_x;
+        while x <= rect.right() {
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                minor_stroke,
+            );
+            x += grid_size;
+        }
+        let mut y = rect.top() - minor_offset_y;
+        while y <= rect.bottom() {
+            painter.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                minor_stroke,
+            );
+            y += grid_size;
+        }
     }
-    painter.add(Shape::line(vpoints, grid_stroke));
 
-    let mut hpoints: Vec<Pos2> = Vec::new();
-    let mut y = rect.top().floor() as i32;
-    while y <= rect.bottom().ceil() as i32 {
-        hpoints.push(Pos2::new(rect.left(), y as f32));
-        hpoints.push(Pos2::new(rect.right(), y as f32));
-        hpoints.push(nan);
-        y += step;
+    // 主网格 (每条 100px = 5× 次网格, 更亮更粗)
+    let major_offset_x = rect.left().rem_euclid(major_grid_size);
+    let major_offset_y = rect.top().rem_euclid(major_grid_size);
+    {
+        let mut x = rect.left() - major_offset_x;
+        while x <= rect.right() {
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                major_stroke,
+            );
+            x += major_grid_size;
+        }
+        let mut y = rect.top() - major_offset_y;
+        while y <= rect.bottom() {
+            painter.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                major_stroke,
+            );
+            y += major_grid_size;
+        }
     }
-    painter.add(Shape::line(hpoints, grid_stroke));
 
     let mut node_interactions = Vec::new();
     // 用于 Executing 状态的脉冲动画（节点边框/徽标随时间正弦变化）

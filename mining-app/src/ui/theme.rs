@@ -10,8 +10,9 @@ pub const TITLE_BAR_BG: Color32 = Color32::from_rgb(18, 18, 18);       // #12121
 pub const ACTIVITY_BAR_BG: Color32 = Color32::from_rgb(18, 18, 18);    // #121212（与标题栏一致）
 pub const SIDEBAR_BG: Color32 = Color32::from_rgb(22, 22, 22);         // #161616
 pub const PANEL_BG: Color32 = Color32::from_rgb(18, 18, 18);           // #121212
-pub const CANVAS_BG: Color32 = Color32::from_rgb(15, 15, 15);          // #0F0F0F
-pub const CANVAS_GRID: Color32 = Color32::from_rgb(34, 34, 36);        // #222224
+pub const CANVAS_BG: Color32 = Color32::from_rgb(24, 24, 26);          // #18181A
+pub const CANVAS_GRID: Color32 = Color32::from_rgb(42, 42, 44);        // #2A2A2C 次网格，灰黑，低调不突兀
+pub const CANVAS_GRID_MAJOR: Color32 = Color32::from_rgb(58, 58, 60);  // #3A3A3C 主网格，略亮的灰黑
 
 /// 卡片 / 浮层底色：比主内容区略亮一档，用于 group 区块、日志面板、Tab 条等
 /// 「功能区域」，配合圆角形成轻微抬升（elevation）效果。
