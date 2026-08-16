@@ -399,7 +399,7 @@ fn render_logo(ui: &mut egui::Ui, time: f64) -> bool {
 fn main() -> Result<(), eframe::Error> {
     let viewport = egui::ViewportBuilder::default()
         .with_title("青萝")
-        .with_inner_size([1000.0, 700.0])
+        .with_inner_size([1280.0, 800.0])
         // 限制窗口最小内尺寸：避免缩到太小后左侧建模/算子面板（220+240）被挤压、
         // 中央画布无可用空间。最小宽度 ≈ 活动栏48 + 建模面板220 + 算子面板240 + 画布350；
         // 最小高度保留标题栏/状态栏/Tab栏/日志面板 + 画布的合理可用区。

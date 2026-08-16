@@ -107,7 +107,10 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
         && tab.dragging_operator.is_none()
         && !pointer_on_node
     {
-        tab.canvas_offset += response.drag_delta();
+        // 平移量需转换到世界坐标系: 渲染公式 screen = rect.min + (world + offset) * zoom,
+        // 鼠标移动 Δs 期望内容也移动 Δs (跟手), 故 offset 增量 = Δs / zoom.
+        // 之前直接 += drag_delta() 会导致放大时内容移动过快、缩小时过慢, 即"不跟鼠标".
+        tab.canvas_offset += response.drag_delta() / tab.canvas_zoom;
         // 拖动画布平移时, 把鼠标切换为抓取手型(Grabbing), 直观提示正在拖拽画布.
         // 注: Windows 系统光标只有 IDC_HAND(食指指向小手), 无原生五指抓取手,
         // egui 0.26 经 winit 映射 Grabbing → IDC_HAND, 这是系统限制下最贴近"抓取"语义的光标.
@@ -130,9 +133,10 @@ pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
     let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
     if scroll_delta != 0.0 && response.hovered() {
         if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-            // |delta| 一般在 1..50 之间, 取较温和的 ±10% 步长,
-            // 用 1 + 0.01 * delta 让小幅滑动也能连续缩放.
-            let factor = 1.0 + 0.01 * scroll_delta;
+            // 限制单帧缩放幅度, 避免触控板/鼠标猛滚时缩放过猛跳动;
+            // ±10 的 delta 对应每帧最多 ±10% 缩放, 保证连续平滑.
+            let clamped_delta = scroll_delta.clamp(-10.0, 10.0);
+            let factor = 1.0 + 0.01 * clamped_delta;
             zoom_canvas_at_point(tab, factor, pointer);
         }
     }
@@ -1117,10 +1121,10 @@ fn get_port_position(node: &Node, port_index: usize, is_output: bool) -> Pos2 {
 /// 为锚点缩放」造成内容偏移到画布外。供鼠标滚轮缩放（锚点 = 鼠标位置）和工具栏
 /// 放大/缩小按钮（锚点 = 画布屏幕中心）复用。
 ///
-/// 缩放范围限制在 [0.2, 3.0]：过小则节点不可见，过大则连线精度损失。
+/// 缩放范围限制在 [0.2, 4.0]：过小则节点不可见，过大则连线精度损失。
 pub fn zoom_canvas_at_point(tab: &mut DagTab, factor: f32, anchor_screen_pos: Pos2) {
     const MIN_ZOOM: f32 = 0.2;
-    const MAX_ZOOM: f32 = 3.0;
+    const MAX_ZOOM: f32 = 4.0;
     let old_zoom = tab.canvas_zoom;
     let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
     if new_zoom == old_zoom {

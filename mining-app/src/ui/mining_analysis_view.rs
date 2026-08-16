@@ -20,6 +20,7 @@ pub fn render_mining_analysis_view(ui: &mut Ui, editor_state: &mut DagEditorStat
     // 后仍以 240.0 为准——避免「缩小再放大后宽度不还原」。
     egui::SidePanel::left("sidebar_panel")
         .exact_width(240.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
                 .fill(super::theme::SIDEBAR_BG)
