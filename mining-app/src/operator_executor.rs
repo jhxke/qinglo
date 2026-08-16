@@ -274,33 +274,37 @@ pub fn compile_only(code: &str, algorithm_name: &str) -> Result<PathBuf, String>
 
 /// 从算子定义的参数列表构造运行时参数 JSON
 ///
-/// 将 `direction == Param` 的端口参数按 `(name, default_value)` 序列化为 JSON 对象，
-/// 供算子运行时通过 `params_json` 读取。值类型按 `param_type` 转换：
-/// Float -> f64、Int -> i64、Bool -> bool、String/DataFrame -> 字符串。
+/// 将 `direction == Param` 的端口参数按 `(name, value)` 序列化为 JSON 对象，
+/// 供算子运行时通过 `params_json` 读取。优先使用 `def.param_values`（用户在
+/// 参数面板编辑的实际值），缺失时回退到 `default_value`。
+/// 值类型按 `param_type` 转换：Float -> f64、Int -> i64、Bool -> bool、
+/// String/DataFrame -> 字符串。
 fn build_params_json(def: &CustomOperatorDef) -> String {
     let mut map = serde_json::Map::new();
     for p in &def.port_params {
         if p.direction != PortDirection::Param {
             continue;
         }
+        let raw = def
+            .param_values
+            .get(&p.name)
+            .map(|s| s.as_str())
+            .unwrap_or(p.default_value.as_str());
         let value = match p.param_type {
-            ParamType::Float => p
-                .default_value
+            ParamType::Float => raw
                 .parse::<f64>()
                 .map(serde_json::Value::from)
                 .unwrap_or(serde_json::Value::Null),
-            ParamType::Int => p
-                .default_value
+            ParamType::Int => raw
                 .parse::<i64>()
                 .map(serde_json::Value::from)
                 .unwrap_or(serde_json::Value::Null),
-            ParamType::Bool => p
-                .default_value
+            ParamType::Bool => raw
                 .parse::<bool>()
                 .map(serde_json::Value::from)
                 .unwrap_or(serde_json::Value::Null),
             ParamType::String | ParamType::DataFrame | ParamType::DataFrameArray => {
-                serde_json::Value::from(p.default_value.clone())
+                serde_json::Value::from(raw.to_string())
             }
         };
         map.insert(p.name.clone(), value);

@@ -1,420 +1,676 @@
-mod icon;
+//! 青萝挖掘分析应用入口（Iced 0.14 版本）。
+//!
+//! iced 0.14 入口使用 builder API：
+//! `iced::application(MyApp::default, MyApp::update, MyApp::view)
+//!      .title(MyApp::title)
+//!      .subscription(MyApp::subscription)
+//!      .theme(|_| Theme::Dark)
+//!      .scale_factor(|_| 1.0)
+//!      .default_font(Font::with_name("Microsoft YaHei"))
+//!      .font(bytes)   // 多此调用追加字体
+//!      .antialiasing(true)
+//!      .window(window::Settings { ... })
+//!      .run()`
+//!
+//! 阶段 1 为简化泛型推断问题，所有回调都用 MyApp 的关联函数（fn item），
+//! 不使用匿名闭包（闭包的 lifetime 注解经常导致 "implementation of FnOnce is not
+//! general enough"）。
 
-use eframe::egui;
 use std::path::Path;
+use std::time::Duration;
 
-use mining_app::ui::{
-    UiState, ViewType, poll_dag_exec_task, render_activity_bar, render_mining_analysis_view,
-    render_operator_development_view, render_settings_view, render_status_bar, theme,
+use iced::window;
+use iced::{
+    Color, Element, Font, Length, Subscription, Task, Theme, Size,
+    widget::{column, container, row},
 };
 
-struct MyApp {
-    ui_state: UiState,
-    logo_animation_time: f64,
+use mining_app::ui::{
+    Message, UiState, ViewType, LogLevel,
+    view_activity_bar, view_mining_analysis, view_operator_development, view_settings,
+    view_status_bar, view_title_bar,
+};
+use mining_app::ui::dag_canvas::{hit_test_node, hit_test_port, screen_to_world};
+use mining_app::ui::theme;
+use mining_app::dag_store;
+use mining_app::geom::Vec2;
+
+// ===== 主入口 =====
+fn main() -> iced::Result {
+    // 阶段 1：中文字体通过 .default_font("Microsoft YaHei") 指定名查找；
+    // 若系统已有安装，Iced 会自动匹配。若需强制加载文件 bytes，阶段 2 可
+    // 在此链式追加 `.font(font_bytes)` 调用。
+
+    let win = window::Settings {
+        size: Size::new(1000.0, 700.0),
+        min_size: Some(Size::new(860.0, 560.0)),
+        resizable: true,
+        decorations: false,
+        icon: mining_app::icon::create_app_icon(),
+        ..Default::default()
+    };
+
+    iced::application(MyApp::boot, MyApp::update, MyApp::view)
+        .title(MyApp::title)
+        .subscription(MyApp::subscription)
+        .theme(MyApp::theme)
+        .scale_factor(MyApp::scale_factor)
+        .default_font(Font::with_name("Microsoft YaHei"))
+        .antialiasing(true)
+        .window(win)
+        .run()
 }
 
-impl Default for MyApp {
-    fn default() -> Self {
-        Self {
-            ui_state: UiState::default(),
-            logo_animation_time: 0.0,
-        }
-    }
-}
-
-/// 全局空闲检测：当前 UI 是否处于「无动画需求」的安静状态。
-///
-/// 返回 true 表示：
-///   - 没有后台 DAG 执行任务（不需要 20FPS 的脉冲动画节流）
-///   - 没有聊天预览窗口处于 streaming 状态（不需要 500ms 光标闪烁）
-///
-/// 空闲状态下 `update()` 末尾会请求一个较长的 repaint_after 间隔
-/// （`IDLE_REPAINT_INTERVAL_MS`，当前 500ms），把 eframe 事件循环从
-/// 显示器刷新率（60–144Hz）人工降到约 2 FPS，显著降低空闲时 CPU/GPU 占用。
-///
-/// 注意：任何用户输入事件（鼠标移动/点击、键盘、窗口事件等）都会由
-/// egui 后端立即唤醒 UI 线程并重绘，不受此空闲节流影响。
-fn is_ui_idle(ui_state: &UiState) -> bool {
-    // 条件 1：没有正在执行的 DAG 任务
-    if ui_state.dag_editor.dag_exec_task.is_some() {
-        return false;
-    }
-    // 条件 2：任何激活 tab 都没有打开的 streaming 聊天预览
-    // （chat streaming 状态每 500ms 自己会 request_repaint_after，
-    //  这里只要保守判断——只要有 chat_preview 打开，就不进入深度空闲）
-    for tab in &ui_state.dag_editor.tabs {
-        if tab.chat_preview_node_id.is_some() {
-            return false;
-        }
-    }
-    true
-}
-
-/// 空闲时的重绘间隔：500ms ≈ 2 FPS。
-///
-/// 在完全无操作、无任务期间，仅以这个低频刷新界面，用户几乎感知不到卡顿，
-/// 但 CPU/GPU 占用可以从持续 3–10% 降到 <1%。
-const IDLE_REPAINT_INTERVAL_MS: u64 = 500;
+// ===== MyApp 关联函数封装 =====
+//
+// iced::application(...) 第 1 个泛型参数 S = UiState；
+// 第 2/3 个参数 update/view 要求 `for<'a> fn(&'a mut S, M) -> T<...>` /
+// `for<'a> fn(&'a S) -> Element<'a, M>`。
+//
+// 为避免闭包高阶 lifetime 推断失败，这里通过一个最小 struct MyApp 把 fn items
+// 显式包装为 `&UiState` / `&mut UiState` 方法，签名清晰。
+struct MyApp;
 
 impl MyApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_chinese_fonts(&cc.egui_ctx);
-        setup_dark_theme(&cc.egui_ctx);
-        Self::default()
+    /// boot 函数：返回初始 UiState + 一个异步 Task，用于查询主窗口 Id。
+    /// iced 0.14 中 `iced::window::Id` 字段私有，用户无法直接构造，
+    /// 只能通过 `iced::window::oldest()` 异步查询。Task resolve 后
+    /// 通过 `SetMainWindowId` 消息把 Id 落到 UiState，供窗口控制按钮使用。
+    fn boot() -> (UiState, Task<Message>) {
+        let task = iced::window::oldest()
+            .map(Message::SetMainWindowId);
+        (UiState::default(), task)
+    }
+
+    fn title(_state: &UiState) -> String {
+        "青萝".to_string()
+    }
+
+    fn update(state: &mut UiState, message: Message) -> Task<Message> {
+        match message {
+            Message::SwitchView(vt) => {
+                if state.current_view == ViewType::MiningAnalysis
+                    && vt != ViewType::MiningAnalysis
+                {
+                    mining_app::ui::mining_analysis_view::release_all_debug_sessions(
+                        &mut state.dag_editor,
+                    );
+                }
+                state.current_view = vt;
+            }
+            Message::Tick => {
+                // 先 spawn（消费 pending_run_all / pending_run_up_to）再 poll，
+                // 避免同一帧内既挂载任务又消费 rx
+                mining_app::ui::try_spawn_pending_dag_exec(&mut state.dag_editor);
+                mining_app::ui::poll_dag_exec_task(&mut state.dag_editor);
+                // 首入挖掘分析视图时懒加载建模列表（启动后首个 Tick 触发）
+                if state.current_view == ViewType::MiningAnalysis
+                    && !state.dag_editor.models_loaded
+                {
+                    state.dag_editor.refresh_models();
+                }
+                // 推进 Logo 动画时间（每 Tick 0.5s）
+                state.logo_time += 0.5;
+            }
+            Message::SetMainWindowId(id) => {
+                state.main_window_id = id;
+            }
+            Message::WindowClose => {
+                if let Some(id) = state.main_window_id {
+                    return iced::window::close(id);
+                }
+            }
+            Message::WindowToggleMaximize => {
+                if let Some(id) = state.main_window_id {
+                    return iced::window::toggle_maximize(id);
+                }
+            }
+            Message::WindowMinimize => {
+                if let Some(id) = state.main_window_id {
+                    return iced::window::minimize(id, true);
+                }
+            }
+            Message::WindowDrag => {
+                if let Some(id) = state.main_window_id {
+                    return iced::window::drag(id);
+                }
+            }
+            Message::CanvasPress(pos) => {
+                handle_canvas_press(state, pos);
+            }
+            Message::CanvasRelease(_pos) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.dragging_node_id = None;
+                }
+                state.canvas_pan_anchor = None;
+            }
+            Message::CanvasMove(pos) => {
+                handle_canvas_move(state, pos);
+            }
+            Message::CanvasWheel { delta_y, pos } => {
+                handle_canvas_wheel(state, delta_y, pos);
+            }
+
+            // ===== 建模列表 sidebar =====
+
+            Message::OpenModel(id) => {
+                match dag_store::load_model(&id) {
+                    Some(rec) => state.dag_editor.open_model(rec),
+                    None => {
+                        if let Some(tab) = state.dag_editor.active_tab_mut() {
+                            tab.add_action_log(
+                                format!("加载建模失败（可能已被删除）：{}", id),
+                                LogLevel::Error,
+                            );
+                        }
+                        state.dag_editor.refresh_models();
+                    }
+                }
+            }
+            Message::NewModelClick => {
+                state.dag_editor.show_new_model_dialog = true;
+                state.dag_editor.new_model_name_input.clear();
+            }
+            Message::NewModelNameInput(s) => {
+                state.dag_editor.new_model_name_input = s;
+            }
+            Message::NewModelConfirm => {
+                let name = state.dag_editor.new_model_name_input.trim().to_string();
+                let name = if name.is_empty() {
+                    "未命名建模".to_string()
+                } else {
+                    name
+                };
+                state.dag_editor.create_model(&name);
+                state.dag_editor.show_new_model_dialog = false;
+                state.dag_editor.new_model_name_input.clear();
+            }
+            Message::NewModelCancel => {
+                state.dag_editor.show_new_model_dialog = false;
+                state.dag_editor.new_model_name_input.clear();
+            }
+            Message::RenameModelClick(id) => {
+                let cur_name = state
+                    .dag_editor
+                    .models
+                    .iter()
+                    .find(|m| m.id == id)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default();
+                state.dag_editor.rename_target_id = Some(id);
+                state.dag_editor.rename_input = cur_name;
+            }
+            Message::RenameInput(s) => {
+                state.dag_editor.rename_input = s;
+            }
+            Message::RenameConfirm => {
+                if let Some(id) = state.dag_editor.rename_target_id.take() {
+                    let new_name = state.dag_editor.rename_input.trim().to_string();
+                    if !new_name.is_empty() {
+                        state.dag_editor.rename_model(&id, &new_name);
+                    }
+                }
+                state.dag_editor.rename_input.clear();
+            }
+            Message::RenameCancel => {
+                state.dag_editor.rename_target_id = None;
+                state.dag_editor.rename_input.clear();
+            }
+            Message::DeleteModelClick(id, name) => {
+                state.dag_editor.request_delete_model(&id, &name);
+            }
+            Message::DeleteModelConfirm => {
+                if let Some(id) = state.dag_editor.delete_model_target_id.take() {
+                    state.dag_editor.delete_model(&id);
+                }
+                state.dag_editor.delete_model_target_name = None;
+                state.dag_editor.show_delete_model_dialog = false;
+            }
+            Message::DeleteModelCancel => {
+                state.dag_editor.delete_model_target_id = None;
+                state.dag_editor.delete_model_target_name = None;
+                state.dag_editor.show_delete_model_dialog = false;
+            }
+
+            // ===== Tab 栏 =====
+
+            Message::SwitchTab(i) => {
+                state.dag_editor.switch_to_tab(i);
+            }
+            Message::CloseTab(i) => {
+                state.dag_editor.close_tab(i);
+            }
+
+            // ===== 工具栏 =====
+
+            Message::SaveTab => {
+                state.dag_editor.save_active_tab();
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.add_action_log("已保存".to_string(), LogLevel::Success);
+                }
+            }
+            Message::RunAllClick => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.pending_run_all = true;
+                    tab.add_action_log(
+                        "已请求执行 DAG，等待 Tick 轮询 spawn".to_string(),
+                        LogLevel::Info,
+                    );
+                }
+            }
+            Message::ToggleDebug => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.debug_mode = !tab.debug_mode;
+                    let msg = if tab.debug_mode {
+                        "已开启调试模式"
+                    } else {
+                        "已关闭调试模式"
+                    };
+                    tab.add_action_log(msg.to_string(), LogLevel::Info);
+                }
+            }
+            Message::ClearLogs => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.clear_active_logs();
+                }
+            }
+
+            // ===== 日志面板 =====
+
+            Message::SwitchLogCategory(cat) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.active_log_category = cat;
+                }
+            }
+
+            // ===== 左侧合并面板 tab 切换 =====
+
+            Message::SwitchLeftPanel(tab) => {
+                state.dag_editor.active_left_panel = tab;
+            }
+
+            // ===== 画布右键菜单 / 菜单关闭 =====
+            Message::CanvasRightClick(pos) => {
+                handle_canvas_right_click(state, pos);
+            }
+            Message::ContextMenuClose => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.context_menu_screen_pos = None;
+                    tab.context_menu_node_id = None;
+                }
+            }
+
+            // ===== 连线创建（端口 → 拖动 → 端口命中 → add_edge） =====
+            Message::ConnectStart {
+                node_id,
+                port_index,
+                is_output,
+            } => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.connecting_from = Some((node_id, port_index, is_output));
+                    tab.connecting_drag_world = None;
+                    tab.selected_node_id = None;
+                    tab.context_menu_screen_pos = None;
+                    tab.context_menu_node_id = None;
+                }
+            }
+            Message::ConnectDrag(screen_pos) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    let world = screen_to_world(
+                        screen_pos,
+                        tab.canvas_offset,
+                        tab.canvas_zoom,
+                    );
+                    tab.connecting_drag_world = Some(world);
+                }
+            }
+            Message::ConnectRelease(screen_pos) => {
+                handle_connect_release(state, screen_pos);
+            }
+
+            // ===== 算子面板：搜索 + 添加算子到画布 =====
+            Message::OperatorSearchInput(s) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.operator_search_filter = s;
+                }
+            }
+            Message::AddOperator(op_name) => {
+                handle_add_operator_by_name(state, op_name);
+            }
+
+            // ===== 节点参数编辑（text_input 变更） =====
+            Message::ParamInput(node_id, param_name, value) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    if let Some(node) = tab.graph.get_node_mut(&node_id) {
+                        node.operator_type.set_param_value(&param_name, value);
+                        tab.dirty = true;
+                    }
+                }
+            }
+
+            // ===== 节点右键菜单动作：运行到此节点 / 删除节点 =====
+            Message::RunUpToNode(node_id) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.context_menu_screen_pos = None;
+                    tab.context_menu_node_id = None;
+                    tab.pending_run_up_to = Some(node_id.clone());
+                    tab.add_action_log(
+                        format!("已请求运行到节点 {}，等待 Tick 轮询 spawn", node_id),
+                        LogLevel::Info,
+                    );
+                }
+            }
+            Message::DeleteNodeClick(node_id) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.context_menu_screen_pos = None;
+                    tab.context_menu_node_id = None;
+                    if tab.selected_node_id.as_deref() == Some(&node_id) {
+                        tab.selected_node_id = None;
+                    }
+                    tab.graph.remove_node(&node_id);
+                    tab.dirty = true;
+                    tab.add_action_log(
+                        format!("已删除节点 {}", node_id),
+                        LogLevel::Info,
+                    );
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn view(state: &UiState) -> Element<'_, Message> {
+        let title_bar = view_title_bar(state);
+
+        let activity_bar = view_activity_bar(state);
+        let main_content = match state.current_view {
+            ViewType::MiningAnalysis => view_mining_analysis(state),
+            ViewType::OperatorDevelopment => view_operator_development(state),
+            ViewType::Settings => view_settings(state),
+        };
+
+        let main_panel = container(main_content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::PANEL_BG).into());
+                s
+            });
+
+        let body = row![activity_bar, main_panel]
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let status_bar = view_status_bar(state);
+
+        let col = column![title_bar, body, status_bar]
+            .width(Length::Fill)
+            .height(Length::Fill);
+        col.into()
+    }
+
+    fn subscription(_state: &UiState) -> Subscription<Message> {
+        iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick)
+    }
+
+    fn theme(_state: &UiState) -> Theme {
+        theme::dark_theme()
+    }
+
+    fn scale_factor(_state: &UiState) -> f32 {
+        1.0
     }
 }
 
-fn setup_chinese_fonts(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    
-    let font_candidates = [
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\simsun.ttc",
-        "C:\\Windows\\Fonts\\msyhbd.ttc",
-    ];
+// 让未使用的 import 保持（后续阶段要用）
+#[allow(dead_code)]
+fn _keep_font_load(_: ()) {
+    let _ = load_chinese_font();
+}
 
-    for (i, path) in font_candidates.iter().enumerate() {
+const FONT_CANDIDATES: &[&str] = &[
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\simsun.ttc",
+    "C:\\Windows\\Fonts\\msyhbd.ttc",
+];
+
+fn load_chinese_font() -> Vec<u8> {
+    for path in FONT_CANDIDATES {
         if Path::new(path).exists() {
-            if let Ok(font_bytes) = std::fs::read(path) {
-                let font_name = format!("chinese_{}", i);
-                fonts.font_data.insert(font_name.clone(), egui::FontData::from_owned(font_bytes));
-                fonts.families.get_mut(&egui::FontFamily::Proportional)
-                    .unwrap()
-                    .insert(0, font_name.clone());
-                fonts.families.get_mut(&egui::FontFamily::Monospace)
-                    .unwrap()
-                    .push(font_name);
-                break;
+            if let Ok(bytes) = std::fs::read(path) {
+                return bytes;
             }
         }
     }
-    
-    ctx.set_fonts(fonts);
+    Vec::new()
 }
 
-fn setup_dark_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
+// ===== 画布交互处理（拖拽节点 / 平移画布 / 滚轮缩放） =====
+//
+// 这些函数处理 `DagProgram::update` 转发来的 `Message::Canvas*` 消息，
+// 集中在 `MyApp::update` 中通过 `&mut UiState` 修改状态。
+//
+// 坐标系约定（与 `dag_canvas::DagProgram::draw` 一致）：
+// - 屏幕坐标 pos：鼠标相对画布左上角的像素位置（已扣除画布在窗口中的偏移）
+// - 世界坐标 world：`world = (pos - offset) / zoom`，对应 graph 中节点的 position
 
-    // Trae 风格深黑主题
-    visuals.panel_fill = theme::PANEL_BG;            // #121212 主内容区底色
-    visuals.window_fill = theme::CARD_BG;            // #1C1C1E 浮层窗口底色
-    visuals.extreme_bg_color = egui::Color32::from_rgb(12, 12, 12);
-    visuals.faint_bg_color = egui::Color32::from_rgb(34, 34, 36);
-
-    // 选中 / 强调色（蓝色）
-    visuals.selection.bg_fill = theme::ACCENT;
-    visuals.selection.stroke = egui::Stroke::new(1.0, theme::ACCENT);
-    visuals.hyperlink_color = egui::Color32::from_rgb(86, 156, 214);
-
-    // 控件 / 分隔线
-    visuals.window_stroke = egui::Stroke::new(1.0, theme::CARD_STROKE);
-    visuals.widgets.noninteractive.bg_fill = theme::PANEL_BG;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_WEAK);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::DIVIDER);
-
-    // ===== 全局圆角：让按钮 / 输入框 / 组合框 / 窗口 / 菜单都带柔和圆角 =====
-    visuals.window_rounding = egui::Rounding::same(theme::FLOAT_ROUNDING);
-    visuals.menu_rounding = egui::Rounding::same(theme::WIDGET_ROUNDING);
-    visuals.popup_shadow = egui::epaint::Shadow {
-        extrusion: 12.0,
-        color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+/// 画布鼠标按下：命中节点 → 选中 + 开始拖拽；命中空白 → 开始平移画布。
+fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
+    // 先取 offset/zoom（Copy），避免后续借用冲突
+    let (offset, zoom) = match state.dag_editor.active_tab() {
+        Some(tab) => (tab.canvas_offset, tab.canvas_zoom),
+        None => return,
     };
-    // 各交互态控件统一圆角
-    let widget_rounding = egui::Rounding::same(theme::WIDGET_ROUNDING);
-    visuals.widgets.noninteractive.rounding = widget_rounding;
-    visuals.widgets.inactive.rounding = widget_rounding;
-    visuals.widgets.hovered.rounding = widget_rounding;
-    visuals.widgets.active.rounding = widget_rounding;
-    visuals.widgets.open.rounding = widget_rounding;
-    // 输入框 / 组合框底色略提亮，与纯黑底拉开层次
-    visuals.widgets.inactive.bg_fill = theme::CARD_BG;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::CARD_STROKE);
-    visuals.widgets.hovered.bg_fill = theme::HOVER_BG;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::CARD_STROKE);
-    visuals.widgets.active.bg_fill = theme::HOVER_BG;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::ACCENT);
+    let world = screen_to_world(pos, offset, zoom);
 
-    // 全局交互光标: 所有 Button(含右键菜单项/对话框按钮/设置页按钮等)悬停时
-    // 显示食指指向小手, 统一可点击交互的视觉提示. egui 的 Button widget 内部
-    // 会读取 visuals.interact_cursor 并在 hovered 时调用 set_cursor_icon.
-    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+    // 在只读 tab 上做命中检测，并取出命中节点的当前位置
+    let hit = state.dag_editor.active_tab().and_then(|tab| {
+        hit_test_node(&tab.graph, world).and_then(|id| {
+            tab.graph.get_node(&id).map(|n| (id, n.position))
+        })
+    });
 
-    ctx.set_visuals(visuals);
-}
-
-impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 轮询后台 DAG 执行任务（无论当前处于哪个视图都排空工作线程消息、回填结果）
-        poll_dag_exec_task(ctx, &mut self.ui_state.dag_editor);
-
-        // 顶部标题栏：Logo + 应用名（左） + 窗口控制按钮（右）
-        // stroke 提供与下方内容区的 1px 分隔线（顶/左/右贴窗边不可见，仅底部可见）
-        let logo_hovered = egui::TopBottomPanel::top("title_bar")
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::TITLE_BAR_BG)
-                    .stroke(egui::Stroke::new(1.0, theme::DIVIDER)),
-            )
-            .show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                ui.set_height(40.0);
-
-                let logo_hovered = ui.horizontal(|ui| {
-                    ui.set_width(ui.available_width());
-                    // 左侧：Logo + 应用名
-                    let logo_hovered = render_logo(ui, self.logo_animation_time);
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new("青萝")
-                            .color(theme::TEXT_HOVER)
-                            .font(egui::FontId::proportional(13.0))
-                            .strong(),
-                    );
-
-                    // 右侧：窗口控制按钮
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // 关闭按钮
-                        let close_button = render_window_button(ui, "×", egui::Color32::from_rgb(239, 68, 68), egui::Color32::from_rgb(220, 38, 38));
-                        if close_button.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        // 最大化/还原按钮
-                        let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                        let max_button = render_window_button(ui, if is_maximized { "□" } else { "▭" }, egui::Color32::from_rgb(100, 100, 100), egui::Color32::from_rgb(70, 70, 70));
-                        if max_button.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-                        }
-                        // 最小化按钮
-                        let min_button = render_window_button(ui, "−", egui::Color32::from_rgb(100, 100, 100), egui::Color32::from_rgb(70, 70, 70));
-                        if min_button.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                    });
-                    logo_hovered
-                }).inner;
-
-                // 窗口拖拽功能
-                let response = ui.interact(rect, egui::Id::new("title_bar_drag"), egui::Sense::drag());
-                if response.dragged() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-
-                logo_hovered
-            }).inner;
-
-        // Logo 动画时间推进：仅在悬停时推进，避免空闲时每帧做 sin 计算
-        // （悬停动画的 wave_offset 依赖此时间；非悬停时动画冻结在 wave_offset=0，
-        //  渲染结果与设计稿静态图标完全一致，无视觉差异）
-        if logo_hovered {
-            self.logo_animation_time += ctx.input(|i| i.unstable_dt as f64);
-        }
-
-        // 底部状态栏（Trae / VS Code 风格）：跨整个窗口宽度，展示最新提醒与执行状态。
-        // 必须在活动栏（SidePanel::left）之前声明，才能占据完整窗口宽度，
-        // 否则只会贴在活动栏右侧的主内容区下方。
-        egui::TopBottomPanel::bottom("status_bar")
-            .resizable(false)
-            .exact_height(24.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::STATUS_BAR_BG)
-                    .inner_margin(egui::Margin::symmetric(8.0, 0.0)),
-            )
-            .show(ctx, |ui| {
-                render_status_bar(ui, &self.ui_state);
-            });
-
-        // 左侧活动栏（Trae / VS Code 风格）：图标承载功能入口
-        egui::SidePanel::left("activity_bar")
-            .resizable(false)
-            .exact_width(48.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::ACTIVITY_BAR_BG)
-                    .stroke(egui::Stroke::new(1.0, theme::DIVIDER)),
-            )
-            .show(ctx, |ui| {
-                render_activity_bar(ui, &mut self.ui_state);
-            });
-
-        // 主内容区：根据活动栏选中项切换视图
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::PANEL_BG))
-            .show(ctx, |ui| {
-                match self.ui_state.current_view {
-                    ViewType::MiningAnalysis => render_mining_analysis_view(ui, &mut self.ui_state.dag_editor),
-                    ViewType::OperatorDevelopment => render_operator_development_view(ui, &mut self.ui_state.operator_development),
-                    ViewType::Settings => render_settings_view(ui, &mut self.ui_state),
-                }
-            });
-
-        // ===== 全局空闲降频 =====
-        // 在所有视图渲染完成后（确保各组件按需发出的 request_repaint* 已生效），
-        // 如果检测到 UI 处于「无任务、无流式预览、Logo 也未悬停」的安静状态，
-        // 就用一个较长的 repaint_after 间隔把 eframe 从显示器刷新率（60-144Hz）
-        // 人工压到约 2 FPS。任何用户输入事件都会立即唤醒并重绘，交互无感知。
-        if is_ui_idle(&self.ui_state) && !logo_hovered {
-            ctx.request_repaint_after(std::time::Duration::from_millis(IDLE_REPAINT_INTERVAL_MS));
+    // 应用变更到可变 tab
+    let mut hit_node = false;
+    if let Some(tab) = state.dag_editor.active_tab_mut() {
+        match hit {
+            Some((node_id, node_pos)) => {
+                tab.selected_node_id = Some(node_id.clone());
+                tab.dragging_node_id = Some(node_id);
+                tab.drag_offset =
+                    Vec2::new(world.x - node_pos.x, world.y - node_pos.y);
+                hit_node = true;
+            }
+            None => {
+                tab.selected_node_id = None;
+                tab.dragging_node_id = None;
+            }
         }
     }
-}
 
-fn render_window_button(ui: &mut egui::Ui, text: &str, hover_color: egui::Color32, pressed_color: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::Vec2::new(46.0, 30.0), egui::Sense::click());
-    let painter = ui.painter();
-    
-    // 绘制按钮背景 - 使用 is_pointer_button_down_on 检测持续按下状态
-    if response.is_pointer_button_down_on() {
-        painter.add(egui::Shape::rect_filled(rect, 0.0, pressed_color));
-    } else if response.hovered() {
-        painter.add(egui::Shape::rect_filled(rect, 0.0, hover_color));
-    }
-    
-    // 绘制按钮文字
-    let text_color = if response.hovered() || response.is_pointer_button_down_on() {
-        egui::Color32::WHITE
+    // UiState 级别的平移锚点（与 tab.dragging_node_id 互斥）
+    if hit_node {
+        state.canvas_pan_anchor = None;
     } else {
-        egui::Color32::from_rgb(180, 180, 180)
+        state.canvas_pan_anchor = Some((pos, offset));
+    }
+}
+
+/// 画布鼠标移动：拖拽中节点 → 更新节点位置；平移画布 → 更新 canvas_offset。
+///
+/// GPU 优化：前置快路径——非拖拽态直接 return。正常情况由 Program 的
+/// CursorMoved 节流保证这类消息根本不会发，但作为双保险（例如未来
+/// 改动后误发消息），这里也做判定避免任何 no-op 写入触发 view 重建。
+fn handle_canvas_move(state: &mut UiState, pos: Vec2) {
+    // 1) 画布平移（UiState 级别锚点）
+    if let Some((anchor_pos, anchor_offset)) = state.canvas_pan_anchor {
+        if let Some(tab) = state.dag_editor.active_tab_mut() {
+            tab.canvas_offset = Vec2::new(
+                anchor_offset.x + (pos.x - anchor_pos.x),
+                anchor_offset.y + (pos.y - anchor_pos.y),
+            );
+        }
+        return;
+    }
+
+    // 2) 节点拖拽（tab 级别 dragging_node_id）
+    let Some(tab) = state.dag_editor.active_tab_mut() else { return; };
+    let Some(node_id) = tab.dragging_node_id.clone() else {
+        // 非拖拽态：无写入 → 立即退出，防止"发了消息但无事可做但仍触发
+        // UiState 结构变化 → view → PartialEq 深比较"的 CPU 抖动
+        return;
     };
-    
-    // 使用 painter.text 来绘制文字
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        text,
-        egui::FontId::proportional(14.0),
-        text_color,
+    let offset = tab.canvas_offset;
+    let zoom = tab.canvas_zoom;
+    let drag_offset = tab.drag_offset;
+    let world = screen_to_world(pos, offset, zoom);
+    let new_pos = Vec2::new(world.x - drag_offset.x, world.y - drag_offset.y);
+    if let Some(node) = tab.graph.get_node_mut(&node_id) {
+        node.position = new_pos;
+    }
+    tab.dirty = true;
+}
+
+/// 画布滚轮缩放：以鼠标位置为锚点调整 zoom，并同步 offset 使锚点世界坐标不变。
+fn handle_canvas_wheel(state: &mut UiState, delta_y: f32, pos: Vec2) {
+    let Some(tab) = state.dag_editor.active_tab_mut() else { return; };
+    let old_offset = tab.canvas_offset;
+    let old_zoom = tab.canvas_zoom;
+
+    // 每次滚轮 ±10%，向上（delta_y > 0）放大，向下缩小
+    let factor = 1.0 + delta_y.signum() * 0.1;
+    let new_zoom = (old_zoom * factor).clamp(0.2, 4.0);
+    if (new_zoom - old_zoom).abs() < f32::EPSILON {
+        return;
+    }
+
+    // 锚点世界坐标不变：world = (pos - old_offset) / old_zoom
+    //                  new_offset = pos - world * new_zoom
+    let safe_zoom = old_zoom.max(f32::EPSILON);
+    let world_x = (pos.x - old_offset.x) / safe_zoom;
+    let world_y = (pos.y - old_offset.y) / safe_zoom;
+    let new_offset = Vec2::new(
+        pos.x - world_x * new_zoom,
+        pos.y - world_y * new_zoom,
     );
-    
-    response
+
+    tab.canvas_zoom = new_zoom;
+    tab.canvas_offset = new_offset;
 }
 
-fn lerp_color(start: egui::Color32, end: egui::Color32, t: f32) -> egui::Color32 {
-    let t = t.clamp(0.0, 1.0);
-    egui::Color32::from_rgba_unmultiplied(
-        (start.r() as f32 + (end.r() as f32 - start.r() as f32) * t) as u8,
-        (start.g() as f32 + (end.g() as f32 - start.g() as f32) * t) as u8,
-        (start.b() as f32 + (end.b() as f32 - start.b() as f32) * t) as u8,
-        (start.a() as f32 + (end.a() as f32 - start.a() as f32) * t) as u8,
-    )
+/// 画布右键：命中节点 → 节点菜单；否则 → 画布空白菜单。
+fn handle_canvas_right_click(state: &mut UiState, pos: Vec2) {
+    let (offset, zoom) = match state.dag_editor.active_tab() {
+        Some(tab) => (tab.canvas_offset, tab.canvas_zoom),
+        None => return,
+    };
+    let world = screen_to_world(pos, offset, zoom);
+    let hit_node = state
+        .dag_editor
+        .active_tab()
+        .and_then(|tab| hit_test_node(&tab.graph, world));
+
+    if let Some(tab) = state.dag_editor.active_tab_mut() {
+        tab.context_menu_screen_pos = Some(pos);
+        tab.context_menu_node_id = hit_node;
+        if let Some(ref nid) = tab.context_menu_node_id {
+            // 同时选中该节点，便于参数面板展示
+            tab.selected_node_id = Some(nid.clone());
+        }
+    }
 }
 
-fn render_logo(ui: &mut egui::Ui, time: f64) -> bool {
-    // 设计稿基于 24×24 坐标系，所有内部坐标/线宽均按 s 等比缩放。
-    // 想再放大/缩小 logo，只改 LOGO_DISPLAY_SIZE 即可。
-    const LOGO_DESIGN_SIZE: f32 = 24.0;
-    const LOGO_DISPLAY_SIZE: f32 = 32.0;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::Vec2::splat(LOGO_DISPLAY_SIZE), egui::Sense::hover());
-    let hovered = response.hovered();
-    let painter = ui.painter();
+/// 连线创建：ConnectRelease → 命中端口，两端方向相反（Output→Input / Input→Output）
+/// 则调用 tab.graph.add_edge 创建一条新边；否则只清空 dragging 状态。
+fn handle_connect_release(state: &mut UiState, screen_pos: Vec2) {
+    use mining_app::dag::Edge;
 
-    let s = rect.width() / LOGO_DESIGN_SIZE; // 缩放因子
-    let center = rect.center();
-    let size = rect.width() * 0.8;
-    let half_size = size / 2.0;
-
-    // 渐变色
-    let start_color = egui::Color32::from_rgb(0, 122, 255);
-    let end_color = egui::Color32::from_rgb(52, 199, 89);
-
-    // 波形偏移：仅悬停时启用 sin 动画，否则冻结为 0（与设计稿静态点一致）
-    let wave_offset = if hovered {
-        (time * 2.0).sin() as f32 * 0.5
-    } else {
-        0.0
+    let (from_info, offset, zoom) = match state.dag_editor.active_tab() {
+        Some(tab) => (
+            tab.connecting_from.clone(),
+            tab.canvas_offset,
+            tab.canvas_zoom,
+        ),
+        None => return,
     };
+    let world = screen_to_world(screen_pos, offset, zoom);
+    let target_port = state
+        .dag_editor
+        .active_tab()
+        .and_then(|tab| hit_test_port(&tab.graph, world));
 
-    // 折线图形状（上升趋势）：坐标基于 24×24 设计稿，通过 s 缩放到实际尺寸。
-    // 与 icon.rs::create_app_icon 的静态点保持一致：6 点上升趋势，末尾顶部突破点
-    // (18, -18) 在原峰值正上方，象征数据挖掘的“发现峰值”，落点为纯绿 #34C759。
-    // wave_offset 仅作用于肩部点（index 1/4），保证 wave_offset=0 时与图标完全一致。
-    let px = |dx: f32, dy: f32| {
-        egui::Pos2::new(center.x - half_size + dx * s, center.y + half_size + dy * s)
-    };
-    let points = [
-        px(4.0, -2.0),
-        px(8.0, -4.0 + wave_offset),
-        px(10.0, -3.0),
-        px(12.0, -10.0),
-        px(16.0, -9.0 + wave_offset),
-        px(20.0, -16.0),
-    ];
-
-    // 绘制折线阴影
-    painter.add(egui::Shape::line(
-        points
-            .iter()
-            .map(|p| egui::Pos2::new(p.x + 1.0 * s, p.y + 1.0 * s))
-            .collect(),
-        egui::Stroke::new(2.0 * s, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 60)),
-    ));
-
-    // 绘制渐变折线
-    for i in 0..points.len() - 1 {
-        let progress = i as f32 / (points.len() - 2) as f32;
-        let color = lerp_color(start_color, end_color, progress);
-        painter.add(egui::Shape::line(
-            vec![points[i], points[i + 1]],
-            egui::Stroke::new(2.5 * s, color),
-        ));
+    let mut add_edge: Option<Edge> = None;
+    if let (Some((from_node, from_idx, from_out)), Some((to_node, to_idx, to_out))) =
+        (from_info.as_ref(), target_port)
+    {
+        // 两端必须是不同节点
+        if from_node != &to_node && from_out != &to_out {
+            // 统一规范化：边的 source=输出端，target=输入端
+            let (src_node, src_idx, tgt_node, tgt_idx) = if *from_out {
+                (from_node.clone(), *from_idx, to_node, to_idx)
+            } else {
+                (to_node, to_idx, from_node.clone(), *from_idx)
+            };
+            let edge = Edge::new(src_node, src_idx, tgt_node, tgt_idx);
+            add_edge = Some(edge);
+        }
     }
 
-    // 绘制数据点
-    for (i, &point) in points.iter().enumerate() {
-        let progress = i as f32 / (points.len() - 1) as f32;
-        let color = lerp_color(start_color, end_color, progress);
+    if let Some(tab) = state.dag_editor.active_tab_mut() {
+        tab.connecting_from = None;
+        tab.connecting_drag_world = None;
+        if let Some(edge) = add_edge {
+            match tab.graph.add_edge(edge) {
+                Ok(()) => {
+                    tab.dirty = true;
+                    tab.add_action_log("已创建连线".to_string(), LogLevel::Info);
+                }
+                Err(e) => {
+                    tab.add_action_log(
+                        format!("创建连线失败：{}", e),
+                        LogLevel::Error,
+                    );
+                }
+            }
+        }
+    }
+}
 
-        // 外圈光晕半径：悬停时呼吸，否则固定 3.0
-        let glow_radius = if hovered {
-            (4.0 + (time * 3.0).sin() as f32 * 1.0) * s
+/// AddOperator：在激活 tab 画布中心/鼠标最后位置（或世界原点）新增一个节点，
+/// 从 `dag::get_all_operator_types()` 按名称匹配 OperatorType。
+fn handle_add_operator_by_name(state: &mut UiState, op_name: String) {
+    use mining_app::dag::{get_all_operator_types, Node};
+
+    let op_type = match get_all_operator_types()
+        .into_iter()
+        .find(|op| op.name() == op_name)
+    {
+        Some(t) => t,
+        None => {
+            if let Some(tab) = state.dag_editor.active_tab_mut() {
+                tab.add_action_log(
+                    format!("未找到算子：{}", op_name),
+                    LogLevel::Error,
+                );
+            }
+            return;
+        }
+    };
+
+    if let Some(tab) = state.dag_editor.active_tab_mut() {
+        // 优先放置在画布可视区域中心（屏幕中心反推世界坐标）
+        let world = if let Some(pp) = tab.pending_add_operator_world.take() {
+            pp
         } else {
-            3.0 * s
+            // 约等于画布中心（300x200 近似）
+            screen_to_world(Vec2::new(300.0, 200.0), tab.canvas_offset, tab.canvas_zoom)
         };
-        let glow_color = egui::Color32::from_rgba_unmultiplied(
-            color.r(),
-            color.g(),
-            color.b(),
-            (100.0 * (1.0 - progress)).round() as u8,
-        );
-        painter.add(egui::Shape::circle_filled(point, glow_radius, glow_color));
-
-        // 内圈实心点
-        painter.add(egui::Shape::circle_filled(point, 2.0 * s, color));
+        let node = Node::new(op_type, world);
+        let node_id = node.id.clone();
+        tab.graph.add_node(node);
+        tab.selected_node_id = Some(node_id);
+        tab.dirty = true;
+        tab.add_action_log(format!("已添加算子 {}", op_name), LogLevel::Info);
     }
-
-    // 悬停时的发光背板
-    if hovered {
-        let glow_rect =
-            egui::Rect::from_center_size(center, egui::Vec2::splat(32.0 * s));
-        painter.add(egui::Shape::rect_filled(
-            glow_rect,
-            16.0 * s,
-            egui::Color32::from_rgba_unmultiplied(0, 122, 255, 20),
-        ));
-    }
-
-    hovered
-}
-
-fn main() -> Result<(), eframe::Error> {
-    let viewport = egui::ViewportBuilder::default()
-        .with_title("青萝")
-        .with_inner_size([1000.0, 700.0])
-        // 限制窗口最小内尺寸：避免缩到太小后左侧建模/算子面板（220+240）被挤压、
-        // 中央画布无可用空间。最小宽度 ≈ 活动栏48 + 建模面板220 + 算子面板240 + 画布350；
-        // 最小高度保留标题栏/状态栏/Tab栏/日志面板 + 画布的合理可用区。
-        .with_min_inner_size([860.0, 560.0])
-        .with_decorations(false)
-        .with_icon(icon::create_app_icon());
-
-    let native_options = eframe::NativeOptions {
-        viewport,
-        ..eframe::NativeOptions::default()
-    };
-    eframe::run_native(
-        "青萝",
-        native_options,
-        Box::new(|cc| Box::new(MyApp::new(cc))),
-    )
 }

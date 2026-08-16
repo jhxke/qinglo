@@ -91,6 +91,12 @@ pub struct CustomOperatorDef {
     pub color: [u8; 3],
     #[serde(default)]
     pub port_params: Vec<OperatorPortParamDef>,
+    /// 参数值：键为参数名（对应 `port_params` 中 `Direction::Param` 项的 name），
+    /// 值为字符串形式（与 `operator.json` 的 `default_value` 保持一致，均为原始文本）。
+    /// 新建节点时从 `OperatorPortParamDef.default_value` 复制到这里；
+    /// 用户在参数面板编辑后更新此处；执行 DAG 时再序列化到 `params_json` 下发。
+    #[serde(default)]
+    pub param_values: std::collections::BTreeMap<String, String>,
     /// 摘要：一句话说明算子用途，展示在算子列表卡片上。
     #[serde(default)]
     pub summary: String,
@@ -255,6 +261,9 @@ pub extern "C" fn execute_operator(
                     default_value: "5.0".to_string(),
                 },
             ],
+            param_values: [("period".to_string(), "5.0".to_string())]
+                .into_iter()
+                .collect(),
             summary: String::new(),
             description_md: String::new(),
             stream: false,
@@ -419,9 +428,9 @@ impl OperatorType {
         }
     }
 
-    pub fn color(&self) -> egui::Color32 {
+    pub fn color(&self) -> iced::Color {
         match self {
-            OperatorType::Custom(def) => egui::Color32::from_rgb(def.color[0], def.color[1], def.color[2]),
+            OperatorType::Custom(def) => iced::Color::from_rgb8(def.color[0], def.color[1], def.color[2]),
         }
     }
 
@@ -506,17 +515,72 @@ impl OperatorType {
             }
         }
     }
+
+    /// 获取某个参数的当前值（param_values 缺省时返回 default_value 兜底）。
+    pub fn get_param_value(&self, name: &str) -> Option<String> {
+        match self {
+            OperatorType::Custom(def) => {
+                if let Some(v) = def.param_values.get(name) {
+                    return Some(v.clone());
+                }
+                def.port_params
+                    .iter()
+                    .find(|pp| pp.direction == PortDirection::Param && pp.name == name)
+                    .map(|pp| pp.default_value.clone())
+            }
+        }
+    }
+
+    /// 设置某个参数的值；返回 true 表示该参数名在 schema 中存在（写入成功）。
+    pub fn set_param_value(&mut self, name: &str, value: String) -> bool {
+        match self {
+            OperatorType::Custom(def) => {
+                let known = def
+                    .port_params
+                    .iter()
+                    .any(|pp| pp.direction == PortDirection::Param && pp.name == name);
+                if !known {
+                    return false;
+                }
+                def.param_values.insert(name.to_string(), value);
+                true
+            }
+        }
+    }
+
+    /// 序列化当前 param_values 到 `params_json`（{name: value} 的 JSON 对象字符串）。
+    /// 若某个参数名在 param_values 中缺失，则取 default_value 兜底。
+    pub fn build_params_json(&self) -> String {
+        use std::collections::BTreeMap;
+        match self {
+            OperatorType::Custom(def) => {
+                let mut out: BTreeMap<&str, &str> = BTreeMap::new();
+                for pp in &def.port_params {
+                    if pp.direction != PortDirection::Param {
+                        continue;
+                    }
+                    let v = def
+                        .param_values
+                        .get(&pp.name)
+                        .map(|s| s.as_str())
+                        .unwrap_or(pp.default_value.as_str());
+                    out.insert(&pp.name, v);
+                }
+                serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: String,
     pub operator_type: OperatorType,
-    pub position: egui::Vec2,
+    pub position: crate::geom::Vec2,
 }
 
 impl Node {
-    pub fn new(operator_type: OperatorType, position: egui::Vec2) -> Self {
+    pub fn new(operator_type: OperatorType, position: crate::geom::Vec2) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             operator_type,
@@ -868,12 +932,26 @@ pub fn operator_info_to_type(info: &ProtoOperatorInfo) -> OperatorType {
         .map(convert_port_param_def)
         .collect();
 
+    // 把 Param 类 port_params 的 default_value 初始化到 param_values。
+    // 编辑器里显示/修改的就是 param_values，而 port_params 只保存 schema。
+    let mut param_values = std::collections::BTreeMap::new();
+    for pp in &info.port_params {
+        let direction = match pp.direction.as_str() {
+            "Output" | "Param" => PortDirection::Param,
+            _ => continue,
+        };
+        if direction == PortDirection::Param {
+            param_values.insert(pp.name.clone(), pp.default_value.clone());
+        }
+    }
+
     OperatorType::Custom(CustomOperatorDef {
         name: info.name.clone(),
         description: info.description.clone(),
         code: String::new(),
         color: info.color,
         port_params,
+        param_values,
         summary: info.summary.clone(),
         description_md: info.description_md.clone(),
         stream: info.stream,
@@ -1356,7 +1434,7 @@ impl NodeIORegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::Vec2;
+    use crate::geom::Vec2;
 
     fn make_graph() -> (DagGraph, String, String, String) {
         let mut g = DagGraph::new();

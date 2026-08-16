@@ -1,171 +1,80 @@
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+//! 左侧活动栏（Trae / VS Code 风格）。
 
-use super::state::{UiState, ViewType};
+use iced::{Alignment, Color, Element, Length};
+use iced::widget::{button, column, container, row, text};
+
+use super::state::{Message, UiState, ViewType};
 use super::theme;
 
+const BAR_WIDTH: f32 = 48.0;
 const BUTTON_SIZE: f32 = 48.0;
-const ICON_SIZE: f32 = 22.0;
 
-#[derive(Clone, Copy)]
-enum IconKind {
-    /// 节点图（DAG 编辑器）—— 挖掘分析
-    Graph,
-    /// `</>` 代码 —— 算子开发
-    Code,
-    /// 齿轮 —— 系统设置
-    Gear,
+pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
+    let mining_btn = view_activity_button("挖掘", ViewType::MiningAnalysis, state.current_view);
+    let op_btn = view_activity_button("算子", ViewType::OperatorDevelopment, state.current_view);
+    let settings_btn = view_activity_button("设置", ViewType::Settings, state.current_view);
+
+    let col = column![mining_btn, op_btn, settings_btn]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    container(col)
+        .width(Length::Fixed(BAR_WIDTH))
+        .height(Length::Fill)
+        .into()
 }
 
-/// 渲染 Trae / VS Code 风格的活动栏（最左侧窄竖条）。
-///
-/// 顶部为主功能入口（挖掘分析、算子开发），底部为系统设置；
-/// 激活项左侧有蓝色指示条且图标提亮，非激活项灰色，悬停时背景高亮。
-pub fn render_activity_bar(ui: &mut Ui, state: &mut UiState) {
-    let bar_rect = ui.max_rect();
-    let painter = ui.painter();
-    // 活动栏底色（与外层 Frame fill 一致，这里再画一次确保覆盖整个矩形）
-    painter.rect_filled(bar_rect, 0.0, theme::ACTIVITY_BAR_BG);
+fn view_activity_button(
+    label: &'static str,
+    vt: ViewType,
+    current: ViewType,
+) -> Element<'_, Message> {
+    let is_active = current == vt;
+    // 激活：强白文字 + 左侧 accent 竖条；非激活：弱化文字，hover 时变亮
+    let txt_color = if is_active { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
 
-    let width = bar_rect.width();
+    let label_widget = text(label).color(txt_color).size(11.0);
 
-    // 顶部主功能入口，自上而下排列
-    let top_items: [(ViewType, IconKind, &str); 2] = [
-        (ViewType::MiningAnalysis, IconKind::Graph, "挖掘分析"),
-        (ViewType::OperatorDevelopment, IconKind::Code, "算子开发"),
-    ];
-    // 底部入口，自下而上排列
-    let bottom_items: [(ViewType, IconKind, &str); 1] = [
-        (ViewType::Settings, IconKind::Gear, "系统设置"),
-    ];
+    let btn = button(label_widget)
+        .on_press(Message::SwitchView(vt))
+        .width(Length::Fill)
+        .height(Length::Fixed(BUTTON_SIZE))
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.background = Some(Color::TRANSPARENT.into());
+            s.text_color = txt_color;
+            if is_active {
+                // 激活：稍亮底色，让选中感更明显
+                s.background = Some(Color::from(theme::HOVER_BG).into());
+            } else if matches!(status, iced::widget::button::Status::Hovered) {
+                // 非激活 hover：弱底色
+                s.background = Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 12.0 / 255.0 }.into());
+                s.text_color = theme::TEXT_HOVER;
+            }
+            s
+        });
 
-    let mut y = bar_rect.top();
-    for (vt, icon, label) in top_items {
-        let rect = Rect::from_min_size(
-            Pos2::new(bar_rect.left(), y),
-            Vec2::new(width, BUTTON_SIZE),
-        );
-        render_activity_button(ui, rect, vt, icon, label, state);
-        y += BUTTON_SIZE;
-    }
+    // 左侧 2px accent 竖条（仅激活态绘制），与按钮拼成完整一行
+    let bar_w = if is_active { 2.0 } else { 0.0 };
+    let accent_bar = container(text("").size(1.0))
+        .width(Length::Fixed(bar_w))
+        .height(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::ACCENT).into());
+            s
+        });
 
-    let mut y = bar_rect.bottom();
-    for (vt, icon, label) in bottom_items {
-        y -= BUTTON_SIZE;
-        let rect = Rect::from_min_size(
-            Pos2::new(bar_rect.left(), y),
-            Vec2::new(width, BUTTON_SIZE),
-        );
-        render_activity_button(ui, rect, vt, icon, label, state);
-    }
-
-    // 占据整块区域，避免 egui 布局告警
-    ui.allocate_rect(bar_rect, Sense::hover());
+    row![accent_bar, btn]
+        .width(Length::Fixed(BAR_WIDTH))
+        .height(Length::Fixed(BUTTON_SIZE))
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .into()
 }
 
-fn render_activity_button(
-    ui: &mut Ui,
-    rect: Rect,
-    view_type: ViewType,
-    icon: IconKind,
-    label: &str,
-    state: &mut UiState,
-) {
-    let response = ui.interact(
-        rect,
-        ui.make_persistent_id(("activity_bar", label)),
-        Sense::click(),
-    );
-    let painter = ui.painter();
-    let is_active = state.current_view == view_type;
-
-    // 悬停背景
-    if response.hovered() {
-        painter.rect_filled(rect, 0.0, theme::HOVER_BG);
-    }
-
-    // 激活态左侧蓝色指示条
-    if is_active {
-        let indicator = Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height()));
-        painter.rect_filled(indicator, 0.0, theme::ACCENT);
-    }
-
-    let icon_color = if is_active {
-        theme::TEXT_STRONG
-    } else if response.hovered() {
-        theme::TEXT_HOVER
-    } else {
-        theme::TEXT_WEAK
-    };
-
-    let center = rect.center();
-    match icon {
-        IconKind::Graph => draw_graph_icon(painter, center, ICON_SIZE, icon_color),
-        IconKind::Code => draw_code_icon(painter, center, ICON_SIZE, icon_color),
-        IconKind::Gear => {
-            draw_gear_icon(painter, center, ICON_SIZE, icon_color, theme::ACTIVITY_BAR_BG)
-        }
-    }
-
-    // on_hover_text 会消费 response（按值接收 self），故先取出 clicked
-    let clicked = response.clicked();
-    response.on_hover_text(label);
-
-    if clicked {
-        // 离开挖掘分析视图时释放所有 Debug 会话，避免服务端内存泄漏
-        if state.current_view == ViewType::MiningAnalysis && view_type != ViewType::MiningAnalysis {
-            super::mining_analysis_view::release_all_debug_sessions(&mut state.dag_editor);
-        }
-        state.current_view = view_type;
-    }
-}
-
-/// 节点图图标：三个节点两两连线，呼应 DAG 编辑器。
-fn draw_graph_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    let s = size / 24.0;
-    let p = |x: f32, y: f32| Pos2::new(center.x + (x - 12.0) * s, center.y + (y - 12.0) * s);
-    let n1 = p(5.0, 7.0);
-    let n2 = p(19.0, 7.0);
-    let n3 = p(12.0, 18.0);
-    let stroke = Stroke::new(1.5 * s, color);
-    painter.line_segment([n1, n2], stroke);
-    painter.line_segment([n1, n3], stroke);
-    painter.line_segment([n2, n3], stroke);
-    let r = 2.4 * s;
-    painter.circle_filled(n1, r, color);
-    painter.circle_filled(n2, r, color);
-    painter.circle_filled(n3, r, color);
-}
-
-/// `</>` 代码图标。
-fn draw_code_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    let s = size / 24.0;
-    let p = |x: f32, y: f32| Pos2::new(center.x + (x - 12.0) * s, center.y + (y - 12.0) * s);
-    let stroke = Stroke::new(1.8 * s, color);
-    // <
-    painter.line_segment([p(7.0, 7.0), p(3.0, 12.0)], stroke);
-    painter.line_segment([p(3.0, 12.0), p(7.0, 17.0)], stroke);
-    // /
-    painter.line_segment([p(10.5, 17.5), p(13.5, 6.5)], stroke);
-    // >
-    painter.line_segment([p(17.0, 7.0), p(21.0, 12.0)], stroke);
-    painter.line_segment([p(21.0, 12.0), p(17.0, 17.0)], stroke);
-}
-
-/// 齿轮图标：圆环 + 8 个齿 + 中心孔。
-fn draw_gear_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, bg: Color32) {
-    let s = size / 24.0;
-    let ring_r = 6.2 * s;
-    let stroke = Stroke::new(1.5 * s, color);
-    painter.circle_stroke(center, ring_r, stroke);
-    // 8 个齿
-    for i in 0..8 {
-        let a = (i as f32) * std::f32::consts::TAU / 8.0;
-        let dir = Vec2::new(a.cos(), a.sin());
-        let p1 = center + dir * (ring_r + 0.3 * s);
-        let p2 = center + dir * (ring_r + 2.5 * s);
-        painter.line_segment([p1, p2], Stroke::new(1.8 * s, color));
-    }
-    // 中心孔（用活动栏底色"挖空"）
-    let hole_r = 2.2 * s;
-    painter.circle_filled(center, hole_r, bg);
+#[allow(dead_code)]
+fn _unused() {
+    let _r: iced::widget::Row<'_, (), iced::Theme, iced::Renderer> = row![];
+    let _ = Color::BLACK;
 }

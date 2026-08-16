@@ -1,1222 +1,880 @@
-use egui::{
-    Painter, Rect, Pos2, Stroke, Shape, Ui, Vec2, Color32, FontFamily, Align,
-    text::{LayoutJob, LayoutSection, TextFormat, TextWrapping},
+//! DAG 画布：节点 / 连线 / 网格 / 缩放 / 平移（基于 `iced::widget::canvas::Program`）。
+//!
+//! GPU 重度优化版：
+//! - Cache 失效修复：iced 0.14 canvas::Cache 只按 size 判断是否重建，
+//!   graph/offset/zoom 变化但窗口没 resize 时 Cache 返回旧 Geometry → 画布冻结。
+//!   修复：指纹检测到内容变化时先 `world_cache.clear()` 强制重建。
+//! - 网格：从 N 条线各自 Path → 合并为 竖线集合 1 个 Path + 横线集合 1 个 Path
+//! - 端口占用：从 O(端口×边) 线性扫描 → 单次遍历建 HashMap，O(1) 查询
+//! - 节点尺寸：每次 draw_world_content 内建局部 HashMap 缓存，单次计算复用
+//! - Stroke：网格线用默认 Butt/Miter（Round 对直线无视觉收益但会让 tesselator 多做顶点）
+//! - 连线贝塞尔：复用 Control point 计算逻辑，减少临时分配
+//! - 节点卡片：矩形填充+边框+色条顺序不变，但避免重复 Path::rectangle 构造（复用变量）
+//! - 拖动节流：拖动节点 / 平移画布时（dragging_in_progress=true）跳过文字 + 端口
+//!   渲染（fill_text outline 复杂、端口每节点多圆点，二者是最贵的 tessellation）。
+//!   fingerprint 在 dragging_in_progress 边沿变化触发 cache clear，松手后自动恢复完整绘制。
+//!   连线创建中保留端口（用户需看到目标端口）；文字在所有拖动场景下都跳过。
+
+use iced::widget::canvas;
+use iced::widget::canvas::stroke::{self, Stroke};
+use iced::widget::canvas::{Action, Event, Geometry, LineCap, LineJoin, Path, Text};
+use iced::{
+    Alignment, Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Theme,
+    Vector, mouse,
+    widget::{container, text},
 };
-use std::sync::Arc;
-use crate::dag::{DagGraph, Edge, Node};
-use operator_executor_client::protocol::OperatorExecutionStatus;
-use super::state::DagTab;
+use std::collections::HashMap;
 
-const NODE_WIDTH: f32 = 140.0;
-const NODE_HEIGHT: f32 = 60.0;
-const PORT_RADIUS: f32 = 6.0;
-const PORT_PADDING: f32 = 8.0;
+use super::state::{Message, UiState};
+use super::theme;
+use crate::dag::DagGraph;
+use crate::geom::Vec2;
 
-/// 在给定矩形内适配渲染文字：
-///   1. 每行内部水平居中 (LayoutJob.halign = Center)，
-///   2. 整体自动换行 (TextWrapping.max_width = 内边距矩形宽度)，
-///   3. 换行后若仍超出高度则逐级缩小字号，
-///   4. 最终整个 galley 在节点矩形内垂直居中 + 水平居中。
+/// 节点固定高度（像素）。
+const NODE_HEIGHT: f32 = 32.0;
+/// 节点最小宽度（即使算子名为空也保证可视）。
+const NODE_MIN_WIDTH: f32 = 80.0;
+/// 节点 padding（左右各 12px）。
+const NODE_PADDING_X: f32 = 12.0;
+/// 节点算子名每字符近似宽度（11.0 字号下）。
+const CHAR_WIDTH_ESTIMATE: f32 = 7.0;
+/// 网格步长（像素）。
+const GRID_STEP: f32 = 24.0;
+/// 端口圆点半径。
+const PORT_RADIUS: f32 = 4.0;
+/// 端口命中测试容差（世界坐标，按节点内部端口大小近似）。
+const PORT_HIT_MARGIN: f32 = 7.0;
+
+// ===== 预计算的 Stroke 配置（避免每帧构造结构体） =====
+//
+// 注意：Stroke 不是 Copy，但 clone 很轻。放在 const 外面 lazy_static 也行，
+// 这里直接写函数返回引用的静态值，避免任何运行时构造开销。
+
+fn grid_stroke() -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(Color::from(theme::canvas_grid())),
+        width: 1.0,
+        // 直线段：Butt 比 Round 少两个半圆的 tessellation 顶点
+        line_cap: LineCap::Butt,
+        // 网格线互不相连，Miter 无视觉差异但比 Round 便宜
+        line_join: LineJoin::Miter,
+        ..Default::default()
+    }
+}
+
+fn edge_stroke() -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(Color::from(theme::text_weak())),
+        width: 1.5,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    }
+}
+
+fn temp_edge_stroke() -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(Color::from(theme::accent())),
+        width: 2.0,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    }
+}
+
+fn card_stroke_normal() -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(Color::from(theme::card_stroke())),
+        width: 1.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        ..Default::default()
+    }
+}
+
+fn card_stroke_selected() -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(Color::from(theme::accent())),
+        width: 2.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        ..Default::default()
+    }
+}
+
+fn port_stroke(color: Color) -> Stroke<'static> {
+    Stroke {
+        style: stroke::Style::Solid(color),
+        width: 1.5,
+        line_cap: LineCap::Round,
+        ..Default::default()
+    }
+}
+
+/// 渲染 DAG 画布。
 ///
-/// 注意 epaint 0.26 的 Galley 坐标系与 halign 绑定：
-///   - LEFT:  galley.rect.left()   == 0  (原点 = 文字块左上)
-///   - Center: galley.rect.center().x == 0  (原点 = 文字块中上)
-///   - RIGHT: galley.rect.right()  == 0  (原点 = 文字块右上)
-/// 所以 halign=Center 时，绘制起点的 x 必须是目标中心的 x，而不是左边界。
-fn fit_text_in_rect(
-    painter: &Painter,
-    text: &str,
-    rect: Rect,
-    padding: f32,
-    base_font_size: f32,
-    min_font_size: f32,
-    color: Color32,
-) -> (Arc<egui::Galley>, Pos2) {
-    let inner_rect = rect.shrink(padding);
-    let max_width = inner_rect.width().max(1.0);
-    let max_height = inner_rect.height().max(1.0);
-    let text_owned = text.to_string();
-    let text_len = text_owned.len();
-
-    // 从基准字号开始尝试，若超过高度则逐级缩小，直到不超高或达到最小字号
-    let mut font_size = base_font_size;
-    let step = 1.0;
-    loop {
-        let font_id = egui::FontId::new(font_size, FontFamily::Proportional);
-        let job = LayoutJob {
-            text: text_owned.clone(),
-            sections: vec![LayoutSection {
-                leading_space: 0.0,
-                byte_range: 0..text_len,
-                format: TextFormat {
-                    font_id: font_id.clone(),
-                    color,
-                    ..Default::default()
-                },
-            }],
-            wrap: TextWrapping {
-                max_width,
-                ..Default::default()
-            },
-            halign: Align::Center,
-            ..Default::default()
-        };
-        let galley = painter.ctx().fonts(|fonts| fonts.layout_job(job));
-        if galley.size().y <= max_height || font_size <= min_font_size {
-            // 垂直居中：起点 y = inner_rect.top + (max_height - galley_height) / 2
-            // 水平居中：因为 halign=Center 时 galley.rect.center().x == 0，
-            //           起点 x 必须设为内边距矩形的中心 x。
-            let offset_y = (max_height - galley.size().y) * 0.5;
-            let pos = Pos2::new(inner_rect.center().x, inner_rect.top() + offset_y);
-            return (galley, pos);
-        }
-        font_size = (font_size - step).max(min_font_size);
-    }
-}
-
-// 输入端口 (节点左侧) 与输出端口 (节点右侧) 使用不同颜色, 便于区分方向.
-const INPUT_PORT_COLOR: Color32 = Color32::from_rgb(90, 160, 255);   // 蓝色
-const OUTPUT_PORT_COLOR: Color32 = Color32::from_rgb(90, 220, 130);  // 绿色
-
-pub fn render_dag_canvas(ui: &mut Ui, tab: &mut DagTab) {
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
-    // 记录画布屏幕矩形, 供算子面板计算点击添加位置 (下一帧生效)
-    tab.canvas_viewport_rect = Some(rect);
-
-    // 画布拖动前预扫描节点 hit-test: 判断 pointer 是否落在任意节点 rect 上。
-    // 必要性: 画布拖动在下方第 ~95 行执行, 早于节点 interact(第 ~478 行); 节点拖动
-    // 第一帧 dragging_node_id 尚为 None, 若仅靠该标志判断, 画布会误跟随移动, 导致
-    // 节点首帧位移 = drag_delta + drag_delta*zoom(zoom=1 时跳 2 倍), 后续帧才正常,
-    // 视觉上即"节点不跟鼠标"。预扫描用与渲染时一致的 screen_rect 公式做 hit-test。
-    let pointer_on_node = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| {
-        tab.graph.nodes.iter().any(|n| {
-            let nr = Rect::from_center_size(
-                n.position.to_pos2(),
-                Vec2::new(NODE_WIDTH, NODE_HEIGHT),
-            );
-            let sr = Rect::from_min_max(
-                rect.min + (nr.min.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
-                rect.min + (nr.max.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
-            );
-            sr.contains(p)
-        })
-    });
-
-    if response.dragged()
-        && tab.dragging_node_id.is_none()
-        && tab.dragging_operator.is_none()
-        && !pointer_on_node
-    {
-        tab.canvas_offset += response.drag_delta();
-        // 拖动画布平移时, 把鼠标切换为抓取手型(Grabbing), 直观提示正在拖拽画布.
-        // 注: Windows 系统光标只有 IDC_HAND(食指指向小手), 无原生五指抓取手,
-        // egui 0.26 经 winit 映射 Grabbing → IDC_HAND, 这是系统限制下最贴近"抓取"语义的光标.
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if response.hovered()
-        && !ui.input(|i| i.pointer.primary_down())
-        && tab.dragging_node_id.is_none()
-        && tab.dragging_operator.is_none()
-    {
-        // 悬停于画布空白处(未按下、未拖节点/算子)时显示手型(Grab), 提示可拖拽平移画布.
-        // 节点/端口等子区域在后续 interact 中会覆盖此光标, 不会受影响.
-        // 注意: 用 ctx.set_cursor_icon 而非 response.on_hover_cursor, 后者会消费
-        // response 所有权, 导致后续 response.hovered() 等调用编译失败.
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    }
-
-    // 鼠标滚轮缩放: 鼠标悬停在画布上时, 以鼠标位置为锚点缩放.
-    // 滚轮向上 (delta.y > 0) → 放大, 向下 (delta.y < 0) → 缩小;
-    // 以鼠标位置为锚点 (而非画布中心) 更符合直觉, 鼠标指向的节点保持在原位.
-    let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-    if scroll_delta != 0.0 && response.hovered() {
-        if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-            // |delta| 一般在 1..50 之间, 取较温和的 ±10% 步长,
-            // 用 1 + 0.01 * delta 让小幅滑动也能连续缩放.
-            let factor = 1.0 + 0.01 * scroll_delta;
-            zoom_canvas_at_point(tab, factor, pointer);
-        }
-    }
-
-    // 用裁剪到画布矩形的 painter 绘制画布内容。算子列表 / 运行日志 / 算子参数等
-    // 面板先于 CentralPanel 声明，画布内容后绘制；若不裁剪，平移画布时移出边界的
-    // 节点与连线会越过画布边界绘制到相邻面板之上（即「算子和线跑到面板上层」）。
-    // 裁剪后，所有画布绘制（底色 / 网格 / 节点 / 连线 / 拖拽预览）都被限制在画布内。
-    let painter = ui.painter().with_clip_rect(rect);
-
-    // 画布底色与其余功能面板（建模列表 / 算子列表 / 运行日志 / 算子运行参数）统一为
-    // SIDEBAR_BG，避免各区域深浅不一造成视觉割裂；网格线（CANVAS_GRID）仍比底色亮，
-    // 可清晰辨识。
-    painter.rect_filled(
-        rect,
-        0.0,
-        super::theme::SIDEBAR_BG,
-    );
-
-    let grid_size = 20.0;
-    let grid_color = super::theme::CANVAS_GRID;
-    let grid_stroke = Stroke::new(1.0, grid_color);
-
-    // 网格线合并为 2 条折线（所有竖线一条、所有横线一条），用 NAN 断点分隔
-    // 各线段。把原本 ~70 个独立 Shape::line_segment 压成 2 个 Shape::line，
-    // epaint tessellator 只需处理 2 个 path、生成 2 个连续 vertex buffer，
-    // 显著减少 draw call 与每帧 tessellate 工作量（拖动/平移画布时 GPU 占用
-    // 明显下降）。epaint 的 path_to_compound_polygons 原生按 NAN 切分 sub-path。
-    let nan = Pos2::new(f32::NAN, f32::NAN);
-    let step = grid_size as i32;
-
-    let mut vpoints: Vec<Pos2> = Vec::new();
-    let mut x = rect.left().floor() as i32;
-    while x <= rect.right().ceil() as i32 {
-        vpoints.push(Pos2::new(x as f32, rect.top()));
-        vpoints.push(Pos2::new(x as f32, rect.bottom()));
-        vpoints.push(nan);
-        x += step;
-    }
-    painter.add(Shape::line(vpoints, grid_stroke));
-
-    let mut hpoints: Vec<Pos2> = Vec::new();
-    let mut y = rect.top().floor() as i32;
-    while y <= rect.bottom().ceil() as i32 {
-        hpoints.push(Pos2::new(rect.left(), y as f32));
-        hpoints.push(Pos2::new(rect.right(), y as f32));
-        hpoints.push(nan);
-        y += step;
-    }
-    painter.add(Shape::line(hpoints, grid_stroke));
-
-    let mut node_interactions = Vec::new();
-    // 用于 Executing 状态的脉冲动画（节点边框/徽标随时间正弦变化）
-    let time = ui.input(|i| i.time) as f32;
-
-    // 先画连线、后画节点：节点盖住穿过其主体的线段，避免连线浮在节点
-    // 之上遮挡文字/端口。曲线两端的控制点已做水平外伸处理，连接点
-    // （端口圆点）仍在节点边缘外侧可见，不会被节点矩形覆盖。
-    for edge in &tab.graph.edges {
-        render_edge(&painter, edge, &tab.graph, rect.min, tab.canvas_zoom, tab.canvas_offset);
-    }
-
-    for node in &tab.graph.nodes {
-        let node_rect = Rect::from_center_size(
-            node.position.to_pos2(),
-            Vec2::new(NODE_WIDTH, NODE_HEIGHT),
-        );
-
-        let screen_rect = Rect::from_min_max(
-            rect.min + (node_rect.min.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
-            rect.min + (node_rect.max.to_vec2() + tab.canvas_offset) * tab.canvas_zoom,
-        );
-
-        let is_selected = tab.selected_node_id.as_deref() == Some(&node.id)
-            || tab.selected_node_ids.iter().any(|id| id == &node.id);
-        let border_color = if is_selected {
-            Color32::YELLOW
-        } else {
-            Color32::from_rgba_unmultiplied(58, 58, 62, 255)
-        };
-        let status = tab.io_registry.get_status(&node.id);
-
-        let stroke_w = 2.0 * tab.canvas_zoom;
-        let radius = 8.0 * tab.canvas_zoom;
-
-        painter.rect_filled(
-            screen_rect,
-            radius,
-            border_color,
-        );
-
-        let inner_radius = (radius - stroke_w).max(0.0);
-        painter.rect_filled(
-            screen_rect.shrink(stroke_w),
-            inner_radius,
-            node.operator_type.color(),
-        );
-
-        // 算子名字：先按屏幕缩放调整基准字号，再在节点矩形内自动换行+缩字号，
-        // 保证长名称也不会超出节点边框。默认字号约 14px，随画布整体缩放调整。
-        let text_padding = 6.0 * tab.canvas_zoom;
-        let base_fs = (14.0 * tab.canvas_zoom).max(6.0);
-        let min_fs = (8.0 * tab.canvas_zoom).max(5.0);
-        let (galley, gpos) = fit_text_in_rect(
-            &painter,
-            node.operator_type.name(),
-            screen_rect,
-            text_padding,
-            base_fs,
-            min_fs,
-            Color32::WHITE,
-        );
-        painter.galley(gpos, galley, Color32::WHITE);
-
-        // Executing 状态：节点边框脉冲高亮（黄色，线宽随时间正弦变化），
-        // 让用户实时看到当前正在运行哪个算子。
-        if status == OperatorExecutionStatus::Executing {
-            let pulse = (time * 2.5).sin() * 0.5 + 0.5; // 0..1，周期约 2.5s
-            let exec_stroke = Stroke::new(
-                (2.5 + 1.5 * pulse) * tab.canvas_zoom,
-                Color32::from_rgb(241, 196, 15), // 黄色
-            );
-            painter.rect_stroke(screen_rect, radius, exec_stroke);
-        }
-
-        // 执行状态角标：成功=绿色勾，失败=红色叉，执行中=黄色脉冲圆点。
-        // 徽标压在节点右上角外侧（类似通知角标），避开右侧输出端口。
-        enum BadgeKind { Success, Fail, Executing }
-        let badge = match status {
-            OperatorExecutionStatus::Completed => Some((Color32::from_rgb(46, 204, 113), BadgeKind::Success)),
-            OperatorExecutionStatus::Failed => Some((Color32::from_rgb(231, 76, 60), BadgeKind::Fail)),
-            OperatorExecutionStatus::Executing => Some((Color32::from_rgb(241, 196, 15), BadgeKind::Executing)),
-            _ => None,
-        };
-        if let Some((badge_color, kind)) = badge {
-            let badge_r = 8.0 * tab.canvas_zoom;
-            let badge_center = screen_rect.right_top()
-                + Vec2::new(badge_r * 0.25, -badge_r * 0.25);
-            match kind {
-                BadgeKind::Success | BadgeKind::Fail => {
-                    painter.circle_filled(badge_center, badge_r, badge_color);
-                    painter.circle_stroke(
-                        badge_center,
-                        badge_r,
-                        Stroke::new(1.2 * tab.canvas_zoom, Color32::WHITE),
-                    );
-                    let glyph_stroke = Stroke::new(2.0 * tab.canvas_zoom, Color32::WHITE);
-                    if matches!(kind, BadgeKind::Success) {
-                        // 勾: 左 → 底 → 右上
-                        let p1 = badge_center + Vec2::new(-0.38, 0.0) * badge_r;
-                        let p2 = badge_center + Vec2::new(-0.02, 0.32) * badge_r;
-                        let p3 = badge_center + Vec2::new(0.45, -0.35) * badge_r;
-                        painter.line_segment([p1, p2], glyph_stroke);
-                        painter.line_segment([p2, p3], glyph_stroke);
-                    } else {
-                        // 叉
-                        let h = 0.4 * badge_r;
-                        painter.line_segment(
-                            [badge_center + Vec2::new(-h, -h), badge_center + Vec2::new(h, h)],
-                            glyph_stroke,
-                        );
-                        painter.line_segment(
-                            [badge_center + Vec2::new(-h, h), badge_center + Vec2::new(h, -h)],
-                            glyph_stroke,
-                        );
-                    }
-                }
-                BadgeKind::Executing => {
-                    // 脉冲外环 + 中心实心圆，配合节点边框脉冲动画
-                    let pulse = (time * 3.0).sin() * 0.5 + 0.5;
-                    let ring_r = badge_r * (1.0 + 0.25 * pulse);
-                    painter.circle_stroke(
-                        badge_center,
-                        ring_r,
-                        Stroke::new(1.8 * tab.canvas_zoom, badge_color),
-                    );
-                    painter.circle_filled(badge_center, badge_r * 0.55, badge_color);
-                }
-            }
-        }
-
-        let input_count = node.operator_type.input_count();
-        let output_count = node.operator_type.output_count();
-
-        for i in 0..input_count {
-            let port_pos = get_port_position(node, i, false);
-            let screen_port_pos = rect.min + (port_pos.to_vec2() + tab.canvas_offset) * tab.canvas_zoom;
-
-            let port_color = if tab.connecting_from.is_some() {
-                Color32::YELLOW
-            } else {
-                INPUT_PORT_COLOR
-            };
-
-            // 连线进行中且源是输出端口时，给「可连入」的空输入端口加绿色环，引导扇出
-            // 与连线的合法落点（已被占用或同节点自环的输入端口不加，提示用户避开）。
-            if let Some((src_node, _, src_is_output)) = &tab.connecting_from {
-                if *src_is_output && src_node != &node.id {
-                    let occupied = tab.graph.edges.iter().any(|e|
-                        e.target_node_id == node.id && e.target_port == i
-                    );
-                    if !occupied {
-                        painter.circle_stroke(
-                            screen_port_pos,
-                            (PORT_RADIUS + 3.0) * tab.canvas_zoom,
-                            Stroke::new(1.5 * tab.canvas_zoom, Color32::from_rgb(120, 230, 140)),
-                        );
-                    }
-                }
-            }
-
-            painter.circle_filled(screen_port_pos, PORT_RADIUS * tab.canvas_zoom, port_color);
-
-            let port_rect = Rect::from_center_size(screen_port_pos, Vec2::new(PORT_RADIUS * 2.0 * tab.canvas_zoom, PORT_RADIUS * 2.0 * tab.canvas_zoom));
-            node_interactions.push(NodeInteraction::InputPort {
-                node_id: node.id.clone(),
-                port_index: i,
-                rect: port_rect,
-            });
-        }
-
-        for i in 0..output_count {
-            let port_pos = get_port_position(node, i, true);
-            let screen_port_pos = rect.min + (port_pos.to_vec2() + tab.canvas_offset) * tab.canvas_zoom;
-
-            let port_color = if tab.connecting_from.is_some() {
-                Color32::YELLOW
-            } else {
-                OUTPUT_PORT_COLOR
-            };
-
-            // 扇出提示: 该输出端口已有 outgoing 连线时，在外圈描一道亮环，提示同一
-            // 输出端口可继续点击连到更多目标节点的输入端口（一个输出 → 多个输入）。
-            let has_outgoing = tab.graph.edges.iter().any(|e|
-                e.source_node_id == node.id && e.source_port == i
-            );
-            if has_outgoing {
-                painter.circle_stroke(
-                    screen_port_pos,
-                    (PORT_RADIUS + 3.0) * tab.canvas_zoom,
-                    Stroke::new(1.5 * tab.canvas_zoom, Color32::from_rgba_unmultiplied(255, 255, 255, 210)),
-                );
-            }
-
-            painter.circle_filled(screen_port_pos, PORT_RADIUS * tab.canvas_zoom, port_color);
-
-            let port_rect = Rect::from_center_size(screen_port_pos, Vec2::new(PORT_RADIUS * 2.0 * tab.canvas_zoom, PORT_RADIUS * 2.0 * tab.canvas_zoom));
-            node_interactions.push(NodeInteraction::OutputPort {
-                node_id: node.id.clone(),
-                port_index: i,
-                rect: port_rect,
-            });
-        }
-
-        node_interactions.push(NodeInteraction::Node {
-            node_id: node.id.clone(),
-            rect: screen_rect,
-            canvas_zoom: tab.canvas_zoom,
-        });
-    }
-
-    if let Some((source_node_id, source_port, is_output)) = &tab.connecting_from {
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(Pos2::ZERO));
-
-        let source_pos = if let Some(node) = tab.graph.get_node(source_node_id) {
-            get_port_position(node, *source_port, *is_output)
-        } else {
-            // 源节点已被删除时, 把预览起点钉在鼠标处, 避免画到 (0,0)
-            ((pointer_pos - rect.min) / tab.canvas_zoom - tab.canvas_offset).to_pos2()
-        };
-
-        let screen_source_pos = rect.min + (source_pos.to_vec2() + tab.canvas_offset) * tab.canvas_zoom;
-        painter.line_segment(
-            [screen_source_pos, pointer_pos],
-            Stroke::new(2.0, Color32::YELLOW),
-        );
-    }
-
-    // ===== 从算子面板拖拽到画布的处理 =====
-    // 拖拽由算子面板在按钮 dragged() 时写入 dragging_operator; 画布负责检测释放并创建节点.
-    // 释放事件用全局 primary_released() 判定, 因为拖拽起点在算子按钮上, 画布自身的
-    // drag_released() 不会触发.
-    if tab.dragging_operator.is_some() {
-        let primary_down = ui.input(|i| i.pointer.primary_down());
-        let primary_released = ui.input(|i| i.pointer.primary_released());
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(Pos2::ZERO));
-        let hovered = rect.contains(pointer_pos);
-
-        if primary_released {
-            if hovered {
-                // 在画布上释放: 在鼠标位置创建节点
-                let node_pos = (pointer_pos - rect.min) / tab.canvas_zoom - tab.canvas_offset;
-                if let Some(op) = tab.dragging_operator.take() {
-                    let new_node = crate::dag::Node::new(op, node_pos);
-                    tab.graph.add_node(new_node);
-                    tab.dirty = true;
-                    tab.error_message = None;
-                }
-            } else {
-                // 在画布外释放: 取消拖拽
-                tab.dragging_operator = None;
-            }
-        } else if !primary_down {
-            // 状态失效 (例如丢失释放事件): 清理, 避免悬空拖拽
-            tab.dragging_operator = None;
-        } else if let Some(op) = tab.dragging_operator.as_ref() {
-            // 拖拽进行中: 在鼠标处绘制半透明节点预览
-            if hovered {
-                let preview_size = Vec2::new(NODE_WIDTH, NODE_HEIGHT) * tab.canvas_zoom;
-                let preview_rect = Rect::from_center_size(pointer_pos, preview_size);
-                let c = op.color();
-                let preview_stroke_w = 2.0;
-                let preview_radius = 8.0 * tab.canvas_zoom;
-
-                painter.rect_filled(
-                    preview_rect,
-                    preview_radius,
-                    Color32::YELLOW,
-                );
-
-                let preview_inner_radius = (preview_radius - preview_stroke_w).max(0.0);
-                painter.rect_filled(
-                    preview_rect.shrink(preview_stroke_w),
-                    preview_inner_radius,
-                    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 90),
-                );
-                // 拖拽预览算子名：与正式节点使用相同的自动换行+缩放逻辑
-                let preview_text_padding = 6.0 * tab.canvas_zoom;
-                let preview_base_fs = (14.0 * tab.canvas_zoom).max(6.0);
-                let preview_min_fs = (8.0 * tab.canvas_zoom).max(5.0);
-                let (preview_galley, preview_gpos) = fit_text_in_rect(
-                    &painter,
-                    op.name(),
-                    preview_rect,
-                    preview_text_padding,
-                    preview_base_fs,
-                    preview_min_fs,
-                    Color32::WHITE,
-                );
-                painter.galley(preview_gpos, preview_galley, Color32::WHITE);
-            } else {
-                // 不在画布上时, 在鼠标旁绘制小标签提示当前拖拽的算子
-                let label_text = format!("拖拽: {}", op.name());
-                let galley = painter.layout_no_wrap(
-                    label_text,
-                    egui::FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
-                let label_rect = Rect::from_min_size(
-                    pointer_pos + Vec2::new(12.0, 12.0),
-                    galley.size() + Vec2::new(8.0, 4.0),
-                );
-                painter.rect_filled(
-                    label_rect,
-                    4.0,
-                    Color32::from_rgba_unmultiplied(28, 28, 30, 235),
-                );
-                painter.galley(
-                    label_rect.min + Vec2::new(4.0, 2.0),
-                    galley,
-                    Color32::WHITE,
-                );
-            }
-        }
-    }
-
-    // 注意: interact 顺序决定 hit-test 优先级, 后 interact 的区域优先接收事件.
-    // 端口 rect 位于节点 rect 内部, 必须让端口优先级高于节点; 且已连线的端口位置会
-    // 落在连线 hit-rect 内, 若连线优先级高于端口, 已连线的输出端口将无法再次点击
-    // (无法扇出「一个输出 → 多个输入」). 因此顺序定为: 节点 → 连线 → 端口,
-    // 端口最后 interact, 优先级最高.
-
-    // 第一轮: 节点 (拖拽 / 选中 / 右键菜单) — 最低优先级
-    for interaction in &node_interactions {
-        if let NodeInteraction::Node { node_id, rect, canvas_zoom } = interaction {
-            let response = ui.interact(*rect, egui::Id::new(format!("node_{}", node_id)), egui::Sense::click_and_drag());
-            // 悬停算子节点时显示食指小手, 提示可点击选中/双击编辑/拖拽移动
-            // (后续 response.double_clicked()/clicked()/dragged() 等仍借用 response,
-            //  故用 ctx.set_cursor_icon 而非消费所有权的 on_hover_cursor)
-            if response.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            // 双击才弹出参数面板，单击仅选中、拖动仅移动节点，三者解耦避免操作冲突。
-            // 双击的第一次 click 会先走 clicked 分支隐藏面板，第二次 click 那帧
-            // double_clicked 命中再显示，最终参数面板正常弹出。
-            if response.double_clicked() {
-                tab.selected_node_id = Some(node_id.clone());
-                tab.hide_params_panel = false;
-                tab.error_message = None;
-            } else if response.clicked() {
-                // Ctrl+Click 切换多选；普通 Click 回到单选并清空多选集合
-                if ui.input(|i| i.modifiers.ctrl) {
-                    toggle_multi_select(tab, node_id);
-                    tab.error_message = None;
-                } else {
-                    tab.selected_node_ids.clear();
-                    tab.selected_node_id = Some(node_id.clone());
-                    tab.hide_params_panel = true;
-                    tab.error_message = None;
-                }
-            }
-            if response.dragged() {
-                tab.dragging_node_id = Some(node_id.clone());
-                update_node_position(tab, &node_id, response.drag_delta() / *canvas_zoom);
-                tab.dirty = true;
-                // 拖动节点期间显示抓取手型(Grabbing), 与画布平移拖动光标一致;
-                // 覆盖悬停时的 PointingHand, 且即便指针移出节点原 rect 仍持续显示
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            }
-            // 仅在拖拽真正结束时释放, 避免其他节点的循环把 dragging_node_id 错误清空
-            // (那会导致画布在拖节点时也跟随移动)
-            if response.drag_released() {
-                if tab.dragging_node_id.as_deref() == Some(node_id) {
-                    tab.dragging_node_id = None;
-                }
-            }
-            response.context_menu(|ui| {
-                // 菜单项悬停显示食指小手: 显式设置 interact_cursor, 防止 popup
-                // visuals 未继承全局值导致 Button 光标失效
-                ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
-                if ui.button("运行到此结点").clicked() {
-                    ui.close_menu();
-                    // 跨借用：闭包内无法持有 &mut DagEditorState，写入 pending 标志，
-                    // 由 render_mining_analysis_view 外层统一检查运行中状态并 spawn。
-                    tab.pending_run_up_to = Some(node_id.clone());
-                }
-                ui.separator();
-                if ui.button("数据预览").clicked() {
-                    ui.close_menu();
-                    tab.preview_node_id = Some(node_id.clone());
-                }
-                // 预览类按钮 + 动态端口按钮：一次性取出节点信息按需显示，
-                // 避免对不兼容算子显示预览按钮（如对 ollama 节点点聊天预览会导致 DSL 解析报错）。
-                if let Some(node) = tab.graph.get_node(node_id) {
-                    let op_name = node.operator_type.name();
-                    // K线图预览：仅对 K线可视化类算子显示
-                    if op_name.contains("K线") || op_name.contains("kline") {
-                        if ui.button("K线图预览").clicked() {
-                            ui.close_menu();
-                            tab.kline_preview_node_id = Some(node_id.clone());
-                        }
-                    }
-                    // 折线图预览：仅对 折线/表达式 等数值输出类算子显示（宽松匹配）。
-                    if op_name.contains("折线") || op_name.contains("line")
-                        || op_name.contains("表达式") || op_name.contains("expression") {
-                        if ui.button("折线图预览").clicked() {
-                            ui.close_menu();
-                            tab.line_chart_preview_node_id = Some(node_id.clone());
-                        }
-                    }
-                    // 聊天预览：仅对「DSL流式对话展示」算子显示。
-                    // 对 ollama 等原始 token 输出算子点此按钮会把纯文本当作 DSL 解析
-                    // （例如模型返回 "Thinking Process:" 会在行 1 列 17 遇到 ':' 报非法字符）。
-                    if op_name.contains("DSL流式对话展示")
-                        || op_name.contains("chat_visualization")
-                        || node.operator_type.as_custom().summary.contains("chat DSL") {
-                        if ui.button("聊天预览").clicked() {
-                            ui.close_menu();
-                            tab.chat_preview_node_id = Some(node_id.clone());
-                        }
-                    }
-                    // 直方图预览：仅对「直方图展示」算子显示。
-                    if op_name.contains("直方图展示")
-                        || op_name.contains("histogram_visualization")
-                        || node.operator_type.as_custom().summary.contains("直方图预览") {
-                        if ui.button("直方图预览").clicked() {
-                            ui.close_menu();
-                            tab.histogram_preview_node_id = Some(node_id.clone());
-                        }
-                    }
-                    ui.separator();
-
-                    // dynamic_input_ports=true 的节点：提供"新增输入端口"
-                    if node.operator_type.dynamic_input_ports() {
-                        if ui.button("➕ 新增输入端口").clicked() {
-                            ui.close_menu();
-                            if let Some(node_mut) = tab.graph.get_node_mut(node_id) {
-                                match node_mut.add_input_port() {
-                                    Ok(_new_idx) => {
-                                        tab.io_registry.invalidate_downstream(node_id, &tab.graph);
-                                        tab.dirty = true;
-                                        tab.error_message = None;
-                                    }
-                                    Err(e) => tab.error_message = Some(e),
-                                }
-                            }
-                        }
-                        ui.separator();
-                    }
-                }
-
-                if ui.button("删除结点").clicked() {
-                    ui.close_menu();
-                    // 删除结点时，级联失效所有下游节点
-                    tab.io_registry.invalidate_downstream(node_id, &tab.graph);
-                    tab.graph.remove_node(node_id);
-                    // 移除注册表中该节点的记录
-                    tab.io_registry.remove_node(node_id);
-                    if tab.selected_node_id.as_deref() == Some(node_id) {
-                        tab.selected_node_id = None;
-                    }
-                    tab.dirty = true;
-                }
-            });
-        }
-    }
-
-    // 第二轮: 连线右键删除 — 仅当鼠标靠近贝塞尔曲线时才响应,
-    // 不会出现大包围盒遮挡节点的问题.
-    if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
-        for edge in tab.graph.edges.clone() {
-            if edge_hit_test(&tab.graph, edge.id.clone(), mouse_pos, rect.min, tab.canvas_zoom, tab.canvas_offset) {
-                let hit_rect = Rect::from_center_size(mouse_pos, Vec2::new(16.0, 16.0));
-                let response = ui.interact(hit_rect, egui::Id::new(format!("edge_{}", edge.id)), egui::Sense::click());
-                response.context_menu(|ui| {
-                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
-                    if ui.button("删除连线").clicked() {
-                        ui.close_menu();
-                        tab.io_registry.invalidate_downstream(&edge.target_node_id, &tab.graph);
-                        tab.graph.remove_edge(&edge.id);
-                        tab.dirty = true;
-                    }
-                });
-            }
-        }
-    }
-
-    // 第三轮: 端口 (最后 interact, 优先级最高)。已连线的端口位置会落在连线 hit-rect
-    // 内, 必须让端口优先级高于连线, 否则已连线的输出端口无法再次点击扇出
-    // (一个输出 → 多个目标节点输入)。同时端口优先级高于节点, 确保端口可点击。
-    for interaction in &node_interactions {
-        match interaction {
-            NodeInteraction::InputPort { node_id, port_index, rect } => {
-                let id = egui::Id::new(format!("input_port_{}_{}", node_id, port_index));
-                // 使用 click_and_drag 的 Sense 不会影响点击连线，click 语义保留；
-                // 加 drag 仅为了让 context_menu 响应右键（egui 的右键 = drag with secondary）。
-                let response = ui.interact(*rect, id, egui::Sense::click_and_drag());
-                if response.clicked() {
-                    handle_port_click(tab, node_id, *port_index, false);
-                }
-                response.context_menu(|ui| {
-                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
-                    ui.label(format!("输入端口 #{}", port_index));
-                    if let Some(node) = tab.graph.get_node(node_id) {
-                        // 显示该输入端口的名字（如 input_0）便于识别
-                        if let Some(def) = node.operator_type.input_defs().get(*port_index) {
-                            ui.label(format!("端口名: {}", def.name));
-                        }
-                        if node.operator_type.dynamic_input_ports() {
-                            ui.separator();
-                            // 剩余输入端口数 > 1 才允许删除（至少保留 1 个）
-                            let can_remove = node.operator_type.input_count() > 1;
-                            let remove_btn = ui.add_enabled(
-                                can_remove,
-                                egui::Button::new("🗑 删除该输入端口"),
-                            );
-                            if remove_btn.clicked() {
-                                ui.close_menu();
-                                // 先从节点定义中删除；再同步 graph 中连线 target_port 的重排
-                                let target_id = node_id.clone();
-                                let removed_idx = *port_index;
-                                if let Some(node_mut) = tab.graph.get_node_mut(&target_id) {
-                                    match node_mut.remove_input_port(removed_idx) {
-                                        Ok(_removed_name) => {
-                                            // 1. 移除落在已删除端口上的连线
-                                            tab.graph.remove_edges_on_input_port(&target_id, removed_idx);
-                                            // 2. 原下标 > removed_idx 的目标端口整体前移 1
-                                            tab.graph.shift_target_ports_after_remove(&target_id, removed_idx);
-                                            // 3. 级联失效该节点及其下游
-                                            tab.io_registry.invalidate_downstream(&target_id, &tab.graph);
-                                            tab.dirty = true;
-                                            tab.error_message = None;
-                                        }
-                                        Err(e) => {
-                                            tab.error_message = Some(e);
-                                        }
-                                    }
-                                }
-                            }
-                            if !can_remove {
-                                ui.label("（仅剩 1 个输入端口，无法再删除）");
-                            }
-                        }
-                    }
-                });
-            }
-            NodeInteraction::OutputPort { node_id, port_index, rect } => {
-                let response = ui.interact(*rect, egui::Id::new(format!("output_port_{}_{}", node_id, port_index)), egui::Sense::click_and_drag());
-                if response.clicked() {
-                    handle_port_click(tab, node_id, *port_index, true);
-                }
-                response.context_menu(|ui| {
-                    ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
-                    ui.label(format!("输出端口 #{}", port_index));
-                });
-            }
-            NodeInteraction::Node { .. } => {}
-        }
-    }
-
-    // ===== 方向键移动选中节点 =====
-    // 选中节点后, 上/下/左/右方向键可移动节点:
-    //   - 单击方向键 → 立即移动一步 (ARROW_STEP 画布单位)
-    //   - 长按方向键 → 停顿 ARROW_INITIAL_DELAY 后, 以 ARROW_REPEAT_INTERVAL 间隔连续移动
-    // 仅在没有文本输入框聚焦时响应, 避免与参数面板 / 搜索框的文本编辑冲突。
-    const ARROW_STEP: f32 = 10.0;
-    const ARROW_INITIAL_DELAY: f64 = 0.3;
-    const ARROW_REPEAT_INTERVAL: f64 = 0.05;
-
-    let arrow_ok = tab.selected_node_id.is_some() && !ui.ctx().wants_keyboard_input();
-    if arrow_ok {
-        let (now, up_p, up_d, down_p, down_d, left_p, left_d, right_p, right_d) = ui.input(|i| (
-            i.time,
-            i.key_pressed(egui::Key::ArrowUp),    i.key_down(egui::Key::ArrowUp),
-            i.key_pressed(egui::Key::ArrowDown),  i.key_down(egui::Key::ArrowDown),
-            i.key_pressed(egui::Key::ArrowLeft),  i.key_down(egui::Key::ArrowLeft),
-            i.key_pressed(egui::Key::ArrowRight), i.key_down(egui::Key::ArrowRight),
-        ));
-
-        let mut delta = Vec2::ZERO;
-        let mut any_pressed = false;
-        let mut any_down = false;
-
-        // 首次按下: 立即移动一步
-        if up_p { delta.y -= ARROW_STEP; any_pressed = true; }
-        if down_p { delta.y += ARROW_STEP; any_pressed = true; }
-        if left_p { delta.x -= ARROW_STEP; any_pressed = true; }
-        if right_p { delta.x += ARROW_STEP; any_pressed = true; }
-        if up_d || down_d || left_d || right_d { any_down = true; }
-
-        if any_pressed {
-            tab.arrow_move_timer = Some((now, now));
-        } else if any_down {
-            // 长按节流: 超过初始延迟后, 以固定间隔连续移动当前所有按下的方向键
-            if let Some((start, last)) = tab.arrow_move_timer {
-                if now - start > ARROW_INITIAL_DELAY && now - last > ARROW_REPEAT_INTERVAL {
-                    if up_d { delta.y -= ARROW_STEP; }
-                    if down_d { delta.y += ARROW_STEP; }
-                    if left_d { delta.x -= ARROW_STEP; }
-                    if right_d { delta.x += ARROW_STEP; }
-                    tab.arrow_move_timer = Some((start, now));
-                }
-            } else {
-                // 焦点恢复时键已处于按下状态 (如切 tab 回来): 初始化计时器, 不立即移动
-                tab.arrow_move_timer = Some((now, now));
-            }
-        } else {
-            tab.arrow_move_timer = None;
-        }
-
-        if delta != Vec2::ZERO {
-            if let Some(node_id) = tab.selected_node_id.clone() {
-                if let Some(node) = tab.graph.get_node_mut(&node_id) {
-                    node.position += delta;
-                    tab.dirty = true;
-                }
-            }
-        }
-    } else {
-        tab.arrow_move_timer = None;
-    }
-
-    if let Some(msg) = &tab.error_message {
-        let is_error = msg.contains("失败") || msg.contains("错误");
-        let color = if is_error { Color32::RED } else { Color32::GREEN };
-        ui.colored_label(color, msg);
-    }
-}
-
-enum NodeInteraction {
-    InputPort { node_id: String, port_index: usize, rect: Rect },
-    OutputPort { node_id: String, port_index: usize, rect: Rect },
-    Node { node_id: String, rect: Rect, canvas_zoom: f32 },
-}
-
-pub fn handle_port_click(tab: &mut DagTab, node_id: &str, port_index: usize, is_output: bool) {
-    if let Some((source_node_id, source_port, source_is_output)) = tab.connecting_from.take() {
-        // 不允许连接到同一个节点 (自环)
-        if source_node_id == node_id {
-            tab.error_message = Some("不能连接到同一节点".to_string());
-            return;
-        }
-
-        // 必须是 一输出 → 一输入; 根据源端口类型和当前端口类型决定边的方向
-        // 之前用 `_` 忽略了源端口的 is_output, 导致两次同类型端口点击时
-        // 把输出端口索引当作输入端口索引使用, 创建出指向不存在端口的连线.
-        let edge = match (source_is_output, is_output) {
-            (true, false) => Some(Edge::new(
-                source_node_id,
-                source_port,
-                node_id.to_string(),
-                port_index,
-            )),
-            (false, true) => Some(Edge::new(
-                node_id.to_string(),
-                port_index,
-                source_node_id,
-                source_port,
-            )),
-            (true, true) => {
-                tab.error_message = Some("无法连接两个输出端口, 请点击一个输入端口".to_string());
-                None
-            }
-            (false, false) => {
-                tab.error_message = Some("无法连接两个输入端口, 请点击一个输出端口".to_string());
-                None
-            }
-        };
-
-        if let Some(edge) = edge {
-            let target_node_id = edge.target_node_id.clone();
-            match tab.graph.add_edge(edge) {
-                Ok(()) => {
-                    // 添加连线时，级联失效目标节点及其所有下游节点
-                    tab.io_registry.invalidate_downstream(&target_node_id, &tab.graph);
-                    tab.error_message = None;
-                    tab.dirty = true;
-                }
-                Err(e) => tab.error_message = Some(e),
-            }
-        }
-    } else {
-        tab.connecting_from = Some((node_id.to_string(), port_index, is_output));
-    }
-}
-
-pub fn update_node_position(tab: &mut DagTab, node_id: &str, delta: Vec2) {
-    if let Some(node_mut) = tab.graph.get_node_mut(node_id) {
-        node_mut.position += delta;
-    }
-}
-
-fn render_edge(
-    painter: &Painter,
-    edge: &Edge,
-    graph: &DagGraph,
-    canvas_offset: Pos2,
-    canvas_zoom: f32,
-    view_offset: Vec2,
-) {
-    if let Some(source_node) = graph.get_node(&edge.source_node_id) {
-        if let Some(target_node) = graph.get_node(&edge.target_node_id) {
-            let start = get_port_position(source_node, edge.source_port, true);
-            let end = get_port_position(target_node, edge.target_port, false);
-
-            let screen_start = canvas_offset + (start.to_vec2() + view_offset) * canvas_zoom;
-            let screen_end = canvas_offset + (end.to_vec2() + view_offset) * canvas_zoom;
-
-            let screen_node_w = NODE_WIDTH * canvas_zoom;
-            let screen_node_h = NODE_HEIGHT * canvas_zoom;
-
-            // 当源节点的输出端口 x 坐标已经接近或超过目标节点的输入端口 x 坐标,
-            // 或源/目标节点的水平跨度相对于节点宽度非常小（近似上下对齐）,
-            // 并且在垂直方向上有明显跨度时，将控制点推到节点外侧形成 C 形绕路,
-            // 避免贝塞尔曲线穿过节点矩形本身.
-            let port_horizontal_gap = screen_end.x - screen_start.x;
-            let node_horizontal_span = (screen_end.x - screen_start.x).abs();
-            let vertical_span = (screen_end.y - screen_start.y).abs();
-            let small_span_threshold = screen_node_w * 0.3;
-            let is_vertical_parallel = (port_horizontal_gap <= small_span_threshold
-                || node_horizontal_span <= small_span_threshold)
-                && vertical_span > screen_node_h * 0.6;
-
-            // 贝塞尔控制点策略：两端都保证一小段「水平直线」接入端口，
-            // 这样曲线在出口/入口处与节点边缘清晰分离，不会被矩形遮挡。
-            //   - 出口端口在节点右侧 → control1 向屏幕右侧伸 (x + offset)
-            //   - 入口端口在节点左侧 → control2 向屏幕左侧伸 (x - offset)
-            // 当中段再通过两个控制点的水平位置形成平滑的 S / C 过渡。
-            let horizontal_arm = screen_node_w * 0.4; // 两端水平臂的伸出长度
-            let (control1, control2) = if is_vertical_parallel {
-                // 垂直平行（节点上下紧挨、水平跨度小）：形成 C 形绕路，
-                // 出口右拐出、入口左拐入，两端在节点外都有可见的水平连接段。
-                let loop_out = horizontal_arm + screen_node_w * 0.2; // 额外再伸出一些，避免贴脸
-                (
-                    Pos2::new(screen_start.x + loop_out, screen_start.y),
-                    Pos2::new(screen_end.x - loop_out, screen_end.y),
-                )
-            } else {
-                // 常规水平布局：出口右侧伸出、入口左侧伸出，形成平滑 S 形。
-                (
-                    Pos2::new(screen_start.x + horizontal_arm, screen_start.y),
-                    Pos2::new(screen_end.x - horizontal_arm, screen_end.y),
-                )
-            };
-
-            // 曲线完整绘制到目标端口
-            let curve = Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
-                [screen_start, control1, control2, screen_end],
+/// 从 `state.dag_editor.active_tab()` 取出当前 tab 的 `DagGraph` 克隆，
+/// 连同 `canvas_offset` / `canvas_zoom` 传入 `DagProgram`。canvas widget
+/// 由 `iced::widget::canvas::canvas(program)` 构造。
+///
+/// GPU 节流关键：额外传 `dragging_in_progress`（拖节点或平移画布任一为真），
+/// 这样 `DagProgram::update` 在 CursorMoved 且无拖拽/连线时就不发 Message，
+/// 避免触发 update → view → draw 链。
+pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
+    let (graph, offset, zoom, selected_id, connecting_from, drag_world, dragging_in_progress) =
+        match state.dag_editor.active_tab() {
+            Some(tab) => (
+                tab.graph.clone(),
+                tab.canvas_offset,
+                tab.canvas_zoom,
+                tab.selected_node_id.clone(),
+                tab.connecting_from.clone(),
+                tab.connecting_drag_world,
+                tab.dragging_node_id.is_some() || state.canvas_pan_anchor.is_some(),
+            ),
+            None => (
+                DagGraph::default(),
+                Vec2::ZERO,
+                1.0,
+                None,
+                None,
+                None,
                 false,
-                Color32::TRANSPARENT,
-                Stroke::new(2.0 * canvas_zoom, Color32::from_rgba_unmultiplied(180, 180, 180, 255)),
-            ));
-            painter.add(curve);
+            ),
+        };
 
-            // 在贝塞尔曲线中点处绘制有向箭头, 表示 source -> target 的方向.
-            // 三次贝塞尔曲线: B(t) = (1-t)^3·P0 + 3(1-t)^2·t·P1 + 3(1-t)·t^2·P2 + t^3·P3
-            //   B(0.5)  = 0.125·P0 + 0.375·P1 + 0.375·P2 + 0.125·P3
-            //   B'(0.5) = 0.75·(P1-P0) + 1.5·(P2-P1) + 0.75·(P3-P2)
-            let p0 = screen_start.to_vec2();
-            let p1 = control1.to_vec2();
-            let p2 = control2.to_vec2();
-            let p3 = screen_end.to_vec2();
-            let mid_point = (p0 * 0.125 + p1 * 0.375 + p2 * 0.375 + p3 * 0.125).to_pos2();
-            let tangent_vec = (p1 - p0) * 0.75 + (p2 - p1) * 1.5 + (p3 - p2) * 0.75;
-            let tangent_len = tangent_vec.length();
-            let tangent = if tangent_len > 1e-6 {
-                tangent_vec / tangent_len
-            } else {
-                Vec2::X
-            };
+    let program = DagProgram {
+        graph,
+        offset,
+        zoom,
+        selected_node_id: selected_id,
+        connecting_from,
+        connecting_drag_world: drag_world,
+        dragging_in_progress,
+        // 构造时就算一次指纹，供 PartialEq 快速短路
+        fp: 0, // 构造时懒计算（PartialEq 第一次调用才计算并缓存）
+    };
 
-            // 箭头尺寸随画布缩放; 视觉中心落在曲线中点
-            let arrow_size = 8.0 * canvas_zoom;
-            let arrow_color = Color32::from_rgba_unmultiplied(180, 180, 180, 255);
-            let arrow_tip = mid_point + tangent * (arrow_size * 0.5);
-            let arrow_base = mid_point - tangent * (arrow_size * 0.5);
-            let perp = Vec2::new(-tangent.y, tangent.x);
-            let half_width = arrow_size * 0.5;
-            let base_left = arrow_base + perp * half_width;
-            let base_right = arrow_base - perp * half_width;
+    let canvas_widget = canvas(program)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
-            let arrow = Shape::convex_polygon(
-                vec![arrow_tip, base_left, base_right],
-                arrow_color,
-                Stroke::NONE,
-            );
-            painter.add(arrow);
+    container(canvas_widget)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::canvas_bg()).into());
+            s
+        })
+        .into()
+}
+
+// 保留旧 placeholder API 避免外部引用编译失败
+#[allow(dead_code)]
+pub fn view_dag_canvas_placeholder() -> Element<'static, Message> {
+    container(
+        text("DAG 画布（阶段 2.4 已实现最小渲染版本）")
+            .color(theme::text_weak())
+            .size(12.0),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+// ===== DagProgram =====
+//
+// 持有 graph 的克隆（每次 view 调用都新建一个 DagProgram，iced 内部
+// 会通过 PartialEq 比较决定是否重绘）。offset / zoom 来自活动 tab 的
+// `canvas_offset` / `canvas_zoom` 字段。
+//
+// GPU 优化：
+// 1. `State` 内放两个 `canvas::Cache`：grid_cache（仅随 bounds 变）、
+//    world_cache（随 offset/zoom/graph/selected/connect 变），命中则
+//    不跑任何 Path 构建，直接复用 GPU 已有纹理。
+// 2. 世界内容 Cache key 使用"快速指纹"：节点数、边数、offset、zoom、
+//    选中、connect 状态 + 所有节点 (id,pos,name) 与边 id 的哈希摘要。
+//    避免每次都深比较整个 DagGraph（PartialEq 已做但 draw 内部再指纹化
+//    防止 Program PartialEq 相等但 iced 仍走 draw 的路径）。
+
+#[derive(Clone)]
+struct DagProgram {
+    graph: DagGraph,
+    offset: Vec2,
+    zoom: f32,
+    selected_node_id: Option<String>,
+    connecting_from: Option<(String, usize, bool)>,
+    connecting_drag_world: Option<Vec2>,
+    /// 真 = 正在拖节点（dragging_node_id）或平移画布（canvas_pan_anchor），
+    /// 用于 CursorMoved 节流：只有拖拽/连线进行中才发 Message。
+    dragging_in_progress: bool,
+    /// 懒缓存的世界指纹（u64）。0 视为未计算。PartialEq/draw 两边都会写它，
+    /// 因为内部 mutability（Cell）在 Clone 里很麻烦，这里改为在 impl 里
+    /// 用内部 helper 按需计算 → DagProgram 非 Clone 约束下 &self 也能算。
+    fp: u64,
+}
+
+impl DagProgram {
+    /// 计算（若 fp==0）或返回缓存的指纹值。
+    ///
+    /// 注意：DagProgram 每次 view 新建后 PartialEq 只比 1~2 次，fp 字段
+    /// 真正命中的场景是"同一个 DagProgram 实例被 draw 调用多次"（iced
+    /// 内部可能在某些状态下重复调用 draw）。为保持语义简单，每次调用
+    /// world_fingerprint_of 都重算（它本身已经是 FNV-1a 极快），fp 字段
+    /// 主要用于 PartialEq 内部的"同实例第二次比较"短路。
+    fn get_fp(&self) -> u64 {
+        if self.fp != 0 {
+            self.fp
+        } else {
+            world_fingerprint_of(
+                &self.offset,
+                self.zoom,
+                self.dragging_in_progress,
+                &self.graph,
+                self.selected_node_id.as_deref(),
+                self.connecting_from.as_ref(),
+                self.connecting_drag_world.as_ref(),
+            )
         }
     }
 }
 
-/// 计算贝塞尔曲线上参数 t 对应的点.
-fn bezier_point(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
-    let inv = 1.0 - t;
-    let inv2 = inv * inv;
-    let t2 = t * t;
-    inv2 * inv * p0 + 3.0 * inv2 * t * p1 + 3.0 * inv * t2 * p2 + t2 * t * p3
+impl PartialEq for DagProgram {
+    fn eq(&self, other: &Self) -> bool {
+        // 快速路径 1：同一个 fp（指纹不同 → 一定不等）
+        // 指纹相同 → 再走关键字段精确比较（FP 相等但内容不同的概率极低，
+        // 但为了正确性不跳过精确比较，只是先短路"显然不等"的情况）
+        let (fp_a, fp_b) = (self.get_fp(), other.get_fp());
+        if fp_a != fp_b {
+            return false;
+        }
+
+        // 精确比较：只比"真正影响渲染的最小字段集合"，不比整个图（图里
+        // 的 operator_type.params 等字段不影响视觉，PartialEq 默认会比）。
+        self.dragging_in_progress == other.dragging_in_progress
+            && self.offset == other.offset
+            && self.zoom == other.zoom
+            && self.selected_node_id == other.selected_node_id
+            && self.connecting_from == other.connecting_from
+            && self.connecting_drag_world == other.connecting_drag_world
+            && self.graph.nodes.len() == other.graph.nodes.len()
+            && self.graph.edges.len() == other.graph.edges.len()
+            && self
+                .graph
+                .nodes
+                .iter()
+                .zip(other.graph.nodes.iter())
+                .all(|(a, b)| {
+                    a.id == b.id
+                        && a.position == b.position
+                        && a.operator_type.name() == b.operator_type.name()
+                })
+            && self
+                .graph
+                .edges
+                .iter()
+                .zip(other.graph.edges.iter())
+                .all(|(a, b)| a.id == b.id)
+    }
 }
 
-/// 计算点到贝塞尔曲线的最近距离.
-/// 通过采样 + 局部微调（牛顿法细化）获得高精度结果.
-fn bezier_min_distance(p: Vec2, p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> f32 {
-    let samples = 32;
-    let mut best = f32::MAX;
-    for i in 0..=samples {
-        let t = i as f32 / samples as f32;
-        let bp = bezier_point(p0, p1, p2, p3, t);
-        let dist = (bp - p).length();
-        if dist < best {
-            best = dist;
+/// Program State：持有两个 Geometry Cache，避免每帧重建 Path。
+///
+/// `grid_cache` 只依赖 bounds.size；`world_cache` 依赖 offset/zoom/图内容/
+/// 选中/连线状态——由 `world_fingerprint` 64 位摘要判断是否命中。
+struct CanvasCacheState {
+    grid_cache: canvas::Cache,
+    world_cache: canvas::Cache,
+    inner: std::cell::RefCell<CacheInner>,
+}
+
+struct CacheInner {
+    last_bounds_size: Size,
+    last_world_fp: u64,
+}
+
+impl Default for CanvasCacheState {
+    fn default() -> Self {
+        Self {
+            grid_cache: canvas::Cache::default(),
+            world_cache: canvas::Cache::default(),
+            inner: std::cell::RefCell::new(CacheInner {
+                last_bounds_size: Size::ZERO,
+                last_world_fp: 0,
+            }),
         }
     }
-    best
 }
 
-/// 检测鼠标点是否在连线的可点击范围内.
-/// 仅当鼠标距贝塞尔曲线小于阈值时才命中，避免大包围盒遮挡节点.
-fn edge_hit_test(
-    graph: &DagGraph,
-    edge_id: String,
-    mouse_pos: Pos2,
-    view_min: Pos2,
-    canvas_zoom: f32,
-    view_offset: Vec2,
-) -> bool {
-    let edge = match graph.edges.iter().find(|e| e.id == edge_id) {
-        Some(e) => e,
-        None => return false,
-    };
-    let source_node = match graph.get_node(&edge.source_node_id) {
-        Some(n) => n,
-        None => return false,
-    };
-    let target_node = match graph.get_node(&edge.target_node_id) {
-        Some(n) => n,
-        None => return false,
-    };
+impl canvas::Program<Message> for DagProgram {
+    type State = CanvasCacheState;
 
-    let start = get_port_position(source_node, edge.source_port, true);
-    let end = get_port_position(target_node, edge.target_port, false);
+    /// 鼠标事件处理：将 `Event::Mouse` 转换为应用级 `Message` 发布给 `MyApp::update`。
+    ///
+    /// GPU 优化关键点：**CursorMoved 只在需要写入状态时才发 Message**。
+    fn update(
+        &self,
+        _state: &mut CanvasCacheState,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<Message>> {
+        let Some(pos) = cursor.position_in(bounds) else {
+            return None;
+        };
+        let screen = Vec2::new(pos.x, pos.y);
+        let world = screen_to_world(screen, self.offset, self.zoom);
 
-    let screen_start = view_min + (start.to_vec2() + view_offset) * canvas_zoom;
-    let screen_end = view_min + (end.to_vec2() + view_offset) * canvas_zoom;
-
-    let screen_node_w = NODE_WIDTH * canvas_zoom;
-    let screen_node_h = NODE_HEIGHT * canvas_zoom;
-
-    let port_horizontal_gap = screen_end.x - screen_start.x;
-    let node_horizontal_span = (screen_end.x - screen_start.x).abs();
-    let vertical_span = (screen_end.y - screen_start.y).abs();
-    let small_span_threshold = screen_node_w * 0.3;
-    let is_vertical_parallel = (port_horizontal_gap <= small_span_threshold
-        || node_horizontal_span <= small_span_threshold)
-        && vertical_span > screen_node_h * 0.6;
-
-    // 与 render_edge 中的控制点计算完全一致，保证点击命中区域与实际绘制的曲线重合。
-    let horizontal_arm = screen_node_w * 0.4;
-    let (control1, control2) = if is_vertical_parallel {
-        let loop_out = horizontal_arm + screen_node_w * 0.2;
-        (
-            Pos2::new(screen_start.x + loop_out, screen_start.y),
-            Pos2::new(screen_end.x - loop_out, screen_end.y),
-        )
-    } else {
-        (
-            Pos2::new(screen_start.x + horizontal_arm, screen_start.y),
-            Pos2::new(screen_end.x - horizontal_arm, screen_end.y),
-        )
-    };
-
-    let threshold = 8.0 * canvas_zoom;
-    let mouse = mouse_pos.to_vec2();
-    let d = bezier_min_distance(
-        mouse,
-        screen_start.to_vec2(),
-        control1.to_vec2(),
-        control2.to_vec2(),
-        screen_end.to_vec2(),
-    );
-    d < threshold
-}
-
-fn get_port_position(node: &Node, port_index: usize, is_output: bool) -> Pos2 {
-    let node_rect = Rect::from_center_size(
-        node.position.to_pos2(),
-        Vec2::new(NODE_WIDTH, NODE_HEIGHT),
-    );
-
-    let total_ports = if is_output {
-        node.operator_type.output_count()
-    } else {
-        node.operator_type.input_count()
-    };
-
-    if total_ports == 0 {
-        return node.position.to_pos2();
-    }
-
-    let start_y = node_rect.top() + PORT_PADDING + PORT_RADIUS;
-    let end_y = node_rect.bottom() - PORT_PADDING - PORT_RADIUS;
-    let y_step = if total_ports > 1 {
-        (end_y - start_y) / (total_ports - 1) as f32
-    } else {
-        0.0
-    };
-
-    let y = start_y + port_index as f32 * y_step;
-    let x = if is_output {
-        node_rect.right()
-    } else {
-        node_rect.left()
-    };
-
-    Pos2::new(x, y)
-}
-
-/// 以画布屏幕坐标点 `anchor_screen_pos` 为锚点缩放画布。
-///
-/// 通过同步调整 `canvas_offset`，使该屏幕点对应的画布坐标点在缩放前后保持不变——
-/// 视觉上表现为「以鼠标位置为中心向外扩张/向内收缩」，而非简单的「以画布左上角
-/// 为锚点缩放」造成内容偏移到画布外。供鼠标滚轮缩放（锚点 = 鼠标位置）和工具栏
-/// 放大/缩小按钮（锚点 = 画布屏幕中心）复用。
-///
-/// 缩放范围限制在 [0.2, 3.0]：过小则节点不可见，过大则连线精度损失。
-pub fn zoom_canvas_at_point(tab: &mut DagTab, factor: f32, anchor_screen_pos: Pos2) {
-    const MIN_ZOOM: f32 = 0.2;
-    const MAX_ZOOM: f32 = 3.0;
-    let old_zoom = tab.canvas_zoom;
-    let new_zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-    if new_zoom == old_zoom {
-        return; // 已达缩放边界
-    }
-    // 画布屏幕矩形在 render_dag_canvas 中已刷新; 首帧尚未渲染时跳过.
-    let Some(canvas_rect) = tab.canvas_viewport_rect else { return; };
-    // 屏幕锚点对应的画布坐标点 (缩放前后保持不变)
-    let anchor = (anchor_screen_pos - canvas_rect.min) / old_zoom - tab.canvas_offset;
-    // 反推新 offset, 使该锚点仍对应同一屏幕位置
-    tab.canvas_offset = (anchor_screen_pos - canvas_rect.min) / new_zoom - anchor;
-    tab.canvas_zoom = new_zoom;
-}
-
-/// Ctrl+Click 切换某节点在多选集合中的状态。
-///
-/// 若该节点已在多选集合中 → 移除；否则加入。
-/// 同时把当前单选 `selected_node_id` 也合并进多选集合后再切换，
-/// 保证用户先单击 A、再 Ctrl+Click B 时 A 也参与对齐。
-/// 切换后清空 `selected_node_id`，避免参数面板与多选状态混淆。
-fn toggle_multi_select(tab: &mut DagTab, node_id: &str) {
-    // 把当前单选节点先并入多选集合
-    if let Some(single) = tab.selected_node_id.take() {
-        if !tab.selected_node_ids.iter().any(|id| id == &single) {
-            tab.selected_node_ids.push(single);
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                // 端口命中优先于节点命中；命中输出端口 → 开始连线
+                if let Some((node_id, port_idx, true)) =
+                    hit_test_port(&self.graph, world)
+                {
+                    return Some(
+                        Action::publish(Message::ConnectStart {
+                            node_id,
+                            port_index: port_idx,
+                            is_output: true,
+                        })
+                        .and_capture(),
+                    );
+                }
+                Some(Action::publish(Message::CanvasPress(screen)).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                Some(Action::publish(Message::CanvasRightClick(screen)).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if self.connecting_from.is_some() {
+                    Some(
+                        Action::publish(Message::ConnectRelease(screen))
+                            .and_capture(),
+                    )
+                } else {
+                    Some(Action::publish(Message::CanvasRelease(screen)).and_capture())
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                // GPU 节流：**只在有实际副作用的场景发 Message**。
+                if self.connecting_from.is_some() {
+                    Some(Action::publish(Message::ConnectDrag(screen)).and_capture())
+                } else if self.dragging_in_progress {
+                    Some(Action::publish(Message::CanvasMove(screen)).and_capture())
+                } else {
+                    None
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let delta_y = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y,
+                };
+                if delta_y.abs() < f32::EPSILON {
+                    return None;
+                }
+                Some(
+                    Action::publish(Message::CanvasWheel { delta_y, pos: screen })
+                        .and_capture(),
+                )
+            }
+            _ => None,
         }
     }
-    // 切换目标节点
-    if let Some(pos) = tab.selected_node_ids.iter().position(|id| id == node_id) {
-        tab.selected_node_ids.remove(pos);
-    } else {
-        tab.selected_node_ids.push(node_id.to_string());
-    }
-}
 
-/// 对选中的多个节点执行左对齐。
-///
-/// 取多选节点中最小的 x 坐标作为对齐基准，把所有选中节点的 position.x 设为该值。
-/// 对齐前会把当前所有节点的位置快照压入撤销栈。选中节点数 < 2 时无效。
-pub fn align_left(tab: &mut DagTab) {
-    if tab.selected_node_ids.len() < 2 {
-        return;
-    }
-    push_position_snapshot(tab);
-    let target_x = match tab
-        .selected_node_ids
-        .iter()
-        .filter_map(|id| tab.graph.get_node(id))
-        .map(|n| n.position.x)
-        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-    {
-        Some(x) => x,
-        None => return,
-    };
-    for id in tab.selected_node_ids.clone() {
-        if let Some(node) = tab.graph.get_node_mut(&id) {
-            node.position.x = target_x;
+    fn mouse_interaction(
+        &self,
+        _state: &CanvasCacheState,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        let Some(pos) = cursor.position_in(bounds) else {
+            return mouse::Interaction::default();
+        };
+        let world = screen_to_world(Vec2::new(pos.x, pos.y), self.offset, self.zoom);
+
+        if self.connecting_from.is_some() {
+            return mouse::Interaction::Crosshair;
         }
-    }
-    tab.dirty = true;
-}
-
-/// 对选中的多个节点执行上对齐。
-///
-/// 取多选节点中最小的 y 坐标作为对齐基准，把所有选中节点的 position.y 设为该值。
-/// 对齐前会把当前所有节点的位置快照压入撤销栈。选中节点数 < 2 时无效。
-pub fn align_top(tab: &mut DagTab) {
-    if tab.selected_node_ids.len() < 2 {
-        return;
-    }
-    push_position_snapshot(tab);
-    let target_y = match tab
-        .selected_node_ids
-        .iter()
-        .filter_map(|id| tab.graph.get_node(id))
-        .map(|n| n.position.y)
-        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-    {
-        Some(y) => y,
-        None => return,
-    };
-    for id in tab.selected_node_ids.clone() {
-        if let Some(node) = tab.graph.get_node_mut(&id) {
-            node.position.y = target_y;
+        if hit_test_port(&self.graph, world).is_some() {
+            return mouse::Interaction::Crosshair;
         }
+        if hit_test_node(&self.graph, world).is_some() {
+            return mouse::Interaction::Grab;
+        }
+        mouse::Interaction::default()
     }
-    tab.dirty = true;
-}
 
-/// 撤销最近一次对齐操作。
-///
-/// 从撤销栈弹出最近一次快照，恢复所有节点的位置。
-/// 撤销后不清空多选集合，便于连续对齐/撤销试错。
-pub fn undo_align(tab: &mut DagTab) {
-    if let Some(snapshot) = tab.node_position_history.pop() {
-        for (id, pos) in snapshot {
-            if let Some(node) = tab.graph.get_node_mut(&id) {
-                node.position = pos;
+    fn draw(
+        &self,
+        state: &CanvasCacheState,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let size = bounds.size();
+
+        // --- 第一层缓存：网格背景（只随 bounds.size 变化） ---
+        // Cache::draw 内部按 size 判断是否重建，size 不变时直接返回旧 Geometry。
+        let grid_geo = state.grid_cache.draw(renderer, size, |frame| {
+            draw_grid_optimized(frame, size);
+        });
+
+        // --- 第二层缓存：世界内容 ---
+        //
+        // iced 0.14 的 canvas::Cache::draw 只在 size 变化或 clear() 后才
+        // 重新执行闭包。如果 graph/offset/zoom 变了但窗口没 resize，Cache
+        // 会返回旧 Geometry → 画布"冻结"。
+        //
+        // 修复：用指纹检测内容变化，变化时先 clear() 强制 Cache 重建。
+        let fp = world_fingerprint_of(
+            &self.offset,
+            self.zoom,
+            self.dragging_in_progress,
+            &self.graph,
+            self.selected_node_id.as_deref(),
+            self.connecting_from.as_ref(),
+            self.connecting_drag_world.as_ref(),
+        );
+        let needs_rebuild = {
+            let inner = state.inner.borrow();
+            fp != inner.last_world_fp || size != inner.last_bounds_size
+        };
+        if needs_rebuild {
+            // 强制 Cache 下次 draw 重建 Geometry
+            state.world_cache.clear();
+            if let Ok(mut inner) = state.inner.try_borrow_mut() {
+                inner.last_world_fp = fp;
+                inner.last_bounds_size = size;
             }
         }
-        tab.dirty = true;
+        let world_geo = state.world_cache.draw(renderer, size, |frame| {
+            draw_world_content_optimized(frame, self);
+        });
+
+        vec![grid_geo, world_geo]
     }
 }
 
-/// 把当前所有节点的 (id, position) 快照压入撤销栈。
-///
-/// 容量上限 50，超出丢弃最旧快照，避免无限增长。
-fn push_position_snapshot(tab: &mut DagTab) {
-    const MAX_HISTORY: usize = 50;
-    let snapshot: Vec<(String, Vec2)> = tab
-        .graph
-        .nodes
-        .iter()
-        .map(|n| (n.id.clone(), n.position))
-        .collect();
-    tab.node_position_history.push(snapshot);
-    while tab.node_position_history.len() > MAX_HISTORY {
-        tab.node_position_history.remove(0);
+// ===== 指纹计算（与旧 DagProgram::world_fingerprint 相同逻辑，改为独立 fn 接受显式参数） =====
+
+fn world_fingerprint_of(
+    offset: &Vec2,
+    zoom: f32,
+    dragging_in_progress: bool,
+    graph: &DagGraph,
+    selected_node_id: Option<&str>,
+    connecting_from: Option<&(String, usize, bool)>,
+    connecting_drag_world: Option<&Vec2>,
+) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut h = FNV_OFFSET;
+
+    fn mix_u64(h: &mut u64, v: u64) {
+        *h ^= v;
+        *h = h.wrapping_mul(FNV_PRIME);
     }
+    fn mix_bytes(h: &mut u64, bytes: &[u8]) {
+        for &b in bytes {
+            *h ^= b as u64;
+            *h = h.wrapping_mul(FNV_PRIME);
+        }
+    }
+    fn mix_f32(h: &mut u64, v: f32) {
+        mix_u64(h, v.to_bits() as u64);
+    }
+
+    mix_f32(&mut h, offset.x);
+    mix_f32(&mut h, offset.y);
+    mix_f32(&mut h, zoom);
+    mix_u64(&mut h, if dragging_in_progress { 1 } else { 0 });
+
+    mix_u64(&mut h, graph.nodes.len() as u64);
+    mix_u64(&mut h, graph.edges.len() as u64);
+
+    for n in &graph.nodes {
+        mix_bytes(&mut h, n.id.as_bytes());
+        mix_f32(&mut h, n.position.x);
+        mix_f32(&mut h, n.position.y);
+        mix_bytes(&mut h, n.operator_type.name().as_bytes());
+    }
+    for e in &graph.edges {
+        mix_bytes(&mut h, e.id.as_bytes());
+    }
+
+    if let Some(id) = selected_node_id {
+        mix_u64(&mut h, 1);
+        mix_bytes(&mut h, id.as_bytes());
+    } else {
+        mix_u64(&mut h, 0);
+    }
+
+    if let Some((id, idx, is_out)) = connecting_from {
+        mix_u64(&mut h, 1);
+        mix_bytes(&mut h, id.as_bytes());
+        mix_u64(&mut h, *idx as u64);
+        mix_u64(&mut h, if *is_out { 1 } else { 0 });
+    } else {
+        mix_u64(&mut h, 0);
+    }
+    if let Some(v) = connecting_drag_world {
+        mix_u64(&mut h, 1);
+        mix_f32(&mut h, v.x);
+        mix_f32(&mut h, v.y);
+    } else {
+        mix_u64(&mut h, 0);
+    }
+
+    h
+}
+
+// ===== 优化后的绘制主函数 =====
+
+/// 合并网格线绘制：所有竖线进一个 Path，所有横线进一个 Path。
+///
+/// 从旧版 ~(w/step + h/step) 个 Path + stroke 调用 → 2 个 Path + 2 个 stroke。
+/// 对 1920x1080 @ step=24：从 ~125 drawcall → 2 drawcall，GPU 顶点提交量减少 ~60 倍。
+fn draw_grid_optimized(frame: &mut canvas::Frame, size: iced::Size) {
+    let step = GRID_STEP;
+    let w = size.width;
+    let h = size.height;
+    let gs = grid_stroke();
+
+    // 竖线集合（一个 Path 内 move_to→line_to→move_to→line_to…）
+    let vert_path = Path::new(|b| {
+        let mut x = 0.0;
+        while x <= w {
+            b.move_to(Point::new(x, 0.0));
+            b.line_to(Point::new(x, h));
+            x += step;
+        }
+    });
+    frame.stroke(&vert_path, gs.clone());
+
+    // 横线集合
+    let horz_path = Path::new(|b| {
+        let mut y = 0.0;
+        while y <= h {
+            b.move_to(Point::new(0.0, y));
+            b.line_to(Point::new(w, y));
+            y += step;
+        }
+    });
+    frame.stroke(&horz_path, gs);
+}
+
+/// 端口占用索引：key = (node_id, port_index, is_output)
+type PortKey = (String, usize, bool);
+
+/// 构建端口占用哈希表：一次遍历 edges，后续查询 O(1)。
+fn build_port_index(graph: &DagGraph) -> (HashMap<PortKey, bool>, HashMap<PortKey, bool>) {
+    // out_has_fan: 输出端口是否有至少一条出边
+    let mut out_has_fan: HashMap<PortKey, bool> = HashMap::new();
+    // in_occupied: 输入端口是否已连线
+    let mut in_occupied: HashMap<PortKey, bool> = HashMap::new();
+
+    for e in &graph.edges {
+        out_has_fan.insert((e.source_node_id.clone(), e.source_port, true), true);
+        in_occupied.insert((e.target_node_id.clone(), e.target_port, false), true);
+    }
+
+    (out_has_fan, in_occupied)
+}
+
+/// 节点宽度缓存：按节点 id → width，避免每次调用 estimate_node_width。
+fn build_width_cache(graph: &DagGraph) -> HashMap<String, f32> {
+    let mut cache: HashMap<String, f32> = HashMap::with_capacity(graph.nodes.len());
+    for n in &graph.nodes {
+        cache.insert(n.id.clone(), estimate_node_width(&n.operator_type.name()));
+    }
+    cache
+}
+
+/// 世界内容绘制（优化版）：
+/// 1. 预建宽度缓存 + 端口索引（一次遍历，后续 O(1)）
+/// 2. 连线：仍然每条边一个 Path（贝塞尔之间无法合并），但复用 stroke 对象
+/// 3. 节点：所有 fill/stroke 复用预定义 Stroke，减少结构构造
+fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
+    // 1) 应用画布变换：平移 + 缩放
+    frame.translate(Vector::new(p.offset.x, p.offset.y));
+    if (p.zoom - 1.0).abs() > f32::EPSILON {
+        frame.scale(p.zoom);
+    }
+
+    // 2) 一次性预计算索引
+    let width_cache = build_width_cache(&p.graph);
+    let (out_has_fan, in_occupied) = build_port_index(&p.graph);
+
+    let card_bg = Color::from(theme::card_bg());
+    let text_strong = Color::from(theme::text_strong());
+    let edge_stroke_val = edge_stroke();
+    let selected_id = p.selected_node_id.as_deref();
+
+    // 3) 连线（先画，被节点覆盖线头）
+    for edge in &p.graph.edges {
+        let Some(src) = p.graph.get_node(&edge.source_node_id) else {
+            continue;
+        };
+        let Some(dst) = p.graph.get_node(&edge.target_node_id) else {
+            continue;
+        };
+        let src_w = width_cache.get(&src.id).copied().unwrap_or(NODE_MIN_WIDTH);
+        let dst_w = width_cache.get(&dst.id).copied().unwrap_or(NODE_MIN_WIDTH);
+
+        let p1 = port_world_position(
+            src.position,
+            src_w,
+            NODE_HEIGHT,
+            true,
+            edge.source_port,
+            src.operator_type.output_count(),
+        );
+        let p2 = port_world_position(
+            dst.position,
+            dst_w,
+            NODE_HEIGHT,
+            false,
+            edge.target_port,
+            dst.operator_type.input_count(),
+        );
+        let dx = (p2.x - p1.x).max(20.0) * 0.5;
+        let c1 = Point::new(p1.x + dx, p1.y);
+        let c2 = Point::new(p2.x - dx, p2.y);
+        let path = Path::new(|b| {
+            b.move_to(p1);
+            b.bezier_curve_to(c1, c2, p2);
+        });
+        frame.stroke(&path, edge_stroke_val.clone());
+    }
+
+    // 3.5) 连线创建临时贝塞尔
+    if let (Some((src_id, src_port_idx, true)), Some(drag_world)) =
+        (&p.connecting_from, p.connecting_drag_world)
+    {
+        if let Some(src) = p.graph.get_node(src_id) {
+            let src_w = width_cache.get(src_id).copied().unwrap_or(NODE_MIN_WIDTH);
+            let p1 = port_world_position(
+                src.position,
+                src_w,
+                NODE_HEIGHT,
+                true,
+                *src_port_idx,
+                src.operator_type.output_count(),
+            );
+            let p2 = Point::new(drag_world.x, drag_world.y);
+            let dx = (p2.x - p1.x).max(20.0) * 0.5;
+            let c1 = Point::new(p1.x + dx, p1.y);
+            let c2 = Point::new(p2.x - dx, p2.y);
+            let path = Path::new(|b| {
+                b.move_to(p1);
+                b.bezier_curve_to(c1, c2, p2);
+            });
+            frame.stroke(&path, temp_edge_stroke());
+        }
+    }
+
+    // 4) 节点 + 端口（同节点端口在循环内直接画，利用 width_cache）
+    //
+    // GPU 节流：dragging_in_progress=true（拖节点 / 平移画布）时跳过 fill_text
+    // 和端口圆点——二者是最贵的 tessellation。fingerprint 已纳入该字段，
+    // 松手时 fp 变化 → cache clear → 自动恢复完整绘制。
+    // 连线创建中保留端口（用户需看到目标端口）。
+    let dragging = p.dragging_in_progress;
+    let connecting = p.connecting_from.is_some();
+    let draw_text = !dragging;
+    let draw_ports = !dragging || connecting;
+
+    for node in &p.graph.nodes {
+        let w = width_cache.get(&node.id).copied().unwrap_or(NODE_MIN_WIDTH);
+        let h = NODE_HEIGHT;
+        let top_left = Point::new(node.position.x, node.position.y);
+
+        // 卡片矩形 Path（重用：fill + stroke 都用它）
+        let rect_path = Path::rectangle(top_left, Size::new(w, h));
+
+        // 卡片背景填充
+        frame.fill(&rect_path, card_bg);
+
+        // 左侧色条（3px）
+        let bar = Path::rectangle(top_left, Size::new(3.0, h));
+        frame.fill(&bar, node.operator_type.color());
+
+        // 边框：选中 → accent 2px；否则默认 1px
+        let is_selected = selected_id == Some(&node.id);
+        if is_selected {
+            frame.stroke(&rect_path, card_stroke_selected());
+        } else {
+            frame.stroke(&rect_path, card_stroke_normal());
+        }
+
+        // 节点文本（算子名）——拖动期间跳过
+        if draw_text {
+            frame.fill_text(Text {
+                content: node.operator_type.name().to_string(),
+                position: Point::new(
+                    node.position.x + w / 2.0,
+                    node.position.y + h / 2.0,
+                ),
+                color: text_strong,
+                size: 11.0.into(),
+                font: Font::with_name("Microsoft YaHei"),
+                align_x: Alignment::Center.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..Default::default()
+            });
+        }
+
+        // 端口圆点：直接在节点循环里画（拿得到 width_cache 里的 w）
+        // 连线创建中保留，其它拖动场景跳过
+        if draw_ports {
+            draw_ports_indexed(frame, node, w, h, &out_has_fan, &in_occupied, card_bg);
+        }
+    }
+}
+
+/// 使用预建索引绘制单个节点的所有端口：去掉内部 O(边) 扫描。
+fn draw_ports_indexed(
+    frame: &mut canvas::Frame,
+    node: &crate::dag::Node,
+    w: f32,
+    h: f32,
+    out_has_fan: &HashMap<PortKey, bool>,
+    in_occupied: &HashMap<PortKey, bool>,
+    card_bg: Color,
+) {
+    let output_count = node.operator_type.output_count();
+    let input_count = node.operator_type.input_count();
+
+    let card_stroke_color = Color::from(theme::card_stroke());
+    let success_color = Color::from(theme::success());
+
+    // 输出端口（右侧）
+    for i in 0..output_count {
+        let p = port_world_position(node.position, w, h, true, i, output_count);
+        let key: PortKey = (node.id.clone(), i, true);
+        let has_fan = out_has_fan.get(&key).copied().unwrap_or(false);
+        let ring_color = if has_fan { Color::WHITE } else { card_stroke_color };
+        draw_port_cached(frame, p, ring_color, card_bg);
+    }
+
+    // 输入端口（左侧）
+    for i in 0..input_count {
+        let p = port_world_position(node.position, w, h, false, i, input_count);
+        let key: PortKey = (node.id.clone(), i, false);
+        let occupied = in_occupied.get(&key).copied().unwrap_or(false);
+        let ring_color = if occupied { card_stroke_color } else { success_color };
+        draw_port_cached(frame, p, ring_color, card_bg);
+    }
+}
+
+/// 单个端口绘制：和旧版相同，但 card_bg 作为参数传入避免重复 theme 查询。
+#[inline(always)]
+fn draw_port_cached(frame: &mut canvas::Frame, center: Point, ring_color: Color, card_bg: Color) {
+    let outer = Path::circle(center, PORT_RADIUS);
+    frame.stroke(&outer, port_stroke(ring_color));
+    let inner = Path::circle(center, PORT_RADIUS - 1.5);
+    frame.fill(&inner, card_bg);
+}
+
+// ===== 命中测试与工具函数（保持对外 API 不变） =====
+
+pub fn port_world_position(
+    node_pos: Vec2,
+    w: f32,
+    h: f32,
+    is_output: bool,
+    port_index: usize,
+    port_count: usize,
+) -> Point {
+    let margin_v = 6.0;
+    let usable = (h - margin_v * 2.0).max(0.0);
+    let y = if port_count <= 1 {
+        node_pos.y + h / 2.0
+    } else {
+        let step = usable / (port_count - 1) as f32;
+        node_pos.y + margin_v + step * port_index as f32
+    };
+    let x = if is_output { node_pos.x + w } else { node_pos.x };
+    Point::new(x, y)
+}
+
+pub fn screen_to_world(screen: Vec2, offset: Vec2, zoom: f32) -> Vec2 {
+    let z = if zoom.abs() < f32::EPSILON { 1.0 } else { zoom };
+    Vec2::new((screen.x - offset.x) / z, (screen.y - offset.y) / z)
+}
+
+pub fn hit_test_node(graph: &DagGraph, world: Vec2) -> Option<String> {
+    for node in graph.nodes.iter().rev() {
+        let w = estimate_node_width(&node.operator_type.name());
+        if world.x >= node.position.x
+            && world.x <= node.position.x + w
+            && world.y >= node.position.y
+            && world.y <= node.position.y + NODE_HEIGHT
+        {
+            return Some(node.id.clone());
+        }
+    }
+    None
+}
+
+pub fn hit_test_port(
+    graph: &DagGraph,
+    world: Vec2,
+) -> Option<(String, usize, bool)> {
+    let hit_r_sq = (PORT_RADIUS + PORT_HIT_MARGIN).powi(2);
+    for node in graph.nodes.iter().rev() {
+        let w = estimate_node_width(&node.operator_type.name());
+        let h = NODE_HEIGHT;
+
+        let out_count = node.operator_type.output_count();
+        for i in 0..out_count {
+            let p = port_world_position(node.position, w, h, true, i, out_count);
+            let dx = world.x - p.x;
+            let dy = world.y - p.y;
+            if dx * dx + dy * dy <= hit_r_sq {
+                return Some((node.id.clone(), i, true));
+            }
+        }
+        let in_count = node.operator_type.input_count();
+        for i in 0..in_count {
+            let p = port_world_position(node.position, w, h, false, i, in_count);
+            let dx = world.x - p.x;
+            let dy = world.y - p.y;
+            if dx * dx + dy * dy <= hit_r_sq {
+                return Some((node.id.clone(), i, false));
+            }
+        }
+    }
+    None
+}
+
+pub fn hit_test_input_port(
+    graph: &DagGraph,
+    world: Vec2,
+) -> Option<(String, usize)> {
+    let hit_r_sq = (PORT_RADIUS + PORT_HIT_MARGIN).powi(2);
+    for node in graph.nodes.iter().rev() {
+        let w = estimate_node_width(&node.operator_type.name());
+        let h = NODE_HEIGHT;
+        let in_count = node.operator_type.input_count();
+        for i in 0..in_count {
+            let p = port_world_position(node.position, w, h, false, i, in_count);
+            let dx = world.x - p.x;
+            let dy = world.y - p.y;
+            if dx * dx + dy * dy <= hit_r_sq {
+                return Some((node.id.clone(), i));
+            }
+        }
+    }
+    None
+}
+
+pub fn estimate_node_width(name: &str) -> f32 {
+    let chars = name.chars().count() as f32;
+    (chars * CHAR_WIDTH_ESTIMATE + NODE_PADDING_X * 2.0).max(NODE_MIN_WIDTH)
 }

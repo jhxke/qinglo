@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
-use egui::{Rect, Vec2};
+use iced::Rectangle;
+use iced::window::Id as WindowId;
+use crate::geom::Vec2;
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
@@ -66,7 +68,7 @@ pub enum LogLevel {
 }
 
 /// 运行日志分类：底部「运行日志」面板按此划分三个子标签页分别展示。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogCategory {
     /// 提醒日志：用户点击保存、验证、清空等 UI 操作的直接反馈。
     Action,
@@ -74,6 +76,22 @@ pub enum LogCategory {
     Runtime,
     /// 通信报文：客户端与服务端交互的 JSON 请求 / 响应原文。
     Json,
+}
+
+/// 左侧合并面板的子标签页：建模列表与算子面板合并到同一侧栏，通过 tab 切换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftPanelTab {
+    /// 建模列表：磁盘建模历史 + 新建/重命名/删除入口。
+    Models,
+    /// 算子面板：算子分类树 + 搜索 + 节点参数编辑。
+    Operators,
+}
+
+impl Default for LeftPanelTab {
+    /// 默认聚焦「建模列表」：进入视图后通常先选择/新建一个建模。
+    fn default() -> Self {
+        LeftPanelTab::Models
+    }
 }
 
 impl Default for LogCategory {
@@ -108,6 +126,157 @@ pub enum ViewType {
     MiningAnalysis,
     OperatorDevelopment,
     Settings,
+}
+
+/// Iced Elm 架构的全局消息。
+///
+/// 从 egui 迁移到 Iced 后，所有 UI 事件（按钮点击、输入框编辑、画布交互、
+/// 后台任务回填等）都通过 `Message` 派发，由 `MyApp::update` 集中处理。
+///
+/// 阶段 1 骨架只保留最小集：视图切换 + 后台轮询 Tick。
+/// 后续阶段会按需扩展（算子面板、参数编辑、画布交互、预览窗口等）。
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// 切换主视图（活动栏按钮点击）。
+    SwitchView(ViewType),
+    /// 空闲/动画 Tick：用于推进 Logo 动画、轮询后台 DAG 任务等。
+    /// 由 Iced subscription 按 500ms 间隔发出，空闲时也可保持低频刷新。
+    Tick,
+    /// 关闭窗口请求。
+    WindowClose,
+    /// 最大化/还原窗口。
+    WindowToggleMaximize,
+    /// 最小化窗口。
+    WindowMinimize,
+    /// 用户在自定义标题栏拖拽区按下鼠标左键，请求开始窗口拖拽。
+    /// 由 `iced::widget::mouse_area` 的 on_press 触发，update 中调用
+    /// `iced::window::drag()` 交给 winit 处理。
+    WindowDrag,
+    /// boot 阶段异步获取的主窗口 Id 回填。
+    /// iced 0.14 中 `iced::window::Id` 由内部 `Id::unique()` 创建，
+    /// 用户无法直接构造，只能通过 `iced::window::oldest()` 异步查询。
+    /// boot 时返回该 Task，resolve 后通过此消息把 Id 落到 UiState。
+    SetMainWindowId(Option<WindowId>),
+    /// 画布鼠标按下：参数为鼠标相对于画布左上角的屏幕坐标（已扣除画布偏移）。
+    /// 由 `DagProgram::update` 在 `ButtonPressed(Left)` 时发布，`MyApp::update`
+    /// 据此判断是命中节点（选中 + 开始拖拽）还是命中空白（开始平移画布）。
+    CanvasPress(Vec2),
+    /// 画布鼠标释放：参数同 `CanvasPress`。
+    /// 由 `DagProgram::update` 在 `ButtonReleased(Left)` 时发布，`MyApp::update`
+    /// 据此清空 `dragging_node_id` 与 `canvas_pan_anchor`。
+    CanvasRelease(Vec2),
+    /// 画布鼠标移动：参数为鼠标相对于画布左上角的屏幕坐标。
+    /// 鼠标在画布上方时每帧移动都会发布。`MyApp::update` 据此：
+    /// - 若 `dragging_node_id` 非空：更新节点位置 = 世界坐标 - drag_offset
+    /// - 若 `canvas_pan_anchor` 非空：更新 canvas_offset = anchor_offset + (pos - anchor_pos)
+    CanvasMove(Vec2),
+    /// 画布滚轮缩放：`delta_y` 为滚轮纵向滚动量（正向上/负向下），
+    /// `pos` 为鼠标在画布内的相对坐标（缩放锚点）。
+    /// `MyApp::update` 据此调整 `canvas_zoom`，并以 `pos` 为锚点调整 `canvas_offset`
+    /// 使鼠标位置对应的世界坐标在缩放前后保持不变。
+    CanvasWheel { delta_y: f32, pos: Vec2 },
+
+    // ===== 建模列表 sidebar =====
+
+    /// 点击建模列表项：打开（或切换到已打开的）指定 id 的建模。
+    OpenModel(String),
+    /// 点击「+ 新建模」按钮：弹出新建建模对话框。
+    NewModelClick,
+    /// 新建模对话框名字输入框内容变化。
+    NewModelNameInput(String),
+    /// 新建模对话框：确认（回车 / 确认按钮）。
+    NewModelConfirm,
+    /// 新建模对话框：取消（Esc / 取消按钮 / 点击遮罩）。
+    NewModelCancel,
+    /// 点击列表项右键「重命名」（或重命名图标）：弹出重命名对话框。
+    /// 携带目标建模 id。
+    RenameModelClick(String),
+    /// 重命名对话框输入框内容变化。
+    RenameInput(String),
+    /// 重命名对话框：确认。
+    RenameConfirm,
+    /// 重命名对话框：取消。
+    RenameCancel,
+    /// 点击列表项右键「删除」（或删除图标）：弹出删除确认对话框。
+    /// 携带 (id, name)。
+    DeleteModelClick(String, String),
+    /// 删除确认对话框：确认删除。
+    DeleteModelConfirm,
+    /// 删除确认对话框：取消。
+    DeleteModelCancel,
+
+    // ===== Tab 栏 =====
+
+    /// 点击 Tab：切换到指定索引的 tab。
+    SwitchTab(usize),
+    /// 点击 Tab 关闭按钮 ×：关闭指定索引的 tab。
+    CloseTab(usize),
+
+    // ===== 工具栏 =====
+
+    /// 点击「保存」按钮：保存当前激活 tab 的 graph 到磁盘。
+    SaveTab,
+    /// 点击「执行 DAG」按钮：置 `pending_run_all=true`，由外层 Tick 轮询后 spawn。
+    /// 阶段 3 暂只记日志 + 置标志，实际 spawn 留待接入 operator_executor 后补。
+    RunAllClick,
+    /// 点击「调试」按钮：切换当前 tab 的 `debug_mode`。
+    ToggleDebug,
+    /// 点击「清空日志」按钮：清空当前激活分类的日志。
+    ClearLogs,
+
+    // ===== 日志面板 =====
+
+    /// 点击日志子标签：切换 `active_log_category`。
+    SwitchLogCategory(LogCategory),
+
+    // ===== 左侧合并面板 tab 切换 =====
+
+    /// 点击左侧面板顶部 tab：在「建模列表」与「算子面板」之间切换。
+    SwitchLeftPanel(LeftPanelTab),
+
+    // ===== 画布 / DAG 编辑交互 =====
+
+    /// 画布右键点击：`screen_pos` 是相对画布左上角的屏幕坐标。
+    /// 接收后先在 `MyApp::update` 中做命中测试：命中节点 → 打开节点右键菜单（运行到此节点/删除节点/...）；
+    /// 命中空白 → 打开画布右键菜单（加节点/重置视图）。
+    CanvasRightClick(Vec2),
+    /// 关闭当前打开的画布右键菜单（或节点右键菜单）。
+    ContextMenuClose,
+
+    /// 点击「运行到此节点」菜单项：参数为节点 id。
+    RunUpToNode(String),
+    /// 点击「删除节点」菜单项：参数为节点 id。
+    DeleteNodeClick(String),
+
+    /// 端口命中 & 连线创建的起点：(node_id, port_index, is_output=true)。
+    /// 发布时机：`CanvasPress` 先在 `DagProgram::update` 层面做端口命中测试，
+    /// 若命中输出端口则发布本消息，`MyApp::update` 据此把 `connecting_from` 写入当前 tab。
+    ConnectStart { node_id: String, port_index: usize, is_output: bool },
+    /// 连线创建过程中鼠标移动：更新临时贝塞尔线的终点。
+    /// 由 `CanvasMove` 的处理分支在 `connecting_from` 非空时直接写 `connecting_drag_world`。
+    /// （无需独立消息变体，复用 `CanvasMove` 即可。）
+    /// 连线创建过程中鼠标移动时屏幕坐标转世界坐标更新临时贝塞尔线终点。
+    /// 参数是相对画布左上角的屏幕坐标（与 CanvasMove 语义一致），在 MyApp::update
+    /// 中再次转世界坐标写入 DagTab.connecting_drag_world。
+    ConnectDrag(Vec2),
+    /// 连线创建的终点：若 release 时命中有效输入端口则创建边；否则取消。
+    /// 参数同 CanvasRelease（屏幕坐标释放位置）；在 MyApp::update 中再次用
+    /// screen_to_world + hit_test_input_port 做命中判定，若成功则 graph.add_edge。
+    ConnectRelease(Vec2),
+
+    // ===== 算子面板 =====
+
+    /// 算子面板顶部搜索框内容变化：用于过滤分类/算子卡片。
+    OperatorSearchInput(String),
+    /// 点击算子卡片（或双击）：把对应算子作为新节点添加到激活 tab 的图上。
+    /// `operator_name` 用于匹配分类树；添加位置优先取 `pending_add_operator_world`
+    /// （画布右键菜单项设置的世界坐标），否则取画布视口中心。
+    AddOperator(String),
+
+    // ===== 节点参数面板 =====
+
+    /// 参数面板中某个参数输入框内容变化。参数为 (node_id, param_name, new_value)。
+    ParamInput(String, String, String),
 }
 
 /// 自定义算子编辑器的 Debug 面板状态。
@@ -164,6 +333,19 @@ pub struct UiState {
     pub dag_editor: DagEditorState,
     pub operator_development: OperatorDevelopmentState,
     pub settings: SettingsState,
+    /// Logo 动画的累积时间（秒）。每 Tick (500ms) 推进 0.5。
+    /// 标题栏 Canvas Program 据此计算折线最末点的呼吸 / 上升动画偏移。
+    pub logo_time: f32,
+    /// 主窗口 Id。由 boot 阶段 `iced::window::oldest()` 异步查询得到，
+    /// 通过 `SetMainWindowId` 消息回填。窗口控制按钮（关闭/最大化/最小化/
+    /// 拖拽）点击后，update 中调用 `iced::window::xxx(id)` 时使用此 Id。
+    /// None 表示尚未获取到（极短暂：boot 完成后立即 resolve）。
+    pub main_window_id: Option<WindowId>,
+    /// 画布平移锚点：左键按下空白处时记录 `(按下时的鼠标屏幕坐标, 按下时的 canvas_offset)`。
+    /// 鼠标移动时据此计算 `canvas_offset = anchor_offset + (pos - anchor_pos)`。
+    /// 左键释放或切换 tab 时清空。与 `DagTab.dragging_node_id` 互斥：
+    /// 同一时刻只有一个为非空（拖节点或平移画布）。
+    pub canvas_pan_anchor: Option<(Vec2, Vec2)>,
 }
 
 impl Default for UiState {
@@ -173,6 +355,9 @@ impl Default for UiState {
             dag_editor: DagEditorState::default(),
             operator_development: OperatorDevelopmentState::default(),
             settings: SettingsState::default(),
+            logo_time: 0.0,
+            main_window_id: None,
+            canvas_pan_anchor: None,
         }
     }
 }
@@ -252,16 +437,26 @@ pub struct DagTab {
     /// 从算子面板拖拽中的算子类型; 在画布上释放时创建节点, 在画布外释放或状态失效时清空.
     pub dragging_operator: Option<OperatorType>,
     /// 上一帧画布的屏幕矩形, 供算子面板计算点击添加位置等用途 (每帧由画布刷新).
-    pub canvas_viewport_rect: Option<Rect>,
+    pub canvas_viewport_rect: Option<Rectangle<f32>>,
     pub connecting_from: Option<(String, usize, bool)>,
+    /// 连线创建拖拽中的终点（世界坐标，由 CanvasMove/ConnectDrag 更新）；
+    /// `None` 表示使用当前鼠标位置（DagProgram.draw 拿不到光标，需由主循环传入）。
+    pub connecting_drag_world: Option<Vec2>,
     pub canvas_offset: Vec2,
     pub canvas_zoom: f32,
     pub show_operator_panel: bool,
     pub error_message: Option<String>,
     pub operator_search_filter: String,
+    /// 画布右键菜单（或节点右键菜单）的屏幕坐标（相对画布左上角）。
+    /// None 表示未打开。`context_menu_node_id` 为 Some 时表示节点右键菜单，
+    /// None 时表示画布空白右键菜单。
+    pub context_menu_screen_pos: Option<Vec2>,
     /// 节点 I/O 全局注册表，集中管理所有节点的输入、输出、执行状态和缓存失效
     pub io_registry: NodeIORegistry,
     pub context_menu_node_id: Option<String>,
+    /// 画布右键菜单「添加算子」暂存的世界坐标：AddOperator 消息处理时，
+    /// 优先把新节点加到这个位置；缺失时加到画布视口中心。
+    pub pending_add_operator_world: Option<Vec2>,
     /// 当前打开「数据预览」浮动窗口的节点 ID；为 None 时窗口关闭。
     pub preview_node_id: Option<String>,
     /// 当前打开「K线图预览」浮动窗口的节点 ID；为 None 时窗口关闭。
@@ -327,13 +522,16 @@ impl DagTab {
             dragging_operator: None,
             canvas_viewport_rect: None,
             connecting_from: None,
+            connecting_drag_world: None,
             canvas_offset: Vec2::ZERO,
             canvas_zoom: 1.0,
             show_operator_panel: true,
             error_message: None,
             operator_search_filter: String::new(),
+            context_menu_screen_pos: None,
             io_registry: NodeIORegistry::new(),
             context_menu_node_id: None,
+            pending_add_operator_world: None,
             preview_node_id: None,
             kline_preview_node_id: None,
             line_chart_preview_node_id: None,
@@ -432,6 +630,9 @@ pub struct DagEditorState {
     pub models: Vec<DagModelMeta>,
     /// models 是否已从磁盘加载
     pub models_loaded: bool,
+    /// 左侧合并面板当前激活的子标签页（建模列表 / 算子面板）。
+    /// 由 [`Message::SwitchLeftPanel`] 切换；新建模后自动跳到 Operators 以便添加算子。
+    pub active_left_panel: LeftPanelTab,
     /// 新建模对话框：是否显示
     pub show_new_model_dialog: bool,
     /// 新建模对话框：名字输入框内容
@@ -460,6 +661,7 @@ impl Default for DagEditorState {
             active_tab_index: None,
             models: Vec::new(),
             models_loaded: false,
+            active_left_panel: LeftPanelTab::default(),
             show_new_model_dialog: false,
             new_model_name_input: String::new(),
             rename_target_id: None,

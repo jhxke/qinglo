@@ -12,8 +12,12 @@
 /// 图标边长（像素）
 const ICON_SIZE: u32 = 128;
 
-/// 创建应用图标（128×128 RGBA），对外接口不变
-pub fn create_app_icon() -> egui::IconData {
+/// 创建应用图标（128×128 RGBA）。
+///
+/// 从 egui 迁移到 Iced 后，返回类型由 `egui::IconData` 改为
+/// `Option<iced::window::Icon>`：内部仍按 24×24 设计坐标系栅格化 RGBA，
+/// 再交给 `iced::window::icon::from_rgba` 构造窗口图标。
+pub fn create_app_icon() -> Option<iced::window::Icon> {
     // 与 main.rs::render_logo 保持一致的 24×24 设计坐标系
     const LOGO_DESIGN_SIZE: f32 = 24.0;
     let canvas = ICON_SIZE as f32;
@@ -77,11 +81,7 @@ pub fn create_app_icon() -> egui::IconData {
         p.circle_filled(point, 2.0 * s, color);
     }
 
-    egui::IconData {
-        rgba: p.into_bytes(),
-        width: ICON_SIZE,
-        height: ICON_SIZE,
-    }
+    iced::window::icon::from_rgba(p.into_bytes(), ICON_SIZE, ICON_SIZE).ok()
 }
 
 /// RGBA 颜色线性插值（未预乘，0..1）
