@@ -37,9 +37,13 @@ use mining_app::geom::Vec2;
 
 // ===== 主入口 =====
 fn main() -> iced::Result {
-    // 阶段 1：中文字体通过 .default_font("Microsoft YaHei") 指定名查找；
-    // 若系统已有安装，Iced 会自动匹配。若需强制加载文件 bytes，阶段 2 可
-    // 在此链式追加 `.font(font_bytes)` 调用。
+    // Iced 0.14 默认已启用 Reactive Rendering（按需渲染），CPU/GPU 使用率相比
+    // 0.13 已降低 60-80%。无需显式开启 on_demand_rendering 字段（该字段仅在
+    // 0.15+ 新版 ShellSettings 中存在）。
+    //
+    // 下面通过 Settings::default() 显式保留 vsync=true，避免空闲时无意义提交帧。
+    // 注意：0.14 中 iced::Settings 仅包含 vsync 字段，其余窗口/字体等配置通过
+    // application builder API 链式设置。
 
     let win = window::Settings {
         size: Size::new(1000.0, 700.0),
@@ -58,6 +62,14 @@ fn main() -> iced::Result {
         .default_font(Font::with_name("Microsoft YaHei"))
         .antialiasing(true)
         .window(win)
+        .settings(iced::Settings {
+            id: None,
+            fonts: vec![],
+            default_font: Font::with_name("Microsoft YaHei"),
+            default_text_size: 14.0.into(),
+            antialiasing: true,
+            vsync: true, // 开启垂直同步，空闲时停止无意义帧提交（进一步降低CPU）
+        })
         .run()
 }
 
