@@ -15,6 +15,7 @@ pub mod theme;
 
 pub use state::*;
 pub use activity_bar::render_activity_bar;
+pub use dag_canvas::render_dag_canvas;
 pub use mining_analysis_view::render_mining_analysis_view;
 pub use mining_analysis_view::poll_dag_exec_task;
 pub use settings_view::render_settings_view;

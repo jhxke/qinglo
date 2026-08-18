@@ -4,13 +4,15 @@ use eframe::egui;
 use std::path::Path;
 
 use mining_app::ui::{
-    UiState, ViewType, poll_dag_exec_task, render_activity_bar, render_mining_analysis_view,
-    render_settings_view, render_status_bar, theme,
+    UiState, ViewType, poll_dag_exec_task, render_activity_bar, render_dag_canvas,
+    render_mining_analysis_view, render_settings_view, render_status_bar, theme,
 };
 
 struct MyApp {
     ui_state: UiState,
     logo_animation_time: f64,
+    /// [临时 GPU 测试] 执行 DAG 期间是否已缩小窗口（避免每帧重复发送 InnerSize 命令）
+    exec_window_shrunk: bool,
 }
 
 impl Default for MyApp {
@@ -18,6 +20,7 @@ impl Default for MyApp {
         Self {
             ui_state: UiState::default(),
             logo_animation_time: 0.0,
+            exec_window_shrunk: false,
         }
     }
 }
@@ -36,9 +39,10 @@ impl Default for MyApp {
 /// egui 后端立即唤醒 UI 线程并重绘，不受此空闲节流影响。
 fn is_ui_idle(ui_state: &UiState) -> bool {
     // 条件 1：没有正在执行的 DAG 任务
-    if ui_state.dag_editor.dag_exec_task.is_some() {
-        return false;
-    }
+    // [临时 GPU 测试] 注释执行期间强制非空闲，让 500ms 空闲降频在执行期也生效
+    // if ui_state.dag_editor.dag_exec_task.is_some() {
+    //     return false;
+    // }
     // 条件 2：任何激活 tab 都没有打开的 streaming 聊天预览
     // （chat streaming 状态每 500ms 自己会 request_repaint_after，
     //  这里只要保守判断——只要有 chat_preview 打开，就不进入深度空闲）
@@ -146,6 +150,32 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 轮询后台 DAG 执行任务（无论当前处于哪个视图都排空工作线程消息、回填结果）
         poll_dag_exec_task(ctx, &mut self.ui_state.dag_editor);
+
+        // [临时 GPU 测试] 执行 DAG 期间缩小窗口到 600x450，整个小窗口只渲染画布。
+        // GPU 渲染像素数从全屏（~2M）降到小窗口（~270K），大幅降低 GPU 占用。
+        // 工作线程仍正常运行，真实进度事件由 poll_dag_exec_task 处理。
+        if self.ui_state.dag_editor.dag_exec_task.is_some() {
+            // 执行期缩小窗口（仅触发一次：用标志位避免每帧重复发送命令）
+            if !self.exec_window_shrunk {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(600.0, 450.0)));
+                self.exec_window_shrunk = true;
+            }
+            // 小窗口内只渲染画布（无标题栏/活动栏/侧边栏等）
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(theme::PANEL_BG))
+                .show(ctx, |ui| {
+                    if let Some(tab) = self.ui_state.dag_editor.active_tab_mut() {
+                        render_dag_canvas(ui, tab);
+                    }
+                });
+            // 动效节流：50ms（20 FPS）平衡动画平滑度与 GPU 占用
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        } else if self.exec_window_shrunk {
+            // 执行结束，恢复窗口最大化
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            self.exec_window_shrunk = false;
+        }
 
         // 顶部标题栏：Logo + 应用名（左） + 窗口控制按钮（右）
         // stroke 提供与下方内容区的 1px 分隔线（顶/左/右贴窗边不可见，仅底部可见）
@@ -400,6 +430,8 @@ fn main() -> Result<(), eframe::Error> {
     let viewport = egui::ViewportBuilder::default()
         .with_title("青萝")
         .with_inner_size([1280.0, 800.0])
+        // [临时 GPU 测试] 启动即最大化，测试全屏是否是 GPU 高的根因
+        .with_maximized(true)
         // 限制窗口最小内尺寸：避免缩到太小后左侧建模/算子面板（220+240）被挤压、
         // 中央画布无可用空间。最小宽度 ≈ 活动栏48 + 建模面板220 + 算子面板240 + 画布350；
         // 最小高度保留标题栏/状态栏/Tab栏/日志面板 + 画布的合理可用区。
