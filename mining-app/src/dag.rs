@@ -1364,6 +1364,33 @@ impl NodeIORegistry {
         }
     }
 
+    /// 是否存在正在执行的节点（用于驱动 DAG 画布运行动画）。
+    pub fn has_executing(&self) -> bool {
+        self.results
+            .values()
+            .any(|r| r.status == OperatorExecutionStatus::Executing)
+    }
+
+    /// 导出所有节点的执行状态快照（节点 ID → 状态码）。
+    ///
+    /// 状态码：`0`=未执行, `1`=执行中, `2`=已完成, `3`=失败, `4`=已过期。
+    /// 供 DAG 画布渲染层在不持有 `NodeIORegistry` 引用的情况下按状态着色。
+    pub fn statuses_snapshot(&self) -> std::collections::HashMap<String, u8> {
+        fn code(s: OperatorExecutionStatus) -> u8 {
+            match s {
+                OperatorExecutionStatus::NotExecuted => 0,
+                OperatorExecutionStatus::Executing => 1,
+                OperatorExecutionStatus::Completed => 2,
+                OperatorExecutionStatus::Failed => 3,
+                OperatorExecutionStatus::Stale => 4,
+            }
+        }
+        self.results
+            .iter()
+            .map(|(id, r)| (id.clone(), code(r.status)))
+            .collect()
+    }
+
     /// 移除节点的所有记录
     pub fn remove_node(&mut self, node_id: &str) {
         self.results.remove(node_id);

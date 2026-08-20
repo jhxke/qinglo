@@ -24,6 +24,11 @@ use iced::{
     Alignment, Color, Element, Length, Padding,
 };
 
+// ===== iced_aw 组件导入 =====
+// 引入 iced_aw::TabBar / TabLabel / Card / Badge，替换部分手搓组件，提升 UI 质感。
+use iced_aw::widget::{Card, TabBar, TabLabel};
+use iced_aw::widget::badge::Badge;
+
 use super::state::{
     DagEditorState, DagExecKind, DagExecMessage, DagExecTask, DagTab,
     JsonDirection, LeftPanelTab, LogCategory, LogLevel, Message, UiState,
@@ -43,14 +48,15 @@ use operator_executor_client::protocol::OperatorExecutionStatus;
 /// 历史上建模列表为 220px、算子面板为 240px；二者合并到同一侧栏后取较大值 240px，
 /// 既保证算子卡片有足够展示空间，又让画布水平方向多出 220px。
 const LEFT_PANEL_WIDTH: f32 = 240.0;
-/// 顶部 Tab 栏 + 工具栏的高度。
-const TOP_BAR_HEIGHT: f32 = 36.0;
+/// 顶部栏高度：Tab 行 34px + 工具栏行 26px + 1px 分隔线 = 61px。
+const TOP_BAR_HEIGHT: f32 = 61.0;
 /// 底部日志面板高度。
 const LOG_PANEL_HEIGHT: f32 = 160.0;
 /// 日志面板最多渲染条数（避免千条日志拖垮渲染）。
 const LOG_RENDER_LIMIT: usize = 200;
-/// 对话框卡片宽度。
-const DIALOG_WIDTH: f32 = 320.0;
+/// 对话框基础宽度（实际对话框可能覆盖此值）。
+#[allow(dead_code)]
+const DIALOG_WIDTH: f32 = 360.0;
 
 pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
     let sidebar = view_sidebar(state);
@@ -139,64 +145,19 @@ fn view_sidebar(state: &UiState) -> Element<'_, Message> {
 
 /// 左侧面板顶部 tab 栏：[建模列表 | 算子面板]。
 ///
-/// 激活态：文字强白 + 底部 2px accent 下划线 + 稍亮底色；
-/// 非激活：弱化文字 + 透明底，hover 时弱底色。点击切换 `active_left_panel`。
+/// 用 iced_aw::TabBar 替换手搓实现，统一选中态/hover/边框样式；
+/// LeftPanelTab 已实现 Eq + Clone + Copy，满足 TabBar 对 TabId 的约束。
+/// 点击切换 `active_left_panel`。
 fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
-    let mk_tab = |label: &'static str, tab: LeftPanelTab, is_active: bool| -> Element<'static, Message> {
-        let txt_color = if is_active { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
-        let base_bg = if is_active {
-            Color::from(theme::HOVER_BG)
-        } else {
-            Color::TRANSPARENT
-        };
-        let name_btn = button(text(label).color(txt_color).size(11.0))
-            .height(Length::Fill)
-            .on_press(Message::SwitchLeftPanel(tab))
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 10.0,
-                right: 10.0,
-            })
-            .style(move |_t, status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(base_bg.into());
-                s.text_color = txt_color;
-                if !is_active && matches!(status, iced::widget::button::Status::Hovered) {
-                    s.background = Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 10.0 / 255.0 }.into());
-                    s.text_color = theme::TEXT_HOVER;
-                }
-                s
-            });
-        let tab_row = row![name_btn]
-            .align_y(Alignment::Center)
-            .height(Length::Fill);
-        if is_active {
-            let underline = container(row![])
-                .width(Length::Fill)
-                .height(Length::Fixed(2.0))
-                .style(|_t| {
-                    let mut s = iced::widget::container::Style::default();
-                    s.background = Some(Color::from(theme::ACCENT).into());
-                    s
-                });
-            column![tab_row, underline]
-                .height(Length::Fill)
-                .spacing(0)
-                .into()
-        } else {
-            tab_row.into()
-        }
-    };
-
-    let models_tab = mk_tab("建模列表", LeftPanelTab::Models, active == LeftPanelTab::Models);
-    let ops_tab = mk_tab("算子面板", LeftPanelTab::Operators, active == LeftPanelTab::Operators);
-
-    let bar = row![models_tab, ops_tab]
-        .width(Length::Fill)
+    let bar = TabBar::new(|tab: LeftPanelTab| Message::SwitchLeftPanel(tab))
+        .push(LeftPanelTab::Models, TabLabel::Text(String::from("建模列表")))
+        .push(LeftPanelTab::Operators, TabLabel::Text(String::from("算子面板")))
+        .set_active_tab(&active)
+        .style(theme::left_panel_tab_bar_style())
         .height(Length::Fixed(30.0))
-        .align_y(Alignment::Center)
-        .spacing(0);
+        .width(Length::Fill)
+        .text_size(11.0)
+        .tab_width(Length::Fill);
 
     container(bar)
         .width(Length::Fill)
@@ -209,218 +170,252 @@ fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
         .into()
 }
 
-/// 左侧面板「建模列表」子页：标题 + 列表 + 新建模按钮。
+/// 左侧面板「建模列表」子页 v2：精美卡片式列表。
 fn view_models_panel(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
-
-    // 当前激活 tab 对应的 model_id，用于在列表中高亮选中态
     let active_model_id: Option<&str> = editor
         .active_tab()
         .map(|t| t.model_id.as_str());
 
-    // 头部：左对齐标题
+    // 头部：标题 + 计数徽章（iced_aw::Badge 替换手搓容器）
+    let count_badge = Badge::<Message>::new(
+        text(format!("{}", editor.models.len()))
+            .color(theme::accent_teal())
+            .size(10.0)
+    )
+    .padding(6)
+    .style(theme::count_badge_style());
+
     let header = container(
         row![
-            text("建模列表").color(theme::TEXT_STRONG).size(12.0),
-            text(format!("({})", editor.models.len()))
-                .color(theme::TEXT_WEAK)
-                .size(10.0),
+            text("建模列表").color(theme::text_strong()).size(13.0),
+            count_badge,
         ]
-        .spacing(6)
+        .spacing(8)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(30.0))
-    .style(|_t| {
-        let mut s = iced::widget::container::Style::default();
-        s.background = Some(Color::from(theme::SIDEBAR_BG).into());
-        s
-    })
+    .height(Length::Fixed(38.0))
     .align_y(Alignment::Center)
-    .padding(Padding {
-        top: 0.0,
-        bottom: 0.0,
-        left: 12.0,
-        right: 12.0,
-    });
+    .padding(Padding { top: 0.0, bottom: 0.0, left: 14.0, right: 14.0 });
 
-    // 头部下方 1px 分隔线（iced 0.14 Border 不支持 per-side，用独立 container 实现）
     let header_divider = container(row![])
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::DIVIDER).into());
+            s.background = Some(Color::from(theme::divider()).into());
             s
         });
 
-    let mut list_col = column![].spacing(0).padding(Padding {
-        top: 4.0,
-        bottom: 4.0,
-        left: 0.0,
-        right: 0.0,
+    // 建模卡片列表
+    let mut list_col = column![].spacing(6).padding(Padding {
+        top: 8.0, bottom: 8.0, left: 10.0, right: 10.0,
     });
 
     if !editor.models_loaded {
         list_col = list_col.push(
             container(
-                text("(加载中…)").color(theme::TEXT_WEAK).size(11.0),
+                text("加载中…").color(theme::text_weak()).size(11.0),
             )
             .width(Length::Fill)
-            .padding(Padding {
-                top: 8.0,
-                bottom: 8.0,
-                left: 12.0,
-                right: 12.0,
-            }),
+            .align_x(Alignment::Center)
+            .padding(Padding { top: 16.0, bottom: 16.0, left: 0.0, right: 0.0 }),
         );
     } else if editor.models.is_empty() {
-        list_col = list_col.push(
-            container(
-                text("(空，点击「+ 新建模」)").color(theme::TEXT_WEAK).size(11.0),
-            )
-            .width(Length::Fill)
-            .padding(Padding {
-                top: 8.0,
-                bottom: 8.0,
-                left: 12.0,
-                right: 12.0,
-            }),
-        );
+        // 空状态：精美的占位卡片
+        let empty_card = container(
+            column![
+                text("◇").color(theme::accent_dim()).size(32.0),
+                text("暂无建模").color(theme::text_strong()).size(12.0),
+                text("点击下方按钮创建第一个建模").color(theme::text_weak()).size(10.0),
+            ]
+            .spacing(4)
+            .align_x(Alignment::Center)
+        )
+        .width(Length::Fill)
+        .padding(Padding { top: 24.0, bottom: 24.0, left: 12.0, right: 12.0 })
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::CARD_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = Color {
+                r: 1.0, g: 1.0, b: 1.0, a: 20.0 / 255.0
+            };
+            s
+        });
+        list_col = list_col.push(empty_card);
     } else {
         for m in &editor.models {
             let is_active = active_model_id == Some(m.id.as_str());
-            list_col = list_col.push(view_model_item(m, is_active));
+            list_col = list_col.push(view_model_card(m, is_active));
         }
     }
 
-    // + 新建模按钮：透明默认 + accent 图标 + hover 底色
-    let new_btn = button(
+    // 新建模按钮：主色胶囊
+    let inner_content = container(
         row![
-            text("+").color(theme::accent()).size(13.0),
-            text("新建模").color(theme::TEXT_HOVER).size(11.0),
+            text("＋").color(Color::WHITE).size(14.0),
+            text("新建建模").color(Color::WHITE).size(12.0),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(30.0))
-    .on_press(Message::NewModelClick)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+
+    let new_btn = button(inner_content)
+        .width(Length::Fill)
+        .height(Length::Fixed(32.0))
+        .on_press(Message::NewModelClick)
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 12.0, right: 12.0 })
     .style(|_t, status| {
         let mut s = iced::widget::button::Style::default();
-        s.background = Some(Color::TRANSPARENT.into());
-        s.text_color = theme::TEXT_HOVER;
+        s.background = Some(Color::from(theme::accent()).into());
+        s.text_color = Color::WHITE;
+        s.border.radius = 10.0.into();
         if matches!(status, iced::widget::button::Status::Hovered) {
-            s.background = Some(Color::from(theme::HOVER_BG).into());
-            s.text_color = theme::TEXT_STRONG;
+            s.background = Some(Color::from(theme::accent_bright()).into());
+        } else if matches!(status, iced::widget::button::Status::Pressed) {
+            s.background = Some(Color::from(theme::accent_dark()).into());
         }
         s
-    })
-    .padding(Padding {
-        top: 0.0,
-        bottom: 0.0,
-        left: 12.0,
-        right: 12.0,
     });
 
     let body_scroll = scrollable(list_col)
         .width(Length::Fill)
         .height(Length::Fill);
 
-    let body = column![header, header_divider, body_scroll, new_btn]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .spacing(0);
+    let body = column![
+        header,
+        header_divider,
+        body_scroll,
+        container(new_btn)
+            .width(Length::Fill)
+            .padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, right: 10.0 }),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .spacing(0);
 
-    container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    container(body).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// 单个建模列表项：[名称(点击打开) | ✎重命名 | ✕删除]。
-///
-/// `is_active` 为 true 时（该 model 是当前激活 tab 的来源）显示左侧 accent 竖条 +
-/// 更亮的文字与底色，与 VS Code 资源管理器选中态一致。
-fn view_model_item(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, Message> {
-    // 主名称按钮：占满剩余宽度，hover 时底色高亮
-    let name_color = if is_active { theme::TEXT_STRONG } else { theme::TEXT_HOVER };
-    let base_bg = if is_active {
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 8.0 / 255.0 }
+/// 建模卡片 v2：图标块 + 名称时间 + 操作按钮，卡片式设计。
+fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, Message> {
+    let name_color = if is_active { Color::WHITE } else { theme::text_strong() };
+
+    // 左侧图标块：根据激活态改变颜色
+    let icon_color = if is_active { Color::WHITE } else { theme::accent() };
+    let icon_bg = if is_active {
+        Color::from(theme::accent())
     } else {
-        Color::TRANSPARENT
+        Color {
+            r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 15.0/255.0
+        }
     };
-    let name_btn = button(
-        column![
-            text(m.name.clone()).color(name_color).size(11.0),
-            text(dag_store::format_timestamp(m.updated_at))
-                .color(theme::TEXT_WEAK)
-                .size(9.0),
-        ]
-        .spacing(1),
+    let icon_block = container(
+        text("◆").color(icon_color).size(15.0)
+    )
+    .width(Length::Fixed(34.0))
+    .height(Length::Fixed(34.0))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(move |_t| {
+        let mut s = iced::widget::container::Style::default();
+        s.background = Some(icon_bg.into());
+        s.border.radius = 9.0.into();
+        s
+    });
+
+    // 名称 + 时间
+    let info_col = column![
+        text(m.name.clone()).color(name_color).size(12.0),
+        text(dag_store::format_timestamp(m.updated_at))
+            .color(if is_active { Color { r:1.0,g:1.0,b:1.0,a:0.7 } } else { theme::text_weak() })
+            .size(9.5),
+    ]
+    .spacing(2)
+    .width(Length::Fill);
+
+    // 操作按钮（仅非激活态时弱化显示，激活态更明显）
+    let rename_btn = card_icon_button("✎", Message::RenameModelClick(m.id.clone()), is_active);
+    let delete_btn = card_icon_button(
+        "✕",
+        Message::DeleteModelClick(m.id.clone(), m.name.clone()),
+        is_active,
+    );
+    let actions = row![rename_btn, delete_btn].spacing(2);
+
+    let mid = button(
+        row![icon_block, info_col, actions]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(44.0))
     .on_press(Message::OpenModel(m.id.clone()))
-    .padding(Padding {
-        top: 0.0,
-        bottom: 0.0,
-        left: 10.0,
-        right: 4.0,
-    })
+    .padding(Padding { top: 9.0, bottom: 9.0, left: 10.0, right: 8.0 })
     .style(move |_t, status| {
         let mut s = iced::widget::button::Style::default();
-        s.background = Some(base_bg.into());
-        s.text_color = name_color;
-        if matches!(status, iced::widget::button::Status::Hovered) {
-            s.background = Some(Color::from(theme::HOVER_BG).into());
-            s.text_color = theme::TEXT_STRONG;
+        s.border.radius = theme::CARD_ROUNDING.into();
+        s.border.width = 1.0;
+        if is_active {
+            // 激活态：靛蓝渐变 + 边框发光
+            s.background = Some(Color {
+                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 95.0/255.0
+            }.into());
+            s.border.color = Color::from(theme::accent_bright());
+            s.text_color = Color::WHITE;
+        } else {
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.color = theme::card_stroke();
+            s.text_color = theme::text_strong();
+            if matches!(status, iced::widget::button::Status::Hovered) {
+                s.background = Some(Color::from(theme::card_hover_bg()).into());
+                s.border.color = theme::accent_dim();
+            }
         }
         s
     });
 
-    let rename_btn = icon_button("✎", Message::RenameModelClick(m.id.clone()));
-    let delete_btn = icon_button(
-        "✕",
-        Message::DeleteModelClick(m.id.clone(), m.name.clone()),
-    );
-
-    // 右侧操作图标列：仅在 hover 时通过各自 button style 显示底色
-    let actions = row![rename_btn, delete_btn]
-        .spacing(0)
-        .height(Length::Fill);
-
-    // 左侧 accent 竖条（仅激活态绘制）
-    let bar_w = if is_active { 2.0 } else { 0.0 };
-    let accent_bar = container(text("").size(1.0))
-        .width(Length::Fixed(bar_w))
-        .height(Length::Fill)
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::ACCENT).into());
-            s
-        });
-
-    row![accent_bar, name_btn, actions]
-        .width(Length::Fill)
-        .height(Length::Fixed(44.0))
-        .spacing(0)
-        .align_y(Alignment::Center)
-        .into()
+    mid.into()
 }
 
-/// 小图标按钮（重命名 / 删除等），无背景，悬停高亮。
-fn icon_button(label: &'static str, msg: Message) -> Element<'static, Message> {
-    button(text(label).color(theme::TEXT_WEAK).size(11.0))
-        .width(Length::Fixed(24.0))
-        .height(Length::Fill)
-        .style(|_t, status| {
+/// 卡片上的小图标按钮（激活态自适应对比度）
+fn card_icon_button(label: &'static str, msg: Message, is_active: bool) -> Element<'static, Message> {
+    let normal_color = if is_active {
+        Color { r: 1.0, g: 1.0, b: 1.0, a: 220.0 / 255.0 }
+    } else {
+        theme::text_weak()
+    };
+    let hover_color = if is_active {
+        Color::WHITE
+    } else {
+        theme::text_strong()
+    };
+    let icon_widget = container(
+        text(label).color(normal_color).size(12.0)
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+    button(icon_widget)
+        .width(Length::Fixed(26.0))
+        .height(Length::Fixed(26.0))
+        .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
             s.background = Some(Color::TRANSPARENT.into());
-            s.text_color = theme::TEXT_WEAK;
+            s.text_color = normal_color;
+            s.border.radius = 6.0.into();
             if matches!(status, iced::widget::button::Status::Hovered) {
-                s.background = Some(Color::from(theme::HOVER_BG).into());
-                s.text_color = theme::TEXT_STRONG;
+                let hover_alpha = if is_active { 30.0 } else { 18.0 };
+                s.background = Some(Color { r:1.0,g:1.0,b:1.0, a: hover_alpha / 255.0 }.into());
+                s.text_color = hover_color;
             }
             s
         })
@@ -445,175 +440,159 @@ fn view_main_area(state: &UiState) -> Element<'_, Message> {
         .into()
 }
 
-// ===== 顶部 Tab 栏 + 工具栏 =====
+// ===== 顶部 Tab 栏 + 工具栏 v3 =====
 
+/// 顶部栏：Tab 卡片列表在上一行（34px），工具栏在下一行（28px），合计 60px。
+///
+/// 设计思路：
+/// - 历史上 Tab 与 4 个工具按钮挤在 36px 高的同一行，7+ tab 时必然溢出
+/// - 新版拆为两行：上方 Tab 行 34px + 下方工具栏行 28px = 60px 总高
+/// - 工具栏只保留"保存 / 执行 DAG"两个核心操作，视觉干净
+/// - 调试切换 / 清日志 迁移到底部日志面板的标题栏
+/// - Tab 行使用 iced_aw::TabBar 替换手搓 button+close 组合，
+///   自动渲染关闭图标，TabId = usize（即 tab 索引）
 fn view_top_bar(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
 
-    // 左侧：Tab 列表
-    let mut tabs_row = row![].spacing(2).align_y(Alignment::Center);
-    if editor.tabs.is_empty() {
-        tabs_row = tabs_row.push(
-            text("(未打开 DAG)").color(theme::TEXT_WEAK).size(11.0),
-        );
-    } else {
-        for (i, tab) in editor.tabs.iter().enumerate() {
-            let is_active = editor.active_tab_index == Some(i);
-            tabs_row = tabs_row.push(view_tab_item(i, tab.name.clone(), is_active, tab.dirty));
-        }
+    // Tab 卡片列表（独占第一行，使用 iced_aw::TabBar）
+    let mut tabs_bar = TabBar::new(|i: usize| Message::SwitchTab(i))
+        .on_close(|i: usize| Message::CloseTab(i))
+        .style(theme::top_tab_bar_style())
+        .height(Length::Fixed(34.0))
+        .width(Length::Fill)
+        .text_size(11.0)
+        .tab_width(Length::Shrink)
+        .spacing(4.0);
+
+    for (i, tab) in editor.tabs.iter().enumerate() {
+        let label = if tab.dirty {
+            format!("{} •", tab.name)
+        } else {
+            tab.name.clone()
+        };
+        tabs_bar = tabs_bar.push(i, TabLabel::Text(label));
+    }
+    if let Some(active_idx) = editor.active_tab_index {
+        tabs_bar = tabs_bar.set_active_tab(&active_idx);
     }
 
-    // 右侧：工具栏按钮
-    let debug_label = match editor.active_tab().map(|t| t.debug_mode) {
-        Some(true) => "调试●",
-        _ => "调试○",
+    // 空状态：未打开建模时显示占位文本
+    let tabs_row: Element<'_, Message> = if editor.tabs.is_empty() {
+        container(text("未打开建模").color(theme::text_weak()).size(11.0))
+            .padding(Padding { top: 0.0, bottom: 0.0, left: 14.0, right: 0.0 })
+            .width(Length::Fill)
+            .height(Length::Fixed(34.0))
+            .align_y(Alignment::Center)
+            .into()
+    } else {
+        container(tabs_bar)
+            .width(Length::Fill)
+            .height(Length::Fixed(34.0))
+            .padding(Padding { top: 2.0, bottom: 0.0, left: 10.0, right: 10.0 })
+            .align_y(Alignment::Center)
+            .into()
     };
+
+    // 工具栏：只保留核心操作（保存 + 执行 DAG）
     let tools = row![
-        tool_button("保存", Message::SaveTab, false),
-        tool_button("执行 DAG", Message::RunAllClick, true),
-        tool_button(debug_label, Message::ToggleDebug, false),
-        tool_button("清空日志", Message::ClearLogs, false),
+        tool_button("⌁ 保存", Message::SaveTab, false),
+        tool_button("▶ 执行 DAG", Message::RunAllClick, true),
     ]
-    .spacing(4)
+    .spacing(6)
     .align_y(Alignment::Center);
 
-    let bar = row![
-        tabs_row.width(Length::Fill),
-        tools,
+    let bar = column![
+        tabs_row,
+        container(tools)
+            .width(Length::Fill)
+            .height(Length::Fixed(26.0))
+            .padding(Padding { top: 0.0, bottom: 0.0, left: 10.0, right: 10.0 })
+            .align_y(Alignment::Center),
     ]
     .width(Length::Fill)
     .height(Length::Fixed(TOP_BAR_HEIGHT))
-    .padding(Padding {
-        top: 0.0,
-        bottom: 0.0,
-        left: 8.0,
-        right: 8.0,
-    })
-    .align_y(Alignment::Center)
-    .spacing(8);
+    .spacing(0);
 
-    container(bar)
+    let bottom_divider = container(row![])
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::divider()).into());
+            s
+        });
+
+    let inner = column![bar, bottom_divider]
+        .width(Length::Fill)
+        .height(Length::Fixed(TOP_BAR_HEIGHT))
+        .spacing(0);
+
+    container(inner)
         .width(Length::Fill)
         .height(Length::Fixed(TOP_BAR_HEIGHT))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::PANEL_BG).into());
+            s.background = Some(Color::from(theme::panel_bg()).into());
             s
         })
         .into()
 }
 
-/// 单个 Tab：[名称(点击切换) | ×关闭]。dirty 时名称后加 •。
-///
-/// 激活态：文字强白 + 底部 2px accent 下划线 + 稍亮底色；
-/// 非激活：弱化文字 + 透明底，hover 时弱底色。
-fn view_tab_item(i: usize, name: String, is_active: bool, dirty: bool) -> Element<'static, Message> {
-    let txt_color = if is_active { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
-    let base_bg = if is_active {
-        Color::from(theme::HOVER_BG)
-    } else {
-        Color::TRANSPARENT
-    };
-
-    let label = if dirty {
-        format!("{} •", name)
-    } else {
-        name
-    };
-
-    let name_btn = button(text(label).color(txt_color).size(11.0))
-        .height(Length::Fill)
-        .on_press(Message::SwitchTab(i))
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 10.0,
-            right: 4.0,
-        })
-        .style(move |_t, status| {
-            let mut s = iced::widget::button::Style::default();
-            s.background = Some(base_bg.into());
-            s.text_color = txt_color;
-            if !is_active && matches!(status, iced::widget::button::Status::Hovered) {
-                s.background = Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 10.0 / 255.0 }.into());
-                s.text_color = theme::TEXT_HOVER;
-            }
-            s
-        });
-
-    let close_btn = button(text("✕").color(theme::TEXT_WEAK).size(10.0))
-        .height(Length::Fill)
-        .on_press(Message::CloseTab(i))
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 4.0,
-            right: 8.0,
-        })
-        .style(|_t, status| {
-            let mut s = iced::widget::button::Style::default();
-            s.background = Some(Color::TRANSPARENT.into());
-            s.text_color = theme::TEXT_WEAK;
-            if matches!(status, iced::widget::button::Status::Hovered) {
-                s.background = Some(Color::from(theme::danger()).into());
-                s.text_color = Color::WHITE;
-            }
-            s
-        });
-
-    let tab_row = row![name_btn, close_btn]
-        .spacing(0)
-        .align_y(Alignment::Center)
-        .height(Length::Fill);
-
-    // 激活态：底部加 2px accent 下划线（column Shrink 跟随 tab 内容宽度）
-    if is_active {
-        let underline = container(row![])
-            .width(Length::Fill)
-            .height(Length::Fixed(2.0))
-            .style(|_t| {
-                let mut s = iced::widget::container::Style::default();
-                s.background = Some(Color::from(theme::ACCENT).into());
-                s
-            });
-        column![tab_row, underline]
-            .height(Length::Fill)
-            .spacing(0)
-            .into()
-    } else {
-        tab_row.into()
-    }
-}
-
-/// 工具栏按钮：`primary=true` 时用 accent 实色背景（主操作），否则透明 + hover 底色。
+/// 工具栏按钮 v3：更精致胶囊样式，主按钮带渐变高光 + 微阴影感。
 fn tool_button(label: &str, msg: Message, primary: bool) -> Element<'_, Message> {
-    let txt_color = if primary { Color::WHITE } else { theme::TEXT_HOVER };
-    button(text(label).color(txt_color).size(11.0))
-        .height(Length::Fixed(24.0))
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 10.0,
-            right: 10.0,
-        })
+    let txt_color = if primary { Color::WHITE } else { theme::text_hover() };
+    let label_widget = container(
+        text(label).color(txt_color).size(11.0)
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+    button(label_widget)
+        .height(Length::Fixed(30.0))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 16.0, right: 16.0 })
         .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
+            s.border.radius = 9.0.into();
             if primary {
+                // 主按钮：靛蓝主色 + 亮边框高光 + 极细外描边（微阴影错觉）
                 s.background = Some(Color::from(theme::accent()).into());
                 s.text_color = Color::WHITE;
-                s.border.radius = theme::WIDGET_ROUNDING.into();
-                if matches!(status, iced::widget::button::Status::Hovered) {
-                    // 主按钮 hover：稍亮（混入白色）
-                    s.background = Some(
-                        Color::from_rgba(0.27, 0.62, 0.98, 1.0).into(),
-                    );
+                s.border.width = 1.0;
+                s.border.color = Color {
+                    r: 165.0/255.0, g: 180.0/255.0, b: 252.0/255.0, a: 1.0
+                };
+                match status {
+                    iced::widget::button::Status::Hovered => {
+                        s.background = Some(Color::from(theme::accent_bright()).into());
+                        s.border.color = Color {
+                            r: 199.0/255.0, g: 210.0/255.0, b: 254.0/255.0, a: 1.0
+                        };
+                    }
+                    iced::widget::button::Status::Pressed => {
+                        s.background = Some(Color::from(theme::accent_dark()).into());
+                        s.border.color = Color::from(theme::accent());
+                    }
+                    _ => {}
                 }
             } else {
-                s.background = Some(Color::TRANSPARENT.into());
-                s.text_color = theme::TEXT_HOVER;
-                if matches!(status, iced::widget::button::Status::Hovered) {
-                    s.background = Some(Color::from(theme::HOVER_BG).into());
-                    s.text_color = theme::TEXT_STRONG;
+                // 次按钮：卡片底色 + 细边框，hover 提亮背景 + 文字
+                s.background = Some(Color::from(theme::card_bg()).into());
+                s.text_color = theme::text_hover();
+                s.border.width = 1.0;
+                s.border.color = theme::card_stroke();
+                match status {
+                    iced::widget::button::Status::Hovered => {
+                        s.background = Some(Color::from(theme::hover_bg()).into());
+                        s.text_color = theme::text_strong();
+                        s.border.color = Color {
+                            r: 1.0, g: 1.0, b: 1.0, a: 45.0/255.0
+                        };
+                    }
+                    iced::widget::button::Status::Pressed => {
+                        s.background = Some(Color::from(theme::pressed_bg()).into());
+                    }
+                    _ => {}
                 }
             }
             s
@@ -622,22 +601,126 @@ fn tool_button(label: &str, msg: Message, primary: bool) -> Element<'_, Message>
         .into()
 }
 
-// ===== 中间：DAG 画布（占满主区剩余空间） =====
+// ===== 中间：DAG 画布（占满主区剩余空间），未打开建模时显示引导卡片 =====
 
 fn view_middle(state: &UiState) -> Element<'_, Message> {
-    let canvas = super::dag_canvas::view_dag_canvas(state);
+    let has_tabs = state.dag_editor.active_tab().is_some();
 
-    container(canvas)
+    if !has_tabs {
+        // 未打开建模：精美的引导占位 + 快捷操作提示
+        let guide_card = container(
+            column![
+                // 大图标：蓝紫渐变发光装饰
+                container(
+                    text("◇").color(Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
+                    }).size(54.0)
+                )
+                .width(Length::Fixed(88.0))
+                .height(Length::Fixed(88.0))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .style(|_t| {
+                    let mut s = iced::widget::container::Style::default();
+                    s.background = Some(Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 10.0/255.0
+                    }.into());
+                    s.border.radius = 24.0.into();
+                    s.border.width = 1.0;
+                    s.border.color = Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 35.0/255.0
+                    };
+                    s
+                }),
+                // 主标题
+                text("开启你的量化建模之旅").color(theme::text_strong()).size(18.0),
+                // 副标题
+                text("选择左侧建模列表，或创建一个新的建模开始工作")
+                    .color(theme::text_weak()).size(12.0),
+                // 快捷操作：3 步提示
+                container(
+                    column![
+                        row![
+                            badge_num("1", theme::accent()),
+                            text("在「建模列表」点击「+ 新建建模」")
+                                .color(theme::text_hover()).size(11.5),
+                        ].spacing(12).align_y(Alignment::Center),
+                        row![
+                            badge_num("2", theme::accent_teal()),
+                            text("从「算子面板」拖拽算子到画布构建工作流")
+                                .color(theme::text_hover()).size(11.5),
+                        ].spacing(12).align_y(Alignment::Center),
+                        row![
+                            badge_num("3", theme::success()),
+                            text("点击顶部「执行 DAG」一键运行全流程")
+                                .color(theme::text_hover()).size(11.5),
+                        ].spacing(12).align_y(Alignment::Center),
+                    ]
+                    .spacing(12)
+                    .align_x(Alignment::Start)
+                )
+                .width(Length::Shrink)
+                .padding(Padding { top: 20.0, bottom: 0.0, left: 0.0, right: 0.0 }),
+            ]
+            .spacing(14)
+            .align_x(Alignment::Center)
+        )
+        .padding(Padding { top: 28.0, bottom: 28.0, left: 40.0, right: 40.0 })
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 24.0/255.0, g: 30.0/255.0, b: 48.0/255.0, a: 180.0/255.0
+            }.into());
+            s.border.radius = 20.0.into();
+            s.border.width = 1.0;
+            s.border.color = Color {
+                r: 1.0, g: 1.0, b: 1.0, a: 28.0/255.0
+            };
+            s
+        });
+
+        let canvas_bg = super::dag_canvas::view_dag_canvas(state);
+
+        // 在画布背景之上叠加引导层
+        let stacked = iced::widget::Stack::with_children(vec![
+            canvas_bg,
+            container(guide_card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into(),
+        ])
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fill);
+
+        stacked.into()
+    } else {
+        let canvas = super::dag_canvas::view_dag_canvas(state);
+        container(canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+/// 步骤编号徽章：圆形 + 语义色背景 + 白色数字
+fn badge_num(n: &'static str, bg_color: Color) -> Element<'static, Message> {
+    container(text(n).color(Color::WHITE).size(11.0))
+        .width(Length::Fixed(22.0))
+        .height(Length::Fixed(22.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(bg_color.into());
+            s.border.radius = 11.0.into();
+            s
+        })
         .into()
 }
 
-/// 左侧面板「算子面板」子页：上方算子列表 + 下方选中节点参数。
-///
-/// 顶部高度固定 30px 标题，上部 ~60% 为算子目录（分类树 + 搜索 + 卡片点击添加），
-/// 下部 ~40% 为节点参数编辑面板（未选中节点时展示占位提示）。
-/// 中间 1px 分隔条区分两区域。外层宽度由父级 [`view_sidebar`] 约束为 `LEFT_PANEL_WIDTH`。
+/// 左侧面板「算子面板」子页 v2：上方算子目录 + 下方节点参数。
 fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
     let search_value = editor
@@ -645,78 +728,69 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
         .map(|t| t.operator_search_filter.clone())
         .unwrap_or_default();
 
-    // 标题栏：左对齐 + 底部细分隔线
-    let header = container(text("算子面板").color(theme::TEXT_STRONG).size(12.0))
-        .width(Length::Fill)
-        .height(Length::Fixed(30.0))
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::sidebar_bg()).into());
-            s
-        })
-        .align_y(Alignment::Center)
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 12.0,
-            right: 12.0,
-        });
+    // 标题栏
+    let header = container(
+        row![
+            text("算子面板").color(theme::text_strong()).size(13.0),
+            text("点击添加节点").color(theme::text_weak()).size(9.5),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(38.0))
+    .align_y(Alignment::Center)
+    .padding(Padding { top: 0.0, bottom: 0.0, left: 14.0, right: 14.0 });
 
     let header_divider = container(row![])
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::DIVIDER).into());
+            s.background = Some(Color::from(theme::divider()).into());
             s
         });
 
-    // 搜索框：用 card_bg 容器包裹，让输入框有"卡片感"
-    let search = text_input("搜索算子名…", &search_value)
+    // 搜索框 v2
+    let search = text_input("搜索算子…", &search_value)
         .on_input(Message::OperatorSearchInput)
         .width(Length::Fill)
         .size(11.0)
-        .padding(Padding {
-            top: 5.0,
-            bottom: 5.0,
-            left: 8.0,
-            right: 8.0,
-        });
-    let search = container(search)
+        .padding(Padding { top: 7.0, bottom: 7.0, left: 10.0, right: 10.0 });
+    let search_wrap = container(
+        row![
+            text("⌕").color(theme::text_weak()).size(12.0),
+            search,
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+    )
+    .width(Length::Fill)
+    .padding(Padding { top: 0.0, bottom: 0.0, left: 8.0, right: 8.0 })
+    .style(|_t| {
+        let mut s = iced::widget::container::Style::default();
+        s.background = Some(Color::from(theme::card_bg()).into());
+        s.border.color = theme::card_stroke();
+        s.border.width = 1.0;
+        s.border.radius = theme::WIDGET_ROUNDING.into();
+        s
+    });
+    let search_container = container(search_wrap)
         .width(Length::Fill)
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::card_bg()).into());
-            s.border.color = theme::card_stroke();
-            s.border.width = 1.0;
-            s.border.radius = theme::WIDGET_ROUNDING.into();
-            s
-        });
-    let search_wrap = container(search)
-        .width(Length::Fill)
-        .padding(Padding {
-            top: 6.0,
-            bottom: 6.0,
-            left: 8.0,
-            right: 8.0,
-        });
+        .padding(Padding { top: 8.0, bottom: 6.0, left: 10.0, right: 10.0 });
 
     // 算子目录递归渲染
     let categories = crate::dag::get_operator_categories();
     let filter = search_value.trim().to_lowercase();
-    let mut op_col = column![].spacing(3).padding(Padding {
-        top: 2.0,
-        bottom: 6.0,
-        left: 6.0,
-        right: 6.0,
+    let mut op_col = column![].spacing(5).padding(Padding {
+        top: 2.0, bottom: 8.0, left: 8.0, right: 8.0,
     });
     render_operator_categories(&categories, &filter, 0, &mut op_col);
     let op_scroll = scrollable(op_col)
         .width(Length::Fill)
         .height(Length::Fill);
 
-    // 算子面板（搜索+分类树）用 FillPortion 占相对比重，参数面板另取一份
-    let op_col_top = column![search_wrap, op_scroll]
+    let op_col_top = column![search_container, op_scroll]
         .width(Length::Fill)
         .height(Length::FillPortion(3))
         .spacing(0);
@@ -731,14 +805,27 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
             s
         });
 
-    // 节点参数面板
+    // 节点参数面板标题
+    let params_header = container(
+        row![
+            text("节点参数").color(theme::text_strong()).size(12.0),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding(Padding { top: 6.0, bottom: 2.0, left: 12.0, right: 12.0 });
+
     let params_body = if let Some(tab) = editor.active_tab() {
         view_params_body(tab)
     } else {
         container(
-            text("(未打开建模)")
-                .color(theme::text_weak())
-                .size(11.0),
+            column![
+                text("◇").color(theme::accent_dim()).size(26.0),
+                text("未打开建模").color(theme::text_weak()).size(10.5),
+            ]
+            .spacing(4)
+            .align_x(Alignment::Center)
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -747,25 +834,17 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
         .into()
     };
 
-    let params = container(params_body)
+    let params = container(column![params_header, params_body].spacing(0))
         .width(Length::Fill)
         .height(Length::FillPortion(2))
-        .padding(Padding {
-            top: 6.0,
-            bottom: 6.0,
-            left: 8.0,
-            right: 8.0,
-        });
+        .padding(Padding { top: 0.0, bottom: 8.0, left: 2.0, right: 2.0 });
 
     let col = column![header, header_divider, op_col_top, divider, params]
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(0);
 
-    container(col)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    container(col).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// 递归渲染算子分类树（分类名 + 子分类 + 算子卡片）。
@@ -850,61 +929,51 @@ fn render_operator_categories(
             let desc_owned = op_desc.clone();
             let op_name_for_msg = op_name.clone();
 
-            // 卡片内容：左色条 + 算子名 + 描述（用 button 才能拿到 Hovered 状态）
+            // 色点（小圆点，替代色条更精致）
+            let dot = container(text("").size(1.0))
+                .width(Length::Fixed(8.0))
+                .height(Length::Fixed(8.0))
+                .style(move |_t| {
+                    let mut s = iced::widget::container::Style::default();
+                    s.background = Some(color.into());
+                    s.border.radius = theme::PILL_ROUNDING.into();
+                    s
+                });
+
             let card_btn = button(
                 row![
-                    // 左色条（3px 宽，全高填色）
-                    container(text("").size(1.0))
-                        .width(Length::Fixed(3.0))
-                        .height(Length::Fill)
-                        .style(move |_t| {
-                            let mut s = iced::widget::container::Style::default();
-                            s.background = Some(color.into());
-                            s
-                        }),
+                    dot,
                     column![
-                        text(name_owned)
-                            .color(theme::text_strong())
-                            .size(11.0),
-                        text(desc_owned)
-                            .color(theme::text_weak())
-                            .size(9.0),
+                        text(name_owned).color(theme::text_strong()).size(11.0),
+                        text(desc_owned).color(theme::text_weak()).size(9.0),
                     ]
                     .spacing(1)
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
                 ]
                 .align_y(Alignment::Center)
+                .spacing(8)
                 .width(Length::Fill),
             )
             .width(Length::Fill)
             .on_press(Message::AddOperator(op_name_for_msg))
-            .padding(Padding {
-                top: 6.0,
-                bottom: 6.0,
-                left: 0.0,
-                right: 6.0,
-            })
+            .padding(Padding { top: 8.0, bottom: 8.0, left: 10.0, right: 10.0 })
             .style(move |_t, status| {
                 let mut s = iced::widget::button::Style::default();
                 s.background = Some(Color::from(theme::card_bg()).into());
                 s.border.color = theme::card_stroke();
                 s.border.width = 1.0;
-                s.border.radius = theme::WIDGET_ROUNDING.into();
+                s.border.radius = 9.0.into();
                 s.text_color = theme::text_strong();
                 if matches!(status, iced::widget::button::Status::Hovered) {
-                    // hover：底色变亮 + 边框变 accent 弱化色
-                    s.background = Some(Color::from(theme::hover_bg()).into());
+                    s.background = Some(Color::from(theme::card_hover_bg()).into());
                     s.border.color = theme::accent_dim();
                 }
                 s
             });
 
-            // 外层 indent 容器
             let card = container(card_btn).padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: indent,
-                right: 0.0,
+                top: 0.0, bottom: 0.0, left: indent, right: 0.0,
             });
             *col = std::mem::replace(col, col_elem![]).push(card);
         }
@@ -1136,63 +1205,67 @@ fn view_context_menu_if_any(state: &UiState) -> Option<Element<'_, Message>> {
     Some(stacked.into())
 }
 
-// ===== 底部：日志面板 =====
+// ===== 底部：日志面板 v3 =====
 
+/// 底部日志面板：标题栏左为"运行日志"标题 + 日志分类胶囊 Tab，右侧为调试开关与清日志按钮。
+///
+/// v3 调整：将原先位于顶部工具栏的「调试切换」与「清日志」两个低频操作迁移到此处，
+/// 顶部工具栏因此只保留「保存 / 执行 DAG」两个核心操作，避免主操作区过度拥挤。
 fn view_log_panel(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
     let active = editor.active_tab();
 
-    // 子标签栏：提醒 / 算子运行 / 通信报文
-    let cat_btn = |label: &str, cat: LogCategory, current: LogCategory| -> Element<'static, Message> {
-        let is_active = cat == current;
-        let txt_color = if is_active { theme::TEXT_STRONG } else { theme::TEXT_WEAK };
-        let bg = if is_active { theme::HOVER_BG } else { theme::PANEL_BG };
-        button(text(label.to_string()).color(txt_color).size(11.0))
-            .height(Length::Fixed(22.0))
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 8.0,
-                right: 8.0,
-            })
-            .on_press(Message::SwitchLogCategory(cat))
-            .style(move |_t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(bg).into());
-                s.text_color = txt_color;
-                s
-            })
-            .into()
-    };
-
-    let current_cat = active.map(|t| t.active_log_category).unwrap_or_default();
-    let tabs = row![
-        cat_btn("提醒", LogCategory::Action, current_cat),
-        cat_btn("算子运行", LogCategory::Runtime, current_cat),
-        cat_btn("通信报文", LogCategory::Json, current_cat),
-    ]
-    .spacing(2)
-    .align_y(Alignment::Center);
-
-    let header = container(tabs)
+    // 顶部细分隔条
+    let top_divider = container(row![])
         .width(Length::Fill)
-        .height(Length::Fixed(24.0))
+        .height(Length::Fixed(1.0))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::STATUS_BAR_BG).into());
+            s.background = Some(Color::from(theme::divider()).into());
             s
-        })
-        .align_y(Alignment::Center)
-        .padding(Padding {
-            top: 0.0,
-            bottom: 0.0,
-            left: 8.0,
-            right: 0.0,
         });
 
-    // 日志正文（按当前分类渲染，限制最多 LOG_RENDER_LIMIT 条）
+    // 子标签栏：用 iced_aw::TabBar 替换手搓胶囊 button，
+    // 胶囊圆角通过 log_tab_bar_style 的 tab_border_radius = PILL_ROUNDING 实现。
+    let current_cat = active.map(|t| t.active_log_category).unwrap_or_default();
+    let tabs_bar = TabBar::new(|c: LogCategory| Message::SwitchLogCategory(c))
+        .push(LogCategory::Action, TabLabel::Text(String::from("提醒")))
+        .push(LogCategory::Runtime, TabLabel::Text(String::from("算子运行")))
+        .push(LogCategory::Json, TabLabel::Text(String::from("通信报文")))
+        .set_active_tab(&current_cat)
+        .style(theme::log_tab_bar_style())
+        .height(Length::Fixed(24.0))
+        .text_size(10.5)
+        .tab_width(Length::Shrink)
+        .spacing(4.0);
+
+    // 右侧操作组：调试切换 + 清日志
+    let debug_label = match active.map(|t| t.debug_mode) {
+        Some(true) => "⏵ 调试",
+        _ => "○ 调试",
+    };
+    let actions = row![
+        tool_button(debug_label, Message::ToggleDebug, false),
+        tool_button("⌫ 清日志", Message::ClearLogs, false),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let title = container(text("运行日志").color(theme::text_strong()).size(12.0))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 2.0, right: 0.0 });
+
+    let header_inner = row![
+        title,
+        tabs_bar,
+        row![].width(Length::Fill),
+        actions,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .padding(Padding { top: 8.0, bottom: 6.0, left: 12.0, right: 12.0 });
+
     let body: Element<'_, Message> = match active {
-        None => text("(未打开 tab)").color(theme::TEXT_WEAK).size(11.0).into(),
+        None => text("未打开建模").color(theme::text_weak()).size(11.0).into(),
         Some(tab) => match current_cat {
             LogCategory::Action => view_run_logs(&tab.action_logs),
             LogCategory::Runtime => view_run_logs(&tab.runtime_logs),
@@ -1200,11 +1273,16 @@ fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         },
     };
 
-    let body_scroll = scrollable(body)
+    let body_wrap = container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(Padding { top: 2.0, bottom: 6.0, left: 0.0, right: 0.0 });
+
+    let body_scroll = scrollable(body_wrap)
         .width(Length::Fill)
         .height(Length::Fill);
 
-    let col = column![header, body_scroll]
+    let col = column![top_divider, header_inner, body_scroll]
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(0);
@@ -1214,7 +1292,7 @@ fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         .height(Length::Fixed(LOG_PANEL_HEIGHT))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::PANEL_BG).into());
+            s.background = Some(Color::from(theme::panel_bg()).into());
             s
         })
         .into()
@@ -1284,87 +1362,120 @@ fn view_json_logs(logs: &[super::state::JsonLogEntry]) -> Element<'_, Message> {
     col.into()
 }
 
-// ===== 对话框叠加层 =====
-//
-// 通用结构：半透明黑色遮罩（mouse_area 点击=取消）+ 居中卡片
-// （container.align_x/y=Center，CARD_BG 背景）。对话框内容由各 helper 构造。
+// ===== 对话框叠加层 v2 =====
 
 fn view_new_model_dialog(state: &UiState) -> Element<'_, Message> {
-    let title = text("新建建模").color(theme::TEXT_STRONG).size(13.0);
-    let input = text_input(
-        "请输入建模名称",
-        &state.dag_editor.new_model_name_input,
-    )
-    .on_input(Message::NewModelNameInput)
-    .on_submit(Message::NewModelConfirm)
-    .padding(Padding {
-        top: 6.0,
-        bottom: 6.0,
-        left: 8.0,
-        right: 8.0,
-    });
+    let icon = container(text("✦").color(theme::accent()).size(22.0))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 15.0/255.0
+            }.into());
+            s.border.radius = 12.0.into();
+            s
+        });
+    let title_col = column![
+        text("新建建模").color(theme::text_strong()).size(15.0),
+        text("为新的建模起一个名字").color(theme::text_weak()).size(10.5),
+    ].spacing(2);
 
-    let confirm_btn = dialog_button("确认", Message::NewModelConfirm, true);
+    let input = text_input("建模名称…", &state.dag_editor.new_model_name_input)
+        .on_input(Message::NewModelNameInput)
+        .on_submit(Message::NewModelConfirm)
+        .size(12.0)
+        .padding(Padding { top: 8.0, bottom: 8.0, left: 10.0, right: 10.0 });
+    let input_wrap = container(input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
+        });
+
+    let confirm_btn = dialog_button("确认创建", Message::NewModelConfirm, true);
     let cancel_btn = dialog_button("取消", Message::NewModelCancel, false);
-    let btns = row![cancel_btn, confirm_btn]
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
         .spacing(8)
         .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fixed(28.0));
+        .width(Length::Fill);
 
-    let card = column![title, input, btns]
-        .spacing(12)
-        .padding(Padding {
-            top: 16.0,
-            bottom: 16.0,
-            left: 16.0,
-            right: 16.0,
-        })
-        .width(Length::Fixed(DIALOG_WIDTH));
+    // 用 iced_aw::Card 三段式：head=图标+标题, body=输入框, foot=按钮栏
+    // padding 分段控制：head 上 20px、body 中间 16px、foot 下 18px，水平统一 20px
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        input_wrap,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(360.0));
 
-    let card = container(card).style(|_t| {
-        let mut s = iced::widget::container::Style::default();
-        s.background = Some(Color::from(theme::CARD_BG).into());
-        s
-    });
     dialog_overlay(card.into(), Message::NewModelCancel)
 }
 
 fn view_rename_dialog(state: &UiState) -> Element<'_, Message> {
-    let title = text("重命名建模").color(theme::TEXT_STRONG).size(13.0);
-    let input = text_input("请输入新名称", &state.dag_editor.rename_input)
+    let icon = container(text("✎").color(theme::accent_teal()).size(20.0))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 15.0/255.0
+            }.into());
+            s.border.radius = 12.0.into();
+            s
+        });
+    let title_col = column![
+        text("重命名建模").color(theme::text_strong()).size(15.0),
+        text("输入新的建模名称").color(theme::text_weak()).size(10.5),
+    ].spacing(2);
+
+    let input = text_input("新名称…", &state.dag_editor.rename_input)
         .on_input(Message::RenameInput)
         .on_submit(Message::RenameConfirm)
-        .padding(Padding {
-            top: 6.0,
-            bottom: 6.0,
-            left: 8.0,
-            right: 8.0,
+        .size(12.0)
+        .padding(Padding { top: 8.0, bottom: 8.0, left: 10.0, right: 10.0 });
+    let input_wrap = container(input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
         });
 
     let confirm_btn = dialog_button("确认", Message::RenameConfirm, true);
     let cancel_btn = dialog_button("取消", Message::RenameCancel, false);
-    let btns = row![cancel_btn, confirm_btn]
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
         .spacing(8)
         .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fixed(28.0));
+        .width(Length::Fill);
 
-    let card = column![title, input, btns]
-        .spacing(12)
-        .padding(Padding {
-            top: 16.0,
-            bottom: 16.0,
-            left: 16.0,
-            right: 16.0,
-        })
-        .width(Length::Fixed(DIALOG_WIDTH));
+    // iced_aw::Card 三段式替换 container(content)
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        input_wrap,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(360.0));
 
-    let card = container(card).style(|_t| {
-        let mut s = iced::widget::container::Style::default();
-        s.background = Some(Color::from(theme::CARD_BG).into());
-        s
-    });
     dialog_overlay(card.into(), Message::RenameCancel)
 }
 
@@ -1374,38 +1485,50 @@ fn view_delete_confirm_dialog(state: &UiState) -> Element<'_, Message> {
         .delete_model_target_name
         .clone()
         .unwrap_or_default();
-    let title = text("删除建模").color(theme::danger()).size(13.0);
-    let hint = text(format!("确定删除「{}」吗？此操作可手动恢复（.deleted）。", name))
-        .color(theme::TEXT_HOVER)
-        .size(11.0);
 
-    let confirm_btn = dialog_button("删除", Message::DeleteModelConfirm, true);
+    let icon = container(text("!").color(theme::danger()).size(22.0))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 248.0/255.0, g: 113.0/255.0, b: 113.0/255.0, a: 15.0/255.0
+            }.into());
+            s.border.radius = 12.0.into();
+            s
+        });
+    let title_col = column![
+        text("删除建模").color(theme::danger()).size(15.0),
+        text(format!("确定删除「{}」吗？此操作可手动恢复（.deleted）。", name))
+            .color(theme::text_hover())
+            .size(10.5),
+    ].spacing(2);
+
+    let confirm_btn = dialog_button("确认删除", Message::DeleteModelConfirm, true);
     let cancel_btn = dialog_button("取消", Message::DeleteModelCancel, false);
-    let btns = row![cancel_btn, confirm_btn]
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
         .spacing(8)
         .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fixed(28.0));
+        .width(Length::Fill);
 
-    let card = column![title, hint, btns]
-        .spacing(12)
-        .padding(Padding {
-            top: 16.0,
-            bottom: 16.0,
-            left: 16.0,
-            right: 16.0,
-        })
-        .width(Length::Fixed(DIALOG_WIDTH));
+    // iced_aw::Card 三段式：head=图标+提示文字, body=空（仅留呼吸空间）, foot=按钮栏
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        text(""),
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 8.0, bottom: 8.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(380.0));
 
-    let card = container(card).style(|_t| {
-        let mut s = iced::widget::container::Style::default();
-        s.background = Some(Color::from(theme::CARD_BG).into());
-        s
-    });
     dialog_overlay(card.into(), Message::DeleteModelCancel)
 }
 
-/// 通用对话框遮罩层：半透明黑色填满 + 居中卡片，点击遮罩=取消。
+/// 通用对话框遮罩层 v2：靛蓝黑 + 居中卡片
 fn dialog_overlay(card: Element<'_, Message>, cancel: Message) -> Element<'_, Message> {
     let centered = container(card)
         .width(Length::Fill)
@@ -1414,25 +1537,48 @@ fn dialog_overlay(card: Element<'_, Message>, cancel: Message) -> Element<'_, Me
         .align_y(Alignment::Center)
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.6 }.into());
+            s.background = Some(Color {
+                r: 5.0/255.0, g: 8.0/255.0, b: 18.0/255.0, a: 0.72
+            }.into());
             s
         });
     mouse_area(centered).on_press(cancel).into()
 }
 
-/// 对话框按钮：确认用 accent 背景，取消用透明边框。
+/// 对话框按钮 v2：主按钮靛蓝渐变，次按钮灰边胶囊
 fn dialog_button(label: &str, msg: Message, primary: bool) -> Element<'_, Message> {
-    button(text(label).size(11.0))
-        .width(Length::Fixed(72.0))
-        .height(Length::Fixed(28.0))
-        .style(move |_t, _status| {
+    let label_widget = container(
+        text(label).size(11.5)
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+    button(label_widget)
+        .height(Length::Fixed(32.0))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 16.0, right: 16.0 })
+        .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
+            s.border.radius = theme::WIDGET_ROUNDING.into();
             if primary {
                 s.background = Some(Color::from(theme::accent()).into());
                 s.text_color = Color::WHITE;
+                s.border.width = 1.0;
+                s.border.color = Color::from(theme::accent_bright());
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color::from(theme::accent_bright()).into());
+                } else if matches!(status, iced::widget::button::Status::Pressed) {
+                    s.background = Some(Color::from(theme::accent_dark()).into());
+                }
             } else {
                 s.background = Some(Color::TRANSPARENT.into());
-                s.text_color = theme::TEXT_HOVER;
+                s.text_color = theme::text_hover();
+                s.border.width = 1.0;
+                s.border.color = theme::card_stroke();
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color::from(theme::hover_bg()).into());
+                    s.text_color = theme::text_strong();
+                }
             }
             s
         })

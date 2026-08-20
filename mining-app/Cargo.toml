@@ -6,6 +6,18 @@ license = "Apache-2.0"
 
 [dependencies]
 iced = { version = "0.14", features = ["tokio", "canvas", "image", "advanced", "markdown", "advanced-shaping", "tiny-skia"] }
+# iced_aw 0.14 与 iced 0.14 兼容，按需启用 features 控制依赖体积
+# card       → 建模/算子卡片
+# tab_bar    → 顶部 Tab + 左侧子 Tab + 日志分类 Tab
+# badge      → 计数徽章
+# context_menu → 画布/节点右键菜单
+# labeled_frame → 参数面板分组
+# sidebar    → 备用（左侧合并面板可选用）
+# spinner    → 加载中占位
+# menu/quad → context_menu 与分隔线依赖
+iced_aw = { version = "0.14", default-features = false, features = [
+    "badge", "card", "context_menu", "labeled_frame", "menu", "quad", "sidebar", "spinner", "tab_bar", "tabs",
+] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

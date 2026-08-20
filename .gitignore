@@ -17,6 +17,7 @@ temp_srv_out.log
 .trae/
 .cargo/
 .vscode/
+.cargo_home/
 models/
 lib/
 dag/

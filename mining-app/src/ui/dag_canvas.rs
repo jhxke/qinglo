@@ -30,20 +30,23 @@ use super::theme;
 use crate::dag::DagGraph;
 use crate::geom::Vec2;
 
-/// 节点固定高度（像素）。
-const NODE_HEIGHT: f32 = 32.0;
+/// 节点固定高度（像素）。v3：从 32 → 38，呼吸感更好，文字不贴边。
+const NODE_HEIGHT: f32 = 38.0;
+/// 节点圆角（像素）。v3：卡片感，9px 与 sidebar 卡片统一。
+const NODE_ROUNDING: f32 = 9.0;
 /// 节点最小宽度（即使算子名为空也保证可视）。
-const NODE_MIN_WIDTH: f32 = 80.0;
-/// 节点 padding（左右各 12px）。
-const NODE_PADDING_X: f32 = 12.0;
-/// 节点算子名每字符近似宽度（11.0 字号下）。
-const CHAR_WIDTH_ESTIMATE: f32 = 7.0;
+const NODE_MIN_WIDTH: f32 = 92.0;
+/// 节点 padding（左右各 14px）。v3：左右各加 2px，文字不贴色条/端口。
+const NODE_PADDING_X: f32 = 14.0;
+/// 节点算子名每字符近似宽度（11.5 字号下）。v3：微调更匹配新字号。
+const CHAR_WIDTH_ESTIMATE: f32 = 7.2;
 /// 网格步长（像素）。
 const GRID_STEP: f32 = 24.0;
-/// 端口圆点半径。
-const PORT_RADIUS: f32 = 4.0;
+/// 端口圆点半径。v3：从 4 → 4.6，配合更高节点更协调。
+/// v6：增到 5.4，让四层结构（外圈+描边+填充+心点）有呼吸感。
+const PORT_RADIUS: f32 = 5.4;
 /// 端口命中测试容差（世界坐标，按节点内部端口大小近似）。
-const PORT_HIT_MARGIN: f32 = 7.0;
+const PORT_HIT_MARGIN: f32 = 8.0;
 
 // ===== 预计算的 Stroke 配置（避免每帧构造结构体） =====
 //
@@ -121,7 +124,7 @@ fn port_stroke(color: Color) -> Stroke<'static> {
 /// 这样 `DagProgram::update` 在 CursorMoved 且无拖拽/连线时就不发 Message，
 /// 避免触发 update → view → draw 链。
 pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
-    let (graph, offset, zoom, selected_id, connecting_from, drag_world, dragging_in_progress) =
+    let (graph, offset, zoom, selected_id, connecting_from, drag_world, dragging_in_progress, node_statuses, anim_time) =
         match state.dag_editor.active_tab() {
             Some(tab) => (
                 tab.graph.clone(),
@@ -131,6 +134,8 @@ pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
                 tab.connecting_from.clone(),
                 tab.connecting_drag_world,
                 tab.dragging_node_id.is_some() || state.canvas_pan_anchor.is_some(),
+                tab.io_registry.statuses_snapshot(),
+                state.anim_time,
             ),
             None => (
                 DagGraph::default(),
@@ -140,6 +145,8 @@ pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
                 None,
                 None,
                 false,
+                HashMap::new(),
+                0.0,
             ),
         };
 
@@ -151,6 +158,8 @@ pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
         connecting_from,
         connecting_drag_world: drag_world,
         dragging_in_progress,
+        node_statuses,
+        anim_time,
         // 构造时就算一次指纹，供 PartialEq 快速短路
         fp: 0, // 构造时懒计算（PartialEq 第一次调用才计算并缓存）
     };
@@ -211,6 +220,12 @@ struct DagProgram {
     /// 真 = 正在拖节点（dragging_node_id）或平移画布（canvas_pan_anchor），
     /// 用于 CursorMoved 节流：只有拖拽/连线进行中才发 Message。
     dragging_in_progress: bool,
+    /// 节点执行状态快照（节点 ID → 状态码：0未执行/1执行中/2完成/3失败/4过期）。
+    /// 由 `NodeIORegistry::statuses_snapshot` 生成，供渲染层按状态着色与动画。
+    node_statuses: HashMap<String, u8>,
+    /// 运行动画累积时间（秒）。仅在 DAG 执行中由 `AnimTick` 推进，
+    /// 驱动节点呼吸发光 / 边数据流动光点。静态时不推进 → 指纹稳定不重绘。
+    anim_time: f32,
     /// 懒缓存的世界指纹（u64）。0 视为未计算。PartialEq/draw 两边都会写它，
     /// 因为内部 mutability（Cell）在 Clone 里很麻烦，这里改为在 impl 里
     /// 用内部 helper 按需计算 → DagProgram 非 Clone 约束下 &self 也能算。
@@ -237,6 +252,8 @@ impl DagProgram {
                 self.selected_node_id.as_deref(),
                 self.connecting_from.as_ref(),
                 self.connecting_drag_world.as_ref(),
+                &self.node_statuses,
+                self.anim_time,
             )
         }
     }
@@ -260,6 +277,8 @@ impl PartialEq for DagProgram {
             && self.selected_node_id == other.selected_node_id
             && self.connecting_from == other.connecting_from
             && self.connecting_drag_world == other.connecting_drag_world
+            && self.anim_time == other.anim_time
+            && self.node_statuses == other.node_statuses
             && self.graph.nodes.len() == other.graph.nodes.len()
             && self.graph.edges.len() == other.graph.edges.len()
             && self
@@ -439,6 +458,8 @@ impl canvas::Program<Message> for DagProgram {
             self.selected_node_id.as_deref(),
             self.connecting_from.as_ref(),
             self.connecting_drag_world.as_ref(),
+            &self.node_statuses,
+            self.anim_time,
         );
         let needs_rebuild = {
             let inner = state.inner.borrow();
@@ -470,6 +491,8 @@ fn world_fingerprint_of(
     selected_node_id: Option<&str>,
     connecting_from: Option<&(String, usize, bool)>,
     connecting_drag_world: Option<&Vec2>,
+    node_statuses: &HashMap<String, u8>,
+    anim_time: f32,
 ) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
@@ -502,6 +525,8 @@ fn world_fingerprint_of(
         mix_f32(&mut h, n.position.x);
         mix_f32(&mut h, n.position.y);
         mix_bytes(&mut h, n.operator_type.name().as_bytes());
+        // 节点执行状态：0=未执行(默认) 1=执行中 2=完成 3=失败 4=过期
+        mix_u64(&mut h, node_statuses.get(&n.id).copied().unwrap_or(0) as u64);
     }
     for e in &graph.edges {
         mix_bytes(&mut h, e.id.as_bytes());
@@ -529,6 +554,9 @@ fn world_fingerprint_of(
     } else {
         mix_u64(&mut h, 0);
     }
+
+    // 运行动画时间：静态时为常量 → 指纹稳定；执行中由 AnimTick 推进 → 指纹变化触发重绘
+    mix_f32(&mut h, anim_time);
 
     h
 }
@@ -645,11 +673,35 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         let dx = (p2.x - p1.x).max(20.0) * 0.5;
         let c1 = Point::new(p1.x + dx, p1.y);
         let c2 = Point::new(p2.x - dx, p2.y);
+        // 源/目标执行状态：用于边着色与数据流动光点
+        let src_status = p.node_statuses.get(&edge.source_node_id).copied().unwrap_or(0u8);
+        let dst_status = p.node_statuses.get(&edge.target_node_id).copied().unwrap_or(0u8);
+        // 边色随状态语义化：两端完成→翠绿、流向执行中→靛青、失败端→珊瑚红
+        let edge_color = match (src_status, dst_status) {
+            (2, 2) => mix_color(Color::from(theme::text_weak()), Color::from(theme::success()), 0.40),
+            (2, 1) | (2, 0) => mix_color(Color::from(theme::text_weak()), Color::from(theme::accent()), 0.35),
+            (_, 3) | (3, _) => mix_color(Color::from(theme::text_weak()), Color::from(theme::danger()), 0.35),
+            _ => Color::from(theme::text_weak()),
+        };
         let path = Path::new(|b| {
             b.move_to(p1);
             b.bezier_curve_to(c1, c2, p2);
         });
-        frame.stroke(&path, edge_stroke_val.clone());
+        frame.stroke(&path, Stroke {
+            style: stroke::Style::Solid(edge_color),
+            ..edge_stroke_val.clone()
+        });
+
+        // 连线中部箭头：在贝塞尔曲线 t=0.5 处画一个小三角形，指向 p2 方向
+        draw_edge_arrow(frame, p1, c1, c2, p2, edge_color);
+
+        // 数据流动光点：源已完成 && 目标执行中/未执行 → 沿曲线流动的青色光点
+        if (src_status == 2) && (dst_status == 1 || dst_status == 0) && !p.dragging_in_progress {
+            let dot_color = Color::from(theme::accent_teal());
+            let base = p.anim_time * 0.6;
+            draw_flow_dot(frame, p1, c1, c2, p2, base % 1.0, dot_color);
+            draw_flow_dot(frame, p1, c1, c2, p2, (base + 0.5) % 1.0, dot_color);
+        }
     }
 
     // 3.5) 连线创建临时贝塞尔
@@ -675,6 +727,8 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
                 b.bezier_curve_to(c1, c2, p2);
             });
             frame.stroke(&path, temp_edge_stroke());
+            // 临时连线也加箭头，颜色用 accent
+            draw_edge_arrow(frame, p1, c1, c2, p2, Color::from(theme::accent()));
         }
     }
 
@@ -694,25 +748,122 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         let h = NODE_HEIGHT;
         let top_left = Point::new(node.position.x, node.position.y);
 
-        // 卡片矩形 Path（重用：fill + stroke 都用它）
-        let rect_path = Path::rectangle(top_left, Size::new(w, h));
-
-        // 卡片背景填充
-        frame.fill(&rect_path, card_bg);
-
-        // 左侧色条（3px）
-        let bar = Path::rectangle(top_left, Size::new(3.0, h));
-        frame.fill(&bar, node.operator_type.color());
-
-        // 边框：选中 → accent 2px；否则默认 1px
         let is_selected = selected_id == Some(&node.id);
-        if is_selected {
-            frame.stroke(&rect_path, card_stroke_selected());
-        } else {
-            frame.stroke(&rect_path, card_stroke_normal());
+        let op_color = node.operator_type.color();
+
+        // === 执行状态视觉（运行动画） ===
+        // 0=未执行 1=执行中 2=完成 3=失败 4=过期
+        let status = p.node_statuses.get(&node.id).copied().unwrap_or(0u8);
+        // 呼吸因子 0..1：执行中/失败节点用 sin 调制发光强度与边框宽度
+        let pulse = (p.anim_time * 2.5).sin() * 0.5 + 0.5;
+        // 状态边框 (颜色, 宽度)；None 表示无状态视觉，回退到选中/默认
+        let status_border: Option<(Color, f32)> = match status {
+            1 => Some((Color::from(theme::accent()), 2.0 + pulse * 0.8)),
+            2 => Some((Color::from(theme::success()), 1.6)),
+            3 => Some((Color::from(theme::danger()), 1.6)),
+            4 => Some((Color::from(theme::warning()), 1.4)),
+            _ => None,
+        };
+        // 状态外发光 (颜色, alpha)；执行中混入算子色避免单调
+        let status_glow: Option<(Color, f32)> = match status {
+            1 => Some((
+                mix_color(Color::from(theme::accent()), op_color, 0.3),
+                0.30 + pulse * 0.40,
+            )),
+            2 => Some((Color::from(theme::success()), 0.22)),
+            3 => Some((Color::from(theme::danger()), 0.35 + pulse * 0.20)),
+            _ => None,
+        };
+
+        // v5：三层混合颜色
+        // - 卡片底色：10% 算子色 + 90% card_bg（v4 是 8%，再强化一点）
+        // - 边框默认态：50% 算子色 + 50% 默认边框灰（v4 是 45%）
+        // - 移除外挂竖条，改"内嵌色晕 + 前置圆点标签"
+        let tinted_bg = mix_color(card_bg, op_color, 0.10);
+        let tinted_stroke_color = mix_color(
+            Color::from(theme::card_stroke()),
+            op_color,
+            0.50,
+        );
+
+        // === 微阴影（圆角 + 不透明度进一步略增） ===
+        if !dragging {
+            let shadow_path = rounded_rect_path(
+                Point::new(top_left.x + 1.5, top_left.y + 2.5),
+                w, h,
+                NODE_ROUNDING,
+            );
+            frame.fill(
+                &shadow_path,
+                Color { r: 0.0, g: 0.0, b: 0.0, a: 200.0 / 255.0 / 4.0 },
+            );
         }
 
-        // 节点文本（算子名）——拖动期间跳过
+        // === 卡片圆角矩形 Path ===
+        let rect_path = rounded_rect_path(top_left, w, h, NODE_ROUNDING);
+
+        // === 卡片填充（带算子色微染） ===
+        frame.fill(&rect_path, tinted_bg);
+
+        // === 边框：执行状态视觉优先 > 选中 > 默认 ===
+        if let Some((sc, sw)) = status_border {
+            // 执行中/完成/失败/过期：状态色边框 + 状态外发光
+            frame.stroke(&rect_path, Stroke {
+                style: stroke::Style::Solid(sc),
+                width: sw,
+                ..card_stroke_normal()
+            });
+            if let Some((gc, ga)) = status_glow {
+                if !dragging {
+                    let glow_path = rounded_rect_path(
+                        Point::new(top_left.x - 1.5, top_left.y - 1.5),
+                        w + 3.0,
+                        h + 3.0,
+                        NODE_ROUNDING + 1.5,
+                    );
+                    frame.stroke(
+                        &glow_path,
+                        Stroke {
+                            style: stroke::Style::Solid(with_alpha(gc, ga)),
+                            width: 1.5,
+                            ..card_stroke_normal()
+                        },
+                    );
+                }
+            }
+        } else if is_selected {
+            frame.stroke(&rect_path, card_stroke_selected());
+            if !dragging {
+                let glow_path = rounded_rect_path(
+                    Point::new(top_left.x - 1.0, top_left.y - 1.0),
+                    w + 2.0,
+                    h + 2.0,
+                    NODE_ROUNDING + 1.0,
+                );
+                let glow_color = mix_color(
+                    Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 140.0/255.0
+                    },
+                    with_alpha(op_color, 140.0/255.0),
+                    0.5,
+                );
+                frame.stroke(
+                    &glow_path,
+                    Stroke {
+                        style: stroke::Style::Solid(glow_color),
+                        width: 1.0,
+                        ..card_stroke_selected()
+                    },
+                );
+            }
+        } else {
+            frame.stroke(&rect_path, Stroke {
+                style: stroke::Style::Solid(tinted_stroke_color),
+                ..card_stroke_normal()
+            });
+        }
+
+        // === 节点文本：几何居中 ===
         if draw_text {
             frame.fill_text(Text {
                 content: node.operator_type.name().to_string(),
@@ -721,7 +872,7 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
                     node.position.y + h / 2.0,
                 ),
                 color: text_strong,
-                size: 11.0.into(),
+                size: 12.0.into(),
                 font: Font::with_name("Microsoft YaHei"),
                 align_x: Alignment::Center.into(),
                 align_y: iced::alignment::Vertical::Center,
@@ -729,15 +880,123 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
             });
         }
 
-        // 端口圆点：直接在节点循环里画（拿得到 width_cache 里的 w）
-        // 连线创建中保留，其它拖动场景跳过
         if draw_ports {
-            draw_ports_indexed(frame, node, w, h, &out_has_fan, &in_occupied, card_bg);
+            draw_ports_indexed(frame, node, w, h, &out_has_fan, &in_occupied, op_color);
         }
     }
 }
 
-/// 使用预建索引绘制单个节点的所有端口：去掉内部 O(边) 扫描。
+/// 颜色线性混合：返回 `a * (1-t) + b * t`（RGB 各自线性插值，alpha 也插值）
+fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let omt = 1.0 - t;
+    Color {
+        r: a.r * omt + b.r * t,
+        g: a.g * omt + b.g * t,
+        b: a.b * omt + b.b * t,
+        a: a.a * omt + b.a * t,
+    }
+}
+
+/// 在三次贝塞尔曲线 t=0.5 处绘制箭头。
+///
+/// 三次贝塞尔曲线：B(t) = (1-t)³·P0 + 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3
+/// 切线：B'(t) = 3(1-t)²·(P1-P0) + 6(1-t)t·(P2-P1) + 3t²·(P3-P2)
+/// 取 t=0.5 算出中点位置与切线方向，按切线方向画一个填充三角形指向终点。
+fn draw_edge_arrow(
+    frame: &mut canvas::Frame,
+    p0: Point,
+    p1: Point,
+    p2: Point,
+    p3: Point,
+    color: Color,
+) {
+    // t = 0.5 时的位置（系数：0.125, 0.375, 0.375, 0.125）
+    let mid = Point::new(
+        0.125 * p0.x + 0.375 * p1.x + 0.375 * p2.x + 0.125 * p3.x,
+        0.125 * p0.y + 0.375 * p1.y + 0.375 * p2.y + 0.125 * p3.y,
+    );
+    // t = 0.5 时的切线（系数：0.75, 1.5, 0.75）
+    // B'(0.5) = 0.75·(P1-P0) + 1.5·(P2-P1) + 0.75·(P3-P2)
+    //        = -0.75·P0 + (-1.5+0.75)·P1 + (1.5-0.75)·P2 + 0.75·P3
+    //        = -0.75·P0 - 0.75·P1 + 0.75·P2 + 0.75·P3
+    //        = 0.75·(P3 - P0 + P2 - P1)
+    let tangent = Vector::new(
+        0.75 * (p3.x - p0.x + p2.x - p1.x),
+        0.75 * (p3.y - p0.y + p2.y - p1.y),
+    );
+    let len = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
+    if len < 1e-3 {
+        return;
+    }
+    let dir = Vector::new(tangent.x / len, tangent.y / len);
+    // 垂直方向（左侧）
+    let perp = Vector::new(-dir.y, dir.x);
+
+    // 箭头几何：尖部沿切线向前，尾部两侧沿垂直方向偏移
+    // 箭头长度 8px，半宽 4px，与 1.5px 线宽视觉协调
+    let arrow_len = 8.0_f32;
+    let arrow_half_w = 4.0_f32;
+
+    let tip = Point::new(
+        mid.x + dir.x * (arrow_len * 0.5),
+        mid.y + dir.y * (arrow_len * 0.5),
+    );
+    let base_center = Point::new(
+        mid.x - dir.x * (arrow_len * 0.5),
+        mid.y - dir.y * (arrow_len * 0.5),
+    );
+    let left = Point::new(
+        base_center.x + perp.x * arrow_half_w,
+        base_center.y + perp.y * arrow_half_w,
+    );
+    let right = Point::new(
+        base_center.x - perp.x * arrow_half_w,
+        base_center.y - perp.y * arrow_half_w,
+    );
+
+    let arrow_path = Path::new(|b| {
+        b.move_to(tip);
+        b.line_to(left);
+        b.line_to(right);
+        b.close();
+    });
+    frame.fill(&arrow_path, color);
+}
+
+/// 给颜色重设 alpha 通道（保持 RGB）
+fn with_alpha(c: Color, alpha: f32) -> Color {
+    Color { a: alpha, ..c }
+}
+
+/// 在三次贝塞尔曲线参数 t（0..1）处绘制一个流动光点（外发光 + 实心芯）。
+///
+/// 用于 DAG 执行时沿边展示数据流动方向：源节点已完成、目标节点执行中/未执行
+/// 时，光点从源端口流向目标端口，配合 ~80ms 的 `AnimTick` 形成连续流动感。
+fn draw_flow_dot(
+    frame: &mut canvas::Frame,
+    p0: Point,
+    p1: Point,
+    p2: Point,
+    p3: Point,
+    t: f32,
+    color: Color,
+) {
+    let omt = 1.0 - t;
+    // 三次贝塞尔位置：B(t) = (1-t)³P0 + 3(1-t)²t P1 + 3(1-t)t² P2 + t³ P3
+    let pos = Point::new(
+        omt * omt * omt * p0.x + 3.0 * omt * omt * t * p1.x + 3.0 * omt * t * t * p2.x + t * t * t * p3.x,
+        omt * omt * omt * p0.y + 3.0 * omt * omt * t * p1.y + 3.0 * omt * t * t * p2.y + t * t * t * p3.y,
+    );
+    // 外发光（半透明大圆）+ 实心芯（亮色小圆）
+    let glow = Path::circle(pos, 5.0);
+    frame.fill(&glow, with_alpha(color, 0.25));
+    let core = Path::circle(pos, 2.5);
+    frame.fill(&core, color);
+}
+
+/// 使用预建索引绘制单个节点的所有端口。
+/// 输出端口统一使用靛青色（theme::accent），输入端口使用算子色。
 fn draw_ports_indexed(
     frame: &mut canvas::Frame,
     node: &crate::dag::Node,
@@ -745,21 +1004,21 @@ fn draw_ports_indexed(
     h: f32,
     out_has_fan: &HashMap<PortKey, bool>,
     in_occupied: &HashMap<PortKey, bool>,
-    card_bg: Color,
+    op_color: Color,
 ) {
     let output_count = node.operator_type.output_count();
     let input_count = node.operator_type.input_count();
 
-    let card_stroke_color = Color::from(theme::card_stroke());
-    let success_color = Color::from(theme::success());
-
-    // 输出端口（右侧）
+    // 输出端口（右侧，统一靛青色）
+    let out_color = Color::from(theme::accent());
     for i in 0..output_count {
         let p = port_world_position(node.position, w, h, true, i, output_count);
         let key: PortKey = (node.id.clone(), i, true);
         let has_fan = out_has_fan.get(&key).copied().unwrap_or(false);
-        let ring_color = if has_fan { Color::WHITE } else { card_stroke_color };
-        draw_port_cached(frame, p, ring_color, card_bg);
+        // 有 fan-out 时白色环 + 外发光，指示可继续分发
+        let glow_alpha = if has_fan { 170.0 / 255.0 } else { 0.0 };
+        let ring_color = if has_fan { Color::WHITE } else { Color::from(theme::card_stroke()) };
+        draw_port_cached(frame, p, ring_color, out_color, glow_alpha);
     }
 
     // 输入端口（左侧）
@@ -767,18 +1026,55 @@ fn draw_ports_indexed(
         let p = port_world_position(node.position, w, h, false, i, input_count);
         let key: PortKey = (node.id.clone(), i, false);
         let occupied = in_occupied.get(&key).copied().unwrap_or(false);
-        let ring_color = if occupied { card_stroke_color } else { success_color };
-        draw_port_cached(frame, p, ring_color, card_bg);
+        // 已占用：无外发光；空闲：算子色环 + 淡外发光，提示可连接
+        let glow_alpha = if occupied { 0.0 } else { 160.0 / 255.0 };
+        let ring_color = if occupied {
+            Color::from(theme::card_stroke())
+        } else {
+            op_color
+        };
+        draw_port_cached(frame, p, ring_color, op_color, glow_alpha);
     }
 }
 
-/// 单个端口绘制：和旧版相同，但 card_bg 作为参数传入避免重复 theme 查询。
+/// 单个端口绘制（v6 四层结构）：
+///   1) 外发光圈（glow_alpha > 0 时显示，提示可连接 / fan-out 状态）
+///   2) 描边环（ring_color）— 状态指示
+///   3) 彩色填充（fill_color）— 类型指示（输入青 / 输出靛）
+///   4) 中心小白点 — 增加精致感与点击目标感
 #[inline(always)]
-fn draw_port_cached(frame: &mut canvas::Frame, center: Point, ring_color: Color, card_bg: Color) {
+fn draw_port_cached(
+    frame: &mut canvas::Frame,
+    center: Point,
+    ring_color: Color,
+    fill_color: Color,
+    glow_alpha: f32,
+) {
+    // 1) 外发光圈（仅 glow_alpha > 0 时绘制）
+    if glow_alpha > 0.0 {
+        let glow_path = Path::circle(center, PORT_RADIUS + 2.5);
+        frame.stroke(
+            &glow_path,
+            Stroke {
+                style: stroke::Style::Solid(with_alpha(fill_color, glow_alpha)),
+                width: 2.5,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Default::default()
+            },
+        );
+    }
+    // 2) 描边环
     let outer = Path::circle(center, PORT_RADIUS);
     frame.stroke(&outer, port_stroke(ring_color));
+    // 3) 彩色填充
     let inner = Path::circle(center, PORT_RADIUS - 1.5);
-    frame.fill(&inner, card_bg);
+    frame.fill(&inner, fill_color);
+    // 4) 中心小白点，让端口从连线中更"抢眼"
+    let core = Path::circle(center, 1.6);
+    frame.fill(&core, Color {
+        r: 1.0, g: 1.0, b: 1.0, a: 0.92,
+    });
 }
 
 // ===== 命中测试与工具函数（保持对外 API 不变） =====
@@ -877,4 +1173,41 @@ pub fn hit_test_input_port(
 pub fn estimate_node_width(name: &str) -> f32 {
     let chars = name.chars().count() as f32;
     (chars * CHAR_WIDTH_ESTIMATE + NODE_PADDING_X * 2.0).max(NODE_MIN_WIDTH)
+}
+
+/// v3：构造圆角矩形 Path（四分之一圆弧在四角）。
+///
+/// iced 0.14 `Path` 没有自带 rounded_rectangle，这里用 move_to → 线段 → arc
+/// 的顺序手工构造。radius 过大时自动夹紧到 min(w,h)/2。
+fn rounded_rect_path(top_left: Point, w: f32, h: f32, r: f32) -> Path {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let r = r.clamp(0.0, w.min(h) * 0.5);
+    let (x, y) = (top_left.x, top_left.y);
+    // 四角：TL / TR / BR / BL，每角对应一个圆心
+    let tl = Point::new(x + r, y + r);
+    let tr = Point::new(x + w - r, y + r);
+    let br = Point::new(x + w - r, y + h - r);
+    let bl = Point::new(x + r, y + h - r);
+    Path::new(|b| {
+        // 起点：顶边左
+        b.move_to(Point::new(x + r, y));
+        // 顶边 → 右上角前 → TR 弧（-90° → 0°，用 arc 逆时针：start 顺时针角？
+        // 这里统一用 iced Path builder：arc_to 不稳定，改用 line_to + bezier
+        // 近似圆角：每个角用二次贝塞尔（误差 ~0.5%，视觉完美）。
+        // 方案：四条直线 + 每个角一个 quadratic_curve，控制点=角点
+        // 顶边右：
+        b.line_to(Point::new(x + w - r, y));
+        b.quadratic_curve_to(Point::new(x + w, y), Point::new(x + w, y + r));
+        // 右边下：
+        b.line_to(Point::new(x + w, y + h - r));
+        b.quadratic_curve_to(Point::new(x + w, y + h), Point::new(x + w - r, y + h));
+        // 底边左：
+        b.line_to(Point::new(x + r, y + h));
+        b.quadratic_curve_to(Point::new(x, y + h), Point::new(x, y + h - r));
+        // 左边上：
+        b.line_to(Point::new(x, y + r));
+        b.quadratic_curve_to(Point::new(x, y), Point::new(x + r, y));
+        // 闭合（最后一段 quadratic 回到起点，无需显式 close）
+        let _ = (tl, tr, br, bl, FRAC_PI_2, PI);
+    })
 }

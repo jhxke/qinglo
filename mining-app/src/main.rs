@@ -46,8 +46,8 @@ fn main() -> iced::Result {
     // application builder API 链式设置。
 
     let win = window::Settings {
-        size: Size::new(1000.0, 700.0),
-        min_size: Some(Size::new(860.0, 560.0)),
+        size: Size::new(1440.0, 900.0),
+        min_size: Some(Size::new(980.0, 640.0)),
         resizable: true,
         decorations: false,
         icon: mining_app::icon::create_app_icon(),
@@ -123,6 +123,12 @@ impl MyApp {
                 }
                 // 推进 Logo 动画时间（每 Tick 0.5s）
                 state.logo_time += 0.5;
+            }
+            Message::AnimTick => {
+                // 高频轮询执行任务，及时回填节点状态（与主 Tick 合并 poll 无副作用）
+                mining_app::ui::poll_dag_exec_task(&mut state.dag_editor);
+                // 推进运行动画时间（~80ms → 0.08s）
+                state.anim_time += 0.08;
             }
             Message::SetMainWindowId(id) => {
                 state.main_window_id = id;
@@ -401,29 +407,66 @@ impl MyApp {
             ViewType::Settings => view_settings(state),
         };
 
+        // 活动栏和主体之间加极细分隔线
+        let panel_divider = container(row![])
+            .width(Length::Fixed(1.0))
+            .height(Length::Fill)
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color {
+                    r: 1.0, g: 1.0, b: 1.0, a: 18.0 / 255.0
+                }.into());
+                s
+            });
+
         let main_panel = container(main_content)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_t| {
                 let mut s = iced::widget::container::Style::default();
-                s.background = Some(Color::from(theme::PANEL_BG).into());
+                s.background = Some(Color::from(theme::panel_bg()).into());
                 s
             });
 
-        let body = row![activity_bar, main_panel]
+        let body = row![activity_bar, panel_divider, main_panel]
             .width(Length::Fill)
-            .height(Length::Fill);
+            .height(Length::Fill)
+            .spacing(0);
 
         let status_bar = view_status_bar(state);
 
-        let col = column![title_bar, body, status_bar]
+        let inner = column![title_bar, body, status_bar]
             .width(Length::Fill)
             .height(Length::Fill);
-        col.into()
+
+        // 最外层：深蓝灰窗口底色，统一包裹
+        container(inner)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::window_bg()).into());
+                s
+            })
+            .into()
     }
 
-    fn subscription(_state: &UiState) -> Subscription<Message> {
-        iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick)
+    fn subscription(state: &UiState) -> Subscription<Message> {
+        // 基础低频 Tick（500ms）：推进 Logo 动画 + 轮询 spawn/执行任务
+        let base = iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick);
+        // DAG 执行中追加高频动画 Tick（80ms）：推进运行动画 + 及时 poll 状态回填，
+        // 让节点呼吸 / 边数据流动等动态效果流畅。无执行任务时不发出，降低 GPU 开销。
+        let needs_anim = state.dag_editor.active_tab().map_or(false, |tab| {
+            tab.pending_run_all
+                || tab.pending_run_up_to.is_some()
+                || tab.io_registry.has_executing()
+        });
+        if needs_anim {
+            let anim = iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick);
+            Subscription::batch(vec![base, anim])
+        } else {
+            base
+        }
     }
 
     fn theme(_state: &UiState) -> Theme {

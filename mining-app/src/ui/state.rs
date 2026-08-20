@@ -142,6 +142,10 @@ pub enum Message {
     /// 空闲/动画 Tick：用于推进 Logo 动画、轮询后台 DAG 任务等。
     /// 由 Iced subscription 按 500ms 间隔发出，空闲时也可保持低频刷新。
     Tick,
+    /// 运行动画 Tick：DAG 执行中由 subscription 按 ~80ms 高频发出，
+    /// 推进 `anim_time` 并及时 poll 执行任务回填节点状态，让画布呈现
+    /// 节点呼吸 / 边数据流动等动态效果。无执行任务时不发出。
+    AnimTick,
     /// 关闭窗口请求。
     WindowClose,
     /// 最大化/还原窗口。
@@ -336,6 +340,10 @@ pub struct UiState {
     /// Logo 动画的累积时间（秒）。每 Tick (500ms) 推进 0.5。
     /// 标题栏 Canvas Program 据此计算折线最末点的呼吸 / 上升动画偏移。
     pub logo_time: f32,
+    /// DAG 运行动画的累积时间（秒）。执行中由 `AnimTick`（~80ms）推进，
+    /// 驱动画布节点呼吸发光 / 边数据流动光点等动态效果。
+    /// 无执行任务时不推进，画布保持静态以降低 GPU 开销。
+    pub anim_time: f32,
     /// 主窗口 Id。由 boot 阶段 `iced::window::oldest()` 异步查询得到，
     /// 通过 `SetMainWindowId` 消息回填。窗口控制按钮（关闭/最大化/最小化/
     /// 拖拽）点击后，update 中调用 `iced::window::xxx(id)` 时使用此 Id。
@@ -356,6 +364,7 @@ impl Default for UiState {
             operator_development: OperatorDevelopmentState::default(),
             settings: SettingsState::default(),
             logo_time: 0.0,
+            anim_time: 0.0,
             main_window_id: None,
             canvas_pan_anchor: None,
         }
