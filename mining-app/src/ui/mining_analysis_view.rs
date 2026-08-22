@@ -57,6 +57,8 @@ const TOP_BAR_HEIGHT: f32 = 37.0;
 /// 对话框基础宽度（实际对话框可能覆盖此值）。
 #[allow(dead_code)]
 const DIALOG_WIDTH: f32 = 360.0;
+/// 右侧节点参数抽屉宽度（画布双击节点时弹出）。
+const PARAMS_DRAWER_WIDTH: f32 = 280.0;
 
 pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
     let sidebar = view_sidebar(state);
@@ -832,8 +834,8 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
         let canvas = super::dag_canvas::view_dag_canvas(state);
         let toolbar = view_floating_toolbar(state);
 
-        // 画布上叠加悬浮工具栏（顶部居中，向下偏移 12px）
-        let stacked = iced::widget::Stack::with_children(vec![
+        // 画布上叠加悬浮工具栏（顶部居中，向下偏移 12px）+ 右侧节点参数抽屉
+        let mut layers: Vec<Element<'_, Message>> = vec![
             canvas,
             container(toolbar)
                 .width(Length::Fill)
@@ -842,12 +844,125 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
                 .align_y(Alignment::Start)
                 .padding(Padding { top: 12.0, bottom: 0.0, left: 0.0, right: 0.0 })
                 .into(),
-        ])
-        .width(Length::Fill)
-        .height(Length::Fill);
+        ];
+        if let Some(drawer) = view_params_drawer(state) {
+            layers.push(drawer);
+        }
+        let stacked = iced::widget::Stack::with_children(layers)
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         stacked.into()
     }
+}
+
+/// 右侧节点参数抽屉（由画布双击节点触发）。
+///
+/// 抽屉浮于画布之上、贴主区右边缘，固定宽 280px，全高填充；标题栏含算子名与
+/// 关闭按钮。参数表复用 `view_params_body` 跟随 `selected_node_id` 自动刷新。
+fn view_params_drawer<'a>(state: &'a UiState) -> Option<Element<'a, Message>> {
+    let tab = state.dag_editor.active_tab()?;
+    if !tab.params_drawer_open {
+        return None;
+    }
+
+    // 标题：优先取选中节点的算子名，缺失时降级为"节点参数"
+    let title = tab
+        .selected_node_id
+        .as_deref()
+        .and_then(|nid| tab.graph.get_node(nid))
+        .map(|n| n.operator_type.name().to_string())
+        .unwrap_or_else(|| "节点参数".to_string());
+
+    // 关闭按钮：透明底 + hover 提亮，红色 × 图标（与 tab 关闭按钮同源 IconKind::Close）
+    let close_icon = icons::view_icon_with_stroke(IconKind::Close, theme::text_weak(), 11.0, 1.4);
+    let close_content = container(close_icon)
+        .width(Length::Fixed(26.0))
+        .height(Length::Fixed(26.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+    let close_btn = button(close_content)
+        .width(Length::Fixed(26.0))
+        .height(Length::Fixed(26.0))
+        .padding(Padding::default())
+        .on_press(Message::CloseParamsDrawer)
+        .style(|_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.background = Some(Color::TRANSPARENT.into());
+            s.border.radius = 7.0.into();
+            match status {
+                iced::widget::button::Status::Hovered => {
+                    s.background =
+                        Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 18.0 / 255.0 }.into());
+                    s.text_color = theme::danger();
+                }
+                iced::widget::button::Status::Pressed => {
+                    s.background =
+                        Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 28.0 / 255.0 }.into());
+                    s.text_color = theme::danger();
+                }
+                _ => {}
+            }
+            s
+        });
+
+    let header = row![
+        text(title).color(theme::text_strong()).size(12.0),
+        close_btn,
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .padding(Padding {
+        top: 8.0,
+        bottom: 8.0,
+        left: 12.0,
+        right: 8.0,
+    });
+
+    let header_divider = container(row![])
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::divider()).into());
+            s
+        });
+
+    // 复用左侧 sidebar 中的参数 body（未选中节点占位、参数表、滚动等）
+    let body = view_params_body(tab);
+
+    let col = column![header, header_divider, body]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .spacing(0);
+
+    // 抽屉容器：贴右边缘、固定宽度、card 背景 + 圆角 + 边框
+    let drawer = container(col)
+        .width(Length::Fixed(PARAMS_DRAWER_WIDTH))
+        .height(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::CARD_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = Color::from(theme::card_stroke());
+            s
+        });
+
+    // 外层定位容器：把抽屉顶到右边缘，并留 12px 上下/右内侧留白
+    let positioned = container(drawer)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::End)
+        .align_y(Alignment::Center)
+        .padding(Padding {
+            top: 12.0,
+            bottom: 12.0,
+            left: 0.0,
+            right: 12.0,
+        });
+
+    Some(positioned.into())
 }
 
 /// 画布悬浮工具栏：顶部居中胶囊条，纯图标按钮（保存 / 执行 DAG / 调试）。
@@ -1022,7 +1137,8 @@ fn badge_num(n: &'static str, bg_color: Color) -> Element<'static, Message> {
         .into()
 }
 
-/// 左侧面板「算子面板」子页 v2：上方算子目录 + 下方节点参数。
+/// 左侧面板「算子面板」子页 v2：搜索框 + 算子目录（占满全高）。
+/// 节点参数已迁移至右侧抽屉（画布双击节点弹出，详见 `view_params_drawer`）。
 fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
     let search_value = editor
@@ -1094,54 +1210,11 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
 
     let op_col_top = column![search_container, op_scroll]
         .width(Length::Fill)
-        .height(Length::FillPortion(3))
+        .height(Length::Fill)
         .spacing(0);
 
-    // 分隔条
-    let divider = container(row![])
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::divider()).into());
-            s
-        });
-
-    // 节点参数面板标题
-    let params_header = container(
-        row![
-            text("节点参数").color(theme::text_strong()).size(12.0),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .padding(Padding { top: 6.0, bottom: 2.0, left: 12.0, right: 12.0 });
-
-    let params_body = if let Some(tab) = editor.active_tab() {
-        view_params_body(tab)
-    } else {
-        container(
-            column![
-                text("◇").color(theme::accent_dim()).size(26.0),
-                text("未打开建模").color(theme::text_weak()).size(10.5),
-            ]
-            .spacing(4)
-            .align_x(Alignment::Center)
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Alignment::Center)
-        .align_y(Alignment::Center)
-        .into()
-    };
-
-    let params = container(column![params_header, params_body].spacing(0))
-        .width(Length::Fill)
-        .height(Length::FillPortion(2))
-        .padding(Padding { top: 0.0, bottom: 8.0, left: 2.0, right: 2.0 });
-
-    let col = column![header, header_divider, op_col_top, divider, params]
+    // 节点参数已迁移至右侧抽屉（画布双击节点弹出），左侧算子面板占满全高。
+    let col = column![header, header_divider, op_col_top]
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(0);

@@ -372,6 +372,11 @@ impl MyApp {
                     }
                 }
             }
+            Message::CloseParamsDrawer => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.params_drawer_open = false;
+                }
+            }
 
             // ===== 节点右键菜单动作：运行到此节点 / 删除节点 =====
             Message::RunUpToNode(node_id) => {
@@ -540,6 +545,9 @@ fn load_chinese_font() -> Vec<u8> {
 
 /// 画布鼠标按下：命中节点 → 选中 + 开始拖拽；命中空白 → 开始平移画布。
 ///
+/// 双击节点（同一节点两次左键按下间隔 < 400ms）→ 弹出右侧节点参数抽屉
+/// （`tab.params_drawer_open = true`）。普通单击仍走选中 + 拖拽流程。
+///
 /// Ctrl 多选语义：
 /// - Ctrl 按下 + 命中节点：toggle 该节点在 `selected_node_ids` 中的选中状态，
 ///   不修改 `selected_node_id`（避免参数面板抖动），也不开始拖拽。
@@ -561,6 +569,28 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
             tab.graph.get_node(&id).map(|n| (id, n.position))
         })
     });
+
+    // 双击检测：若本次命中节点 == 上一次命中节点，且间隔 < 400ms → 弹出右侧参数抽屉。
+    // 注意：双击并不打断单次点击的选中/拖拽语义，仅额外打开抽屉。
+    let now = std::time::Instant::now();
+    let hit_node_id: Option<String> = hit.as_ref().map(|(id, _)| id.clone());
+    let is_double_click = match (hit_node_id.as_ref(), &state.last_canvas_press_node_id) {
+        (Some(cur), Some(prev)) if cur == prev => {
+            state
+                .last_canvas_press_at
+                .map(|t| now.duration_since(t).as_millis() < 400)
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+    if is_double_click {
+        if let Some(tab) = state.dag_editor.active_tab_mut() {
+            tab.params_drawer_open = true;
+        }
+    }
+    // 不论是否双击，都刷新"上一次按下"记录供下次比对
+    state.last_canvas_press_at = Some(now);
+    state.last_canvas_press_node_id = hit_node_id;
 
     // 应用变更到可变 tab
     let mut hit_node = false;

@@ -285,6 +285,9 @@ pub enum Message {
 
     /// 参数面板中某个参数输入框内容变化。参数为 (node_id, param_name, new_value)。
     ParamInput(String, String, String),
+    /// 关闭右侧节点参数抽屉（点击抽屉右上 × 按钮触发）。
+    /// 由画布双击节点弹出抽屉，点 × 关闭。
+    CloseParamsDrawer,
 
     // ===== 多选与对齐 =====
 
@@ -332,6 +335,10 @@ pub struct UiState {
     /// 当前键盘修饰键状态（Ctrl/Shift/Alt/Logo）。由 `iced::keyboard::listen`
     /// 订阅驱动，画布左键按下时用于判断是否为 Ctrl+Click 多选。
     pub modifiers: iced::keyboard::Modifiers,
+    /// 上一次画布左键按下命中节点的 (时间戳, 节点 id)。
+    /// 若两次按下间隔 < 400ms 且命中同一节点 → 视为双击，弹出右侧参数抽屉。
+    pub last_canvas_press_at: Option<std::time::Instant>,
+    pub last_canvas_press_node_id: Option<String>,
 }
 
 impl Default for UiState {
@@ -345,6 +352,8 @@ impl Default for UiState {
             main_window_id: None,
             canvas_pan_anchor: None,
             modifiers: iced::keyboard::Modifiers::default(),
+            last_canvas_press_at: None,
+            last_canvas_press_node_id: None,
         }
     }
 }
@@ -419,6 +428,9 @@ pub struct DagTab {
     /// 用户是否手动隐藏了右侧「算子运行参数」面板（点击面板标题栏 × 按钮后置 true；
     /// 选中不同节点时自动重置为 false，使新节点的参数重新展示）。
     pub hide_params_panel: bool,
+    /// 右侧节点参数抽屉是否打开（画布双击节点触发；点击抽屉 × 关闭）。
+    /// 抽屉内容跟随当前 `selected_node_id`，切换选中节点会自动刷新参数表。
+    pub params_drawer_open: bool,
     pub dragging_node_id: Option<String>,
     pub drag_offset: Vec2,
     /// 从算子面板拖拽中的算子类型; 在画布上释放时创建节点, 在画布外释放或状态失效时清空.
@@ -504,6 +516,7 @@ impl DagTab {
             selected_node_ids: Vec::new(),
             node_position_history: Vec::new(),
             hide_params_panel: false,
+            params_drawer_open: false,
             dragging_node_id: None,
             drag_offset: Vec2::ZERO,
             dragging_operator: None,
