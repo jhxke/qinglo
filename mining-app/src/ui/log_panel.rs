@@ -15,6 +15,7 @@ use iced::{Alignment, Color, Element, Length, Padding};
 // 引入 iced_aw::TabBar / TabLabel，替换部分手搓组件，提升 UI 质感。
 use iced_aw::widget::{TabBar, TabLabel};
 
+use super::icons::{self, IconKind};
 use super::state::{
     JsonDirection, JsonLogEntry, LogCategory, LogLevel, Message, RunLogEntry, UiState,
 };
@@ -59,9 +60,42 @@ pub fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         .padding(Padding { top: 0.0, bottom: 0.0, left: 4.0, right: 4.0 })
         .spacing(4.0);
 
-    // 右侧操作组：清日志
+    // 右侧操作组：清日志 + 关闭
+    let close_btn = {
+        let close_icon = icons::view_icon_with_stroke(IconKind::Close, theme::text_weak(), 11.0, 1.4);
+        let close_content = container(close_icon)
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(26.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
+        button(close_content)
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(26.0))
+            .padding(Padding::default())
+            .on_press(Message::ToggleLogPanel)
+            .style(|_t, status| {
+                let mut s = iced::widget::button::Style::default();
+                s.background = Some(Color::TRANSPARENT.into());
+                s.text_color = theme::text_weak();
+                s.border.radius = 7.0.into();
+                match status {
+                    iced::widget::button::Status::Hovered => {
+                        s.background = Some(Color { r:1.0, g:1.0, b:1.0, a: 18.0/255.0 }.into());
+                        s.text_color = theme::text_strong();
+                    }
+                    iced::widget::button::Status::Pressed => {
+                        s.background = Some(Color { r:220.0/255.0, g:38.0/255.0, b:38.0/255.0, a: 30.0/255.0 }.into());
+                        s.text_color = theme::danger();
+                    }
+                    _ => {}
+                }
+                s
+            })
+    };
+
     let actions = row![
         tool_button("⌫ 清日志", Message::ClearLogs, false),
+        close_btn,
     ]
     .spacing(6)
     .align_y(Alignment::Center);

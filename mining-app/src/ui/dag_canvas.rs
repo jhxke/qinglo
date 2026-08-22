@@ -10,10 +10,10 @@
 //! - Stroke：网格线用默认 Butt/Miter（Round 对直线无视觉收益但会让 tesselator 多做顶点）
 //! - 连线贝塞尔：复用 Control point 计算逻辑，减少临时分配
 //! - 节点卡片：矩形填充+边框+色条顺序不变，但避免重复 Path::rectangle 构造（复用变量）
-//! - 拖动节流：拖动节点 / 平移画布时（dragging_in_progress=true）跳过文字 + 端口
-//!   渲染（fill_text outline 复杂、端口每节点多圆点，二者是最贵的 tessellation）。
+//! - 拖动节流：拖动节点 / 平移画布时（dragging_in_progress=true）仅跳过
+//!   阴影与外发光（辅助视觉，tessellation 较贵）。
 //!   fingerprint 在 dragging_in_progress 边沿变化触发 cache clear，松手后自动恢复完整绘制。
-//!   连线创建中保留端口（用户需看到目标端口）；文字在所有拖动场景下都跳过。
+//!   文字与端口圆点始终绘制，拖动时保持可见（用户要求）。
 
 use iced::widget::canvas;
 use iced::widget::canvas::stroke::{self, Stroke};
@@ -741,14 +741,14 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
 
     // 4) 节点 + 端口（同节点端口在循环内直接画，利用 width_cache）
     //
-    // GPU 节流：dragging_in_progress=true（拖节点 / 平移画布）时跳过 fill_text
-    // 和端口圆点——二者是最贵的 tessellation。fingerprint 已纳入该字段，
+    // GPU 节流：dragging_in_progress=true（拖节点 / 平移画布）时仅跳过
+    // 阴影/外发光（这些是最贵的辅助视觉）。fingerprint 已纳入该字段，
     // 松手时 fp 变化 → cache clear → 自动恢复完整绘制。
-    // 连线创建中保留端口（用户需看到目标端口）。
+    // 用户要求：文字与端口圆点始终绘制，拖动时可见。
     let dragging = p.dragging_in_progress;
-    let connecting = p.connecting_from.is_some();
-    let draw_text = !dragging;
-    let draw_ports = !dragging || connecting;
+    // 文字与端口始终绘制（用户要求拖动时保持可见）
+    let draw_text = true;
+    let draw_ports = true;
 
     for node in &p.graph.nodes {
         let w = width_cache.get(&node.id).copied().unwrap_or(NODE_MIN_WIDTH);

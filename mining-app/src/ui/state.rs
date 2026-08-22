@@ -234,6 +234,8 @@ pub enum Message {
 
     /// 点击日志子标签：切换 `active_log_category`。
     SwitchLogCategory(LogCategory),
+    /// 切换日志面板显示/隐藏（点击隐藏按钮或重新展开按钮）。
+    ToggleLogPanel,
 
     // ===== 左侧合并面板 tab 切换 =====
 
@@ -624,6 +626,8 @@ pub struct DagEditorState {
     /// 后台 DAG 执行任务（「执行 DAG」或「运行到此结点」）；None 表示无任务运行。
     /// 由 UI 线程持有，工作线程仅通过 mpsc `Sender` 回传消息。
     pub dag_exec_task: Option<DagExecTask>,
+    /// 底部日志面板是否展开显示；false 表示已折叠隐藏。
+    pub log_panel_visible: bool,
 }
 
 impl Default for DagEditorState {
@@ -644,6 +648,7 @@ impl Default for DagEditorState {
             delete_model_target_id: None,
             delete_model_target_name: None,
             dag_exec_task: None,
+            log_panel_visible: true,
         }
     }
 }

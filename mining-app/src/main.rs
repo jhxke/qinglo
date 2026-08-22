@@ -304,6 +304,9 @@ impl MyApp {
                     tab.active_log_category = cat;
                 }
             }
+            Message::ToggleLogPanel => {
+                state.dag_editor.log_panel_visible = !state.dag_editor.log_panel_visible;
+            }
 
             // ===== 左侧合并面板 tab 切换 =====
 

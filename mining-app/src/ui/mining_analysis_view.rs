@@ -485,9 +485,66 @@ fn card_icon_button(label: &'static str, msg: Message, is_active: bool) -> Eleme
 fn view_main_area(state: &UiState) -> Element<'_, Message> {
     let top_bar = view_top_bar(state);
     let middle = view_middle(state);
-    let log_panel = super::log_panel::view_log_panel(state);
 
-    let col = column![top_bar, middle, log_panel]
+    // 日志面板：根据 log_panel_visible 决定是展开完整面板还是显示折叠条
+    let log_area: Element<'_, Message> = if state.dag_editor.log_panel_visible {
+        super::log_panel::view_log_panel(state)
+    } else {
+        // 折叠态：一条细条 + 「▲ 运行日志」按钮，点击重新展开
+        let top_divider = container(row![])
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::divider()).into());
+                s
+            });
+
+        let expand_icon = icons::view_icon_with_stroke(IconKind::Diamond, theme::text_weak(), 10.0, 1.3);
+        let label = row![
+            expand_icon,
+            text("运行日志").color(theme::text_weak()).size(10.5),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        let label_content = container(label)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
+
+        let expand_btn = button(label_content)
+            .width(Length::Fill)
+            .height(Length::Fixed(22.0))
+            .padding(Padding::default())
+            .on_press(Message::ToggleLogPanel)
+            .style(|_t, status| {
+                let mut s = iced::widget::button::Style::default();
+                s.background = Some(Color::from(theme::panel_bg()).into());
+                s.text_color = theme::text_weak();
+                s.border.radius = 0.0.into();
+                match status {
+                    iced::widget::button::Status::Hovered => {
+                        s.background = Some(Color::from(theme::hover_bg()).into());
+                        s.text_color = theme::text_hover();
+                    }
+                    _ => {}
+                }
+                s
+            });
+
+        let col = column![top_divider, expand_btn]
+            .width(Length::Fill)
+            .spacing(0);
+
+        container(col)
+            .width(Length::Fill)
+            .height(Length::Shrink)
+            .into()
+    };
+
+    let col = column![top_bar, middle, log_area]
         .width(Length::Fill)
         .height(Length::Fill);
 
