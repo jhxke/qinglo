@@ -172,32 +172,45 @@ pub fn top_tab_bar_style(
     }
 }
 
-/// 左侧合并面板顶部 TabBar 样式：更扁，激活态带 accent 下划线效果。
+/// 左侧合并面板顶部 TabBar 样式：激活态实色 accent 填充，与未激活完全区分。
 pub fn left_panel_tab_bar_style(
 ) -> impl Fn(&iced::Theme, AwStatus) -> aw_style::tab_bar::Style + 'static {
     use aw_style::tab_bar::Style as TabBarStyle;
     move |_t, status| {
-        let (label_bg, text) = match status {
+        let (label_bg, label_border, border_width, text, radius) = match status {
             AwStatus::Selected => (
-                Background::Color(Color {
-                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 40.0/255.0,
-                }),
-                text_strong(),
+                Background::Color(accent()),
+                accent_bright(),
+                1.0,
+                Color::WHITE,
+                6.0,
             ),
-            AwStatus::Hovered => (Background::Color(hover_bg()), text_hover()),
-            _ => (Background::Color(Color::TRANSPARENT), text_weak()),
+            AwStatus::Hovered => (
+                Background::Color(hover_bg()),
+                Color::TRANSPARENT,
+                0.0,
+                text_hover(),
+                6.0,
+            ),
+            _ => (
+                Background::Color(Color::TRANSPARENT),
+                Color::TRANSPARENT,
+                0.0,
+                text_weak(),
+                6.0,
+            ),
         };
         TabBarStyle {
             background: Some(Background::Color(sidebar_bg())),
             border_color: Some(divider()),
             border_width: 0.0,
-            tab_border_radius: 0.0.into(),
+            tab_border_radius: radius.into(),
             tab_label_background: label_bg,
-            tab_label_border_color: Color::TRANSPARENT,
-            tab_label_border_width: 0.0,
+            tab_label_border_color: label_border,
+            tab_label_border_width: border_width,
             icon_color: text_weak(),
             icon_background: None,
-            icon_border_radius: 0.0.into(),
+            icon_border_radius: radius.into(),
             text_color: text,
         }
     }
@@ -229,13 +242,13 @@ pub fn log_tab_bar_style(
             background: Some(Background::Color(panel_bg())),
             border_color: None,
             border_width: 0.0,
-            tab_border_radius: PILL_ROUNDING.into(),
+            tab_border_radius: 8.0.into(),
             tab_label_background: label_bg,
             tab_label_border_color: label_border,
             tab_label_border_width: if matches!(status, AwStatus::Selected) { 1.0 } else { 0.0 },
             icon_color: text_weak(),
             icon_background: None,
-            icon_border_radius: PILL_ROUNDING.into(),
+            icon_border_radius: 8.0.into(),
             text_color: text,
         }
     }

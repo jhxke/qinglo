@@ -53,7 +53,7 @@ const LEFT_PANEL_WIDTH: f32 = 240.0;
 /// 工具栏已迁移为画布上的悬浮条状，不再占用顶部栏空间。
 const TOP_BAR_HEIGHT: f32 = 35.0;
 /// 底部日志面板高度。
-const LOG_PANEL_HEIGHT: f32 = 160.0;
+const LOG_PANEL_HEIGHT: f32 = 220.0;
 /// 日志面板最多渲染条数（避免千条日志拖垮渲染）。
 const LOG_RENDER_LIMIT: usize = 200;
 /// 对话框基础宽度（实际对话框可能覆盖此值）。
@@ -695,30 +695,29 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
     }
 }
 
-/// 画布悬浮工具栏：顶部居中胶囊条，含「保存 / 执行 DAG / 调试」三个图标按钮。
+/// 画布悬浮工具栏：顶部居中胶囊条，纯图标按钮（保存 / 执行 DAG / 调试）。
 ///
 /// 设计要点：
 /// - 半透明深色底 + 1px 微光边框 + 大圆角，漂浮于画布之上不遮挡节点
-/// - 主操作（执行 DAG）用 accent 实色填充 + 亮边框高光；次操作为透明底 + hover 提亮
 /// - 图标来自 `icons::view_icon`（IconKind::Save / Run / Debug），零外部资源依赖
+/// - 次按钮透明底 + hover 提亮；主按钮 accent 实色填充；激活态（调试开）描边高亮
 fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
     let debug_on = state
         .dag_editor
         .active_tab()
         .map(|t| t.debug_mode)
         .unwrap_or(false);
-    let debug_label = if debug_on { "调试：开" } else { "调试：关" };
 
     let tools = row![
-        icon_tool_button(IconKind::Save, "保存", Message::SaveTab, false),
-        icon_tool_button(IconKind::Run, "执行 DAG", Message::RunAllClick, true),
-        icon_tool_button(IconKind::Debug, debug_label, Message::ToggleDebug, debug_on),
+        icon_only_tool_button(IconKind::Save, Message::SaveTab, false),
+        icon_only_tool_button(IconKind::Run, Message::RunAllClick, true),
+        icon_only_tool_button(IconKind::Debug, Message::ToggleDebug, debug_on),
     ]
-    .spacing(6)
+    .spacing(4)
     .align_y(Alignment::Center);
 
     container(tools)
-        .padding(Padding { top: 5.0, bottom: 5.0, left: 8.0, right: 8.0 })
+        .padding(Padding { top: 4.0, bottom: 4.0, left: 6.0, right: 6.0 })
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
@@ -734,47 +733,68 @@ fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
         .into()
 }
 
-/// 悬浮工具栏图标按钮：图标 + 文字水平排列，主按钮高亮、激活态（debug 开）描边。
-fn icon_tool_button(
+/// 悬浮工具栏纯图标按钮：方形小图标，主按钮 accent 实色填充；激活态（调试开）描边高亮。
+fn icon_only_tool_button(
     icon: IconKind,
-    label: &'static str,
     msg: Message,
-    active: bool,
+    primary_or_active: bool,
 ) -> Element<'static, Message> {
-    let icon_color = if active { theme::accent_bright() } else { theme::text_hover() };
-    let txt_color = if active { theme::accent_bright() } else { theme::text_hover() };
+    const SIZE: f32 = 30.0;
+    const ICON: f32 = 16.0;
+    let is_primary = matches!(icon, IconKind::Run);
 
-    let content = row![
-        container(icons::view_icon(icon, icon_color, 14.0))
-            .width(Length::Fixed(14.0))
-            .height(Length::Fixed(14.0))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center),
-        text(label).color(txt_color).size(11.0),
-    ]
-    .spacing(5)
-    .align_y(Alignment::Center);
+    let icon_color = if is_primary {
+        // 主按钮：靛蓝实色底 → 图标用 WHITE 保证对比度
+        Color::WHITE
+    } else if primary_or_active {
+        // 激活态（调试开）：半透明靛蓝底 → 亮靛蓝图标
+        theme::accent_bright()
+    } else {
+        theme::text_hover()
+    };
+
+    let content = container(icons::view_icon(icon, icon_color, ICON))
+        .width(Length::Fixed(SIZE))
+        .height(Length::Fixed(SIZE))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
 
     button(content)
-        .height(Length::Fixed(30.0))
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 12.0, right: 12.0 })
+        .width(Length::Fixed(SIZE))
+        .height(Length::Fixed(SIZE))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 0.0, right: 0.0 })
         .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
             s.border.radius = 9.0.into();
-            if active {
-                // 激活态（如调试开启）：透明底 + accent 描边
-                s.background = Some(Color {
-                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0
-                }.into());
-                s.text_color = theme::accent_bright();
-                s.border.width = 1.0;
-                s.border.color = Color {
-                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
-                };
-                if matches!(status, iced::widget::button::Status::Hovered) {
+            if primary_or_active {
+                // 主按钮（▶ 执行 DAG）：靛蓝实色 + 亮边框高光；调试激活态：半透明底 + accent 描边
+                let is_primary = matches!(icon, IconKind::Run);
+                if is_primary {
+                    s.background = Some(Color::from(theme::accent()).into());
+                    s.text_color = Color::WHITE;
+                    s.border.width = 1.0;
+                    s.border.color = Color {
+                        r: 165.0/255.0, g: 180.0/255.0, b: 252.0/255.0, a: 1.0
+                    };
+                    if matches!(status, iced::widget::button::Status::Hovered) {
+                        s.background = Some(Color::from(theme::accent_bright()).into());
+                    } else if matches!(status, iced::widget::button::Status::Pressed) {
+                        s.background = Some(Color::from(theme::accent_dark()).into());
+                    }
+                } else {
                     s.background = Some(Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0
                     }.into());
+                    s.text_color = theme::accent_bright();
+                    s.border.width = 1.0;
+                    s.border.color = Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
+                    };
+                    if matches!(status, iced::widget::button::Status::Hovered) {
+                        s.background = Some(Color {
+                            r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0
+                        }.into());
+                    }
                 }
             } else {
                 s.background = Some(Color::TRANSPARENT.into());
@@ -1316,7 +1336,7 @@ fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         });
 
     // 子标签栏：用 iced_aw::TabBar 替换手搓胶囊 button，
-    // 胶囊圆角通过 log_tab_bar_style 的 tab_border_radius = PILL_ROUNDING 实现。
+    // 圆角通过 log_tab_bar_style 的 tab_border_radius = 8px 实现。
     let current_cat = active.map(|t| t.active_log_category).unwrap_or_default();
     let tabs_bar = TabBar::new(|c: LogCategory| Message::SwitchLogCategory(c))
         .push(LogCategory::Action, TabLabel::Text(String::from("提醒")))
@@ -1324,18 +1344,14 @@ fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         .push(LogCategory::Json, TabLabel::Text(String::from("通信报文")))
         .set_active_tab(&current_cat)
         .style(theme::log_tab_bar_style())
-        .height(Length::Fixed(24.0))
-        .text_size(10.5)
+        .height(Length::Fixed(32.0))
+        .text_size(11.0)
         .tab_width(Length::Shrink)
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 4.0, right: 4.0 })
         .spacing(4.0);
 
-    // 右侧操作组：调试切换 + 清日志
-    let debug_label = match active.map(|t| t.debug_mode) {
-        Some(true) => "⏵ 调试",
-        _ => "○ 调试",
-    };
+    // 右侧操作组：清日志
     let actions = row![
-        tool_button(debug_label, Message::ToggleDebug, false),
         tool_button("⌫ 清日志", Message::ClearLogs, false),
     ]
     .spacing(6)
@@ -1408,10 +1424,11 @@ fn view_run_logs(logs: &[super::state::RunLogEntry]) -> Element<'_, Message> {
         };
         let line = row![
             text(entry.timestamp.clone()).color(theme::TEXT_WEAK).size(10.0),
-            text(entry.message.clone()).color(msg_color).size(11.0),
+            text(entry.message.clone()).color(msg_color).size(11.0).width(Length::Fill),
         ]
         .spacing(8)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
         col = col.push(line);
     }
     col.into()
@@ -1440,13 +1457,15 @@ fn view_json_logs(logs: &[super::state::JsonLogEntry]) -> Element<'_, Message> {
         let head = row![
             text(dir_label).color(dir_color).size(11.0),
             text(entry.timestamp.clone()).color(theme::TEXT_WEAK).size(10.0),
-            text(entry.title.clone()).color(theme::TEXT_HOVER).size(11.0),
+            text(entry.title.clone()).color(theme::TEXT_HOVER).size(11.0).width(Length::Fill),
         ]
         .spacing(6)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
         let payload = text(entry.payload.clone())
             .color(theme::TEXT_WEAK)
-            .size(10.0);
+            .size(10.0)
+            .width(Length::Fill);
         col = col.push(column![head, payload].spacing(2));
     }
     col.into()
