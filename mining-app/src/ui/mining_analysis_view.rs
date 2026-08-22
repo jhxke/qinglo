@@ -29,6 +29,7 @@ use iced::{
 use iced_aw::widget::{Card, TabBar, TabLabel};
 use iced_aw::widget::badge::Badge;
 
+use super::icons::{self, IconKind};
 use super::state::{
     DagEditorState, DagExecKind, DagExecMessage, DagExecTask, DagTab,
     JsonDirection, LeftPanelTab, LogCategory, LogLevel, Message, UiState,
@@ -48,8 +49,9 @@ use operator_executor_client::protocol::OperatorExecutionStatus;
 /// 历史上建模列表为 220px、算子面板为 240px；二者合并到同一侧栏后取较大值 240px，
 /// 既保证算子卡片有足够展示空间，又让画布水平方向多出 220px。
 const LEFT_PANEL_WIDTH: f32 = 240.0;
-/// 顶部栏高度：Tab 行 34px + 工具栏行 26px + 1px 分隔线 = 61px。
-const TOP_BAR_HEIGHT: f32 = 61.0;
+/// 顶部栏高度：Tab 行 34px + 1px 分隔线 = 35px。
+/// 工具栏已迁移为画布上的悬浮条状，不再占用顶部栏空间。
+const TOP_BAR_HEIGHT: f32 = 35.0;
 /// 底部日志面板高度。
 const LOG_PANEL_HEIGHT: f32 = 160.0;
 /// 日志面板最多渲染条数（避免千条日志拖垮渲染）。
@@ -440,17 +442,13 @@ fn view_main_area(state: &UiState) -> Element<'_, Message> {
         .into()
 }
 
-// ===== 顶部 Tab 栏 + 工具栏 v3 =====
+// ===== 顶部 Tab 栏 =====
 
-/// 顶部栏：Tab 卡片列表在上一行（34px），工具栏在下一行（28px），合计 60px。
-///
-/// 设计思路：
-/// - 历史上 Tab 与 4 个工具按钮挤在 36px 高的同一行，7+ tab 时必然溢出
-/// - 新版拆为两行：上方 Tab 行 34px + 下方工具栏行 28px = 60px 总高
-/// - 工具栏只保留"保存 / 执行 DAG"两个核心操作，视觉干净
-/// - 调试切换 / 清日志 迁移到底部日志面板的标题栏
-/// - Tab 行使用 iced_aw::TabBar 替换手搓 button+close 组合，
-///   自动渲染关闭图标，TabId = usize（即 tab 索引）
+/// 顶部栏：仅 Tab 卡片列表（34px）+ 1px 分隔线 = 35px。
+/// 工具栏已迁移为画布上的悬浮条状（见 `view_floating_toolbar`），
+/// 调试切换 / 清日志 位于底部日志面板的标题栏。
+/// Tab 行使用 iced_aw::TabBar 替换手搓 button+close 组合，
+/// 自动渲染关闭图标，TabId = usize（即 tab 索引）。
 fn view_top_bar(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
 
@@ -493,26 +491,6 @@ fn view_top_bar(state: &UiState) -> Element<'_, Message> {
             .into()
     };
 
-    // 工具栏：只保留核心操作（保存 + 执行 DAG）
-    let tools = row![
-        tool_button("⌁ 保存", Message::SaveTab, false),
-        tool_button("▶ 执行 DAG", Message::RunAllClick, true),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-
-    let bar = column![
-        tabs_row,
-        container(tools)
-            .width(Length::Fill)
-            .height(Length::Fixed(26.0))
-            .padding(Padding { top: 0.0, bottom: 0.0, left: 10.0, right: 10.0 })
-            .align_y(Alignment::Center),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fixed(TOP_BAR_HEIGHT))
-    .spacing(0);
-
     let bottom_divider = container(row![])
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
@@ -522,7 +500,7 @@ fn view_top_bar(state: &UiState) -> Element<'_, Message> {
             s
         });
 
-    let inner = column![bar, bottom_divider]
+    let inner = column![tabs_row, bottom_divider]
         .width(Length::Fill)
         .height(Length::Fixed(TOP_BAR_HEIGHT))
         .spacing(0);
@@ -652,7 +630,7 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
                         ].spacing(12).align_y(Alignment::Center),
                         row![
                             badge_num("3", theme::success()),
-                            text("点击顶部「执行 DAG」一键运行全流程")
+                            text("点击悬浮工具栏的「▶」一键运行全流程")
                                 .color(theme::text_hover()).size(11.5),
                         ].spacing(12).align_y(Alignment::Center),
                     ]
@@ -697,11 +675,123 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
         stacked.into()
     } else {
         let canvas = super::dag_canvas::view_dag_canvas(state);
-        container(canvas)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        let toolbar = view_floating_toolbar(state);
+
+        // 画布上叠加悬浮工具栏（顶部居中，向下偏移 12px）
+        let stacked = iced::widget::Stack::with_children(vec![
+            canvas,
+            container(toolbar)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Start)
+                .padding(Padding { top: 12.0, bottom: 0.0, left: 0.0, right: 0.0 })
+                .into(),
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        stacked.into()
     }
+}
+
+/// 画布悬浮工具栏：顶部居中胶囊条，含「保存 / 执行 DAG / 调试」三个图标按钮。
+///
+/// 设计要点：
+/// - 半透明深色底 + 1px 微光边框 + 大圆角，漂浮于画布之上不遮挡节点
+/// - 主操作（执行 DAG）用 accent 实色填充 + 亮边框高光；次操作为透明底 + hover 提亮
+/// - 图标来自 `icons::view_icon`（IconKind::Save / Run / Debug），零外部资源依赖
+fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
+    let debug_on = state
+        .dag_editor
+        .active_tab()
+        .map(|t| t.debug_mode)
+        .unwrap_or(false);
+    let debug_label = if debug_on { "调试：开" } else { "调试：关" };
+
+    let tools = row![
+        icon_tool_button(IconKind::Save, "保存", Message::SaveTab, false),
+        icon_tool_button(IconKind::Run, "执行 DAG", Message::RunAllClick, true),
+        icon_tool_button(IconKind::Debug, debug_label, Message::ToggleDebug, debug_on),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    container(tools)
+        .padding(Padding { top: 5.0, bottom: 5.0, left: 8.0, right: 8.0 })
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 13.0/255.0, g: 17.0/255.0, b: 28.0/255.0, a: 200.0/255.0
+            }.into());
+            s.border.radius = 12.0.into();
+            s.border.width = 1.0;
+            s.border.color = Color {
+                r: 1.0, g: 1.0, b: 1.0, a: 28.0/255.0
+            };
+            s
+        })
+        .into()
+}
+
+/// 悬浮工具栏图标按钮：图标 + 文字水平排列，主按钮高亮、激活态（debug 开）描边。
+fn icon_tool_button(
+    icon: IconKind,
+    label: &'static str,
+    msg: Message,
+    active: bool,
+) -> Element<'static, Message> {
+    let icon_color = if active { theme::accent_bright() } else { theme::text_hover() };
+    let txt_color = if active { theme::accent_bright() } else { theme::text_hover() };
+
+    let content = row![
+        container(icons::view_icon(icon, icon_color, 14.0))
+            .width(Length::Fixed(14.0))
+            .height(Length::Fixed(14.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+        text(label).color(txt_color).size(11.0),
+    ]
+    .spacing(5)
+    .align_y(Alignment::Center);
+
+    button(content)
+        .height(Length::Fixed(30.0))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 12.0, right: 12.0 })
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.border.radius = 9.0.into();
+            if active {
+                // 激活态（如调试开启）：透明底 + accent 描边
+                s.background = Some(Color {
+                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0
+                }.into());
+                s.text_color = theme::accent_bright();
+                s.border.width = 1.0;
+                s.border.color = Color {
+                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
+                };
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0
+                    }.into());
+                }
+            } else {
+                s.background = Some(Color::TRANSPARENT.into());
+                s.text_color = theme::text_hover();
+                s.border.width = 1.0;
+                s.border.color = Color::TRANSPARENT;
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color {
+                        r: 1.0, g: 1.0, b: 1.0, a: 18.0/255.0
+                    }.into());
+                    s.text_color = theme::text_strong();
+                }
+            }
+            s
+        })
+        .on_press(msg)
+        .into()
 }
 
 /// 步骤编号徽章：圆形 + 语义色背景 + 白色数字

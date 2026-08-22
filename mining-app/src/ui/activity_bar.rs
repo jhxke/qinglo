@@ -6,9 +6,10 @@
 //! - 按钮整体圆角提升至 10px，hover 时更柔和填充
 //! - 文字统一 Microsoft YaHei，间距更舒适
 
-use iced::{Alignment, Color, Element, Length, Padding, Font};
+use iced::{Alignment, Color, Element, Length, Padding};
 use iced::widget::{button, column, container, row, text};
 
+use super::icons::{self, IconKind};
 use super::state::{Message, UiState, ViewType};
 use super::theme;
 
@@ -16,16 +17,15 @@ const BAR_WIDTH: f32 = 62.0;
 const BUTTON_SIZE: f32 = 58.0;
 
 pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
-    let mining_btn = view_activity_button("◆", "挖掘", ViewType::MiningAnalysis, state.current_view);
-    let op_btn = view_activity_button("⚙", "算子", ViewType::OperatorDevelopment, state.current_view);
-    let settings_btn = view_activity_button("✦", "设置", ViewType::Settings, state.current_view);
+    let mining_btn = view_activity_button(IconKind::Mining, "挖掘", ViewType::MiningAnalysis, state.current_view);
+    let settings_btn = view_activity_button(IconKind::Settings, "设置", ViewType::Settings, state.current_view);
 
     let spacer_top = container(text("").size(1.0))
         .width(Length::Fill)
         .height(Length::Fixed(14.0));
 
     // 把按钮推到上面，底部留白（呼应 VSCode / JetBrains 式布局）
-    let col = column![spacer_top, mining_btn, op_btn, settings_btn]
+    let col = column![spacer_top, mining_btn, settings_btn]
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(3);
@@ -42,7 +42,7 @@ pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
 }
 
 fn view_activity_button(
-    icon: &'static str,
+    icon: IconKind,
     label: &'static str,
     vt: ViewType,
     current: ViewType,
@@ -58,16 +58,16 @@ fn view_activity_button(
         theme::text_weak()
     };
 
-    let icon_widget = text(icon)
-        .color(icon_color)
-        .size(19.0)
-        .font(Font::with_name("Microsoft YaHei"));
+    let icon_widget = container(icons::view_icon(icon, icon_color, 19.0))
+        .width(Length::Fill)
+        .height(Length::Fixed(22.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
 
     let label_color = if is_active { theme::text_strong() } else { theme::text_weak() };
     let label_widget = text(label)
         .color(label_color)
-        .size(10.0)
-        .font(Font::with_name("Microsoft YaHei"));
+        .size(10.0);
 
     let content = container(
         column![icon_widget, label_widget]

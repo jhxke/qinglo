@@ -27,7 +27,7 @@ use iced::{
 
 use mining_app::ui::{
     Message, UiState, ViewType, LogLevel,
-    view_activity_bar, view_mining_analysis, view_operator_development, view_settings,
+    view_activity_bar, view_mining_analysis, view_settings,
     view_status_bar, view_title_bar,
 };
 use mining_app::ui::dag_canvas::{hit_test_node, hit_test_port, screen_to_world};
@@ -403,7 +403,6 @@ impl MyApp {
         let activity_bar = view_activity_bar(state);
         let main_content = match state.current_view {
             ViewType::MiningAnalysis => view_mining_analysis(state),
-            ViewType::OperatorDevelopment => view_operator_development(state),
             ViewType::Settings => view_settings(state),
         };
 

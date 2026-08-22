@@ -7,7 +7,7 @@ use crate::geom::Vec2;
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
-use crate::dag::{DagGraph, OperatorType, NodeIORegistry, CustomOperatorDef};
+use crate::dag::{DagGraph, OperatorType, NodeIORegistry};
 use crate::dag_store::{self, DagModelMeta, DagModelRecord};
 
 use crate::debug_executor::DebugDiagnostics;
@@ -124,7 +124,6 @@ pub struct JsonLogEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewType {
     MiningAnalysis,
-    OperatorDevelopment,
     Settings,
 }
 
@@ -293,49 +292,9 @@ pub struct CustomOperatorDebugState {
     pub diagnostics: Option<DebugDiagnostics>,
 }
 
-#[derive(Clone)]
-pub struct OperatorDevelopmentState {
-    pub current_operator: CustomOperatorDef,
-    pub debug_state: CustomOperatorDebugState,
-    pub error_message: Option<String>,
-    pub run_logs: Vec<RunLogEntry>,
-}
-
-impl Default for OperatorDevelopmentState {
-    fn default() -> Self {
-        Self {
-            current_operator: CustomOperatorDef::default(),
-            debug_state: CustomOperatorDebugState {
-                input_text: "1, 2, 3, 4, 5".to_string(),
-                diagnostics: None,
-            },
-            error_message: None,
-            run_logs: Vec::new(),
-        }
-    }
-}
-
-impl OperatorDevelopmentState {
-    pub fn add_log(&mut self, message: String, level: LogLevel) {
-        self.run_logs.push(RunLogEntry {
-            timestamp: format_now_timestamp(),
-            message,
-            level,
-        });
-        if self.run_logs.len() > 1000 {
-            self.run_logs.remove(0);
-        }
-    }
-
-    pub fn clear_logs(&mut self) {
-        self.run_logs.clear();
-    }
-}
-
 pub struct UiState {
     pub current_view: ViewType,
     pub dag_editor: DagEditorState,
-    pub operator_development: OperatorDevelopmentState,
     pub settings: SettingsState,
     /// Logo 动画的累积时间（秒）。每 Tick (500ms) 推进 0.5。
     /// 标题栏 Canvas Program 据此计算折线最末点的呼吸 / 上升动画偏移。
@@ -361,7 +320,6 @@ impl Default for UiState {
         Self {
             current_view: ViewType::MiningAnalysis,
             dag_editor: DagEditorState::default(),
-            operator_development: OperatorDevelopmentState::default(),
             settings: SettingsState::default(),
             logo_time: 0.0,
             anim_time: 0.0,
