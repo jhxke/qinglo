@@ -411,7 +411,7 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
         is_active,
         Some(theme::danger()),
     );
-    let actions = row![rename_btn, delete_btn].spacing(2);
+    let actions = row![rename_btn, delete_btn].spacing(4);
 
     let mid = button(
         row![icon_block, info_col, actions]
@@ -448,7 +448,7 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
     mid.into()
 }
 
-/// 建模列表卡片操作按钮（矢量图标版）：26×26 透明底，hover 微亮背景，
+/// 建模列表卡片操作按钮（矢量图标版）：32×32 透明底，hover 微亮背景，
 /// 用 `icons::view_icon_with_stroke` 矢量图标统一风格。编辑用铅笔、删除用垃圾桶。
 ///
 /// `tone` 传入 `Some(color)` 时，图标常态即用该语义色（删除按钮传 danger 红）；
@@ -475,20 +475,20 @@ fn card_icon_button_kind(
             theme::text_strong()
         },
     };
-    let icon = icons::view_icon_with_stroke(icon_kind, normal_color, 13.0, 1.4);
+    let icon = icons::view_icon_with_stroke(icon_kind, normal_color, 16.0, 1.5);
     let icon_widget = container(icon)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(Alignment::Center)
         .align_y(Alignment::Center);
     button(icon_widget)
-        .width(Length::Fixed(26.0))
-        .height(Length::Fixed(26.0))
+        .width(Length::Fixed(32.0))
+        .height(Length::Fixed(32.0))
         .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
             s.background = Some(Color::TRANSPARENT.into());
             s.text_color = hover_color;
-            s.border.radius = 6.0.into();
+            s.border.radius = 7.0.into();
             if matches!(status, iced::widget::button::Status::Hovered) {
                 let hover_alpha = if is_active { 30.0 } else { 18.0 };
                 s.background = Some(Color { r:1.0,g:1.0,b:1.0, a: hover_alpha / 255.0 }.into());

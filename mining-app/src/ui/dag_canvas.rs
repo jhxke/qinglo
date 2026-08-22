@@ -677,9 +677,12 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
             edge.target_port,
             dst.operator_type.input_count(),
         );
-        let dx = (p2.x - p1.x).max(20.0) * 0.5;
-        let c1 = Point::new(p1.x + dx, p1.y);
-        let c2 = Point::new(p2.x - dx, p2.y);
+        // 方向感知的控制点：让贝塞尔曲线始终沿 p1→p2 自然弯曲，
+        // 即便目标算子被拖到源算子左侧也能保持平滑 S 形而非生硬直线。
+        let dir_x = if p2.x >= p1.x { 1.0 } else { -1.0 };
+        let dx = (p2.x - p1.x).abs().max(40.0) * 0.5;
+        let c1 = Point::new(p1.x + dir_x * dx, p1.y);
+        let c2 = Point::new(p2.x - dir_x * dx, p2.y);
         // 源/目标执行状态：用于边着色
         let src_status = p.node_statuses.get(&edge.source_node_id).copied().unwrap_or(0u8);
         let dst_status = p.node_statuses.get(&edge.target_node_id).copied().unwrap_or(0u8);
@@ -718,9 +721,10 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
                 src.operator_type.output_count(),
             );
             let p2 = Point::new(drag_world.x, drag_world.y);
-            let dx = (p2.x - p1.x).max(20.0) * 0.5;
-            let c1 = Point::new(p1.x + dx, p1.y);
-            let c2 = Point::new(p2.x - dx, p2.y);
+            let dir_x = if p2.x >= p1.x { 1.0 } else { -1.0 };
+            let dx = (p2.x - p1.x).abs().max(40.0) * 0.5;
+            let c1 = Point::new(p1.x + dir_x * dx, p1.y);
+            let c2 = Point::new(p2.x - dir_x * dx, p2.y);
             let path = Path::new(|b| {
                 b.move_to(p1);
                 b.bezier_curve_to(c1, c2, p2);
