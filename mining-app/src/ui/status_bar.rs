@@ -5,11 +5,12 @@
 //! - 右侧状态项："执行中 / 未保存 / 视图名" 等（按语义色生成 Badge）
 
 use iced::{Alignment, Color, Element, Length, Padding};
-use iced::widget::{column, container, row, text};
+use iced::widget::{button, column, container, row, text};
 
 // iced_aw::Badge 替换手搓胶囊容器，统一蓝紫主题质感。
 use iced_aw::widget::badge::Badge;
 
+use super::icons::{self, IconKind};
 use super::state::{LogLevel, Message, UiState, ViewType};
 use super::theme;
 
@@ -32,6 +33,10 @@ pub fn view_status_bar(state: &UiState) -> Element<'_, Message> {
 
     // 右侧胶囊型状态项
     let mut right_items: Vec<Element<'_, Message>> = Vec::new();
+    // 运行日志面板折叠时，在状态栏提供"运行日志"按钮以重新展开
+    if !state.dag_editor.log_panel_visible {
+        right_items.push(view_log_panel_toggle_btn());
+    }
     if state.dag_editor.dag_exec_task.is_some() {
         let pill = status_pill_small("⏵ 执行中", theme::accent_teal());
         right_items.push(pill);
@@ -97,6 +102,58 @@ fn status_pill_small(label: &'static str, color: Color) -> Element<'static, Mess
     .padding(4)
     .style(theme::status_pill_style(color))
     .into()
+}
+
+/// 运行日志折叠按钮：日志面板关闭后缩小到状态栏的可点击胶囊，
+/// 风格与右侧 status_pill_small 一致（accent 色），点击重新展开面板。
+fn view_log_panel_toggle_btn() -> Element<'static, Message> {
+    let accent = theme::accent();
+    let icon = icons::view_icon_with_stroke(IconKind::Diamond, accent, 10.0, 1.3);
+    let label = row![
+        icon,
+        text("运行日志").color(accent).size(10.0),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    let content = container(label).padding(Padding {
+        top: 2.0,
+        bottom: 2.0,
+        left: 6.0,
+        right: 6.0,
+    });
+
+    button(content)
+        .padding(Padding::default())
+        .on_press(Message::ToggleLogPanel)
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.background = Some(Color {
+                r: accent.r, g: accent.g, b: accent.b, a: 12.0 / 255.0,
+            }.into());
+            s.text_color = accent;
+            s.border.width = 1.0;
+            s.border.color = Color {
+                r: accent.r, g: accent.g, b: accent.b, a: 35.0 / 255.0,
+            };
+            s.border.radius = 6.0.into();
+            match status {
+                iced::widget::button::Status::Hovered => {
+                    s.background = Some(Color {
+                        r: accent.r, g: accent.g, b: accent.b, a: 28.0 / 255.0,
+                    }.into());
+                    s.text_color = Color::WHITE;
+                }
+                iced::widget::button::Status::Pressed => {
+                    s.background = Some(Color {
+                        r: accent.r, g: accent.g, b: accent.b, a: 40.0 / 255.0,
+                    }.into());
+                }
+                _ => {}
+            }
+            s
+        })
+        .into()
 }
 
 fn current_status(state: &UiState) -> (LogLevel, String) {

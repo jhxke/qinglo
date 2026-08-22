@@ -58,6 +58,8 @@ pub enum IconKind {
     Warning,
     /// Tab 关闭按钮：精致 × 叉号（两条交叉对角线，圆角端点）
     Close,
+    /// 清空日志：向左的箭头内含 ×（清除/清空语义，区别于删除用的垃圾桶）
+    Clear,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -195,6 +197,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Edit => draw_pencil(frame, color, sw),
         IconKind::Warning => draw_warning(frame, color, sw),
         IconKind::Close => draw_close(frame, color, sw),
+        IconKind::Clear => draw_clear(frame, color, sw),
     }
 }
 
@@ -553,6 +556,33 @@ fn draw_close(frame: &mut canvas::Frame, color: Color, sw: f32) {
         b.line_to(Point::new(6.0, 18.0));
     });
     frame.stroke(&line2, stroke);
+}
+
+/// 清空：向左的箭头内含 × —— 左指五边形箭头（左尖端 + 右侧矩形杆），
+/// 杆内居中绘制两条交叉对角线构成 ×，表达"清除/清空"语义。
+fn draw_clear(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 左指箭头外形：左尖端 → 右上 → 右下 → 回尖端（五边形）
+    let arrow = Path::new(|b| {
+        b.move_to(Point::new(4.0, 12.0));
+        b.line_to(Point::new(10.0, 6.0));
+        b.line_to(Point::new(20.0, 6.0));
+        b.line_to(Point::new(20.0, 18.0));
+        b.line_to(Point::new(10.0, 18.0));
+        b.close();
+    });
+    frame.stroke(&arrow, stroke);
+    // 内部 ×（居中于右侧箭杆区域，中心 (15, 12)）
+    let x1 = Path::new(|b| {
+        b.move_to(Point::new(12.5, 9.0));
+        b.line_to(Point::new(17.5, 15.0));
+    });
+    frame.stroke(&x1, stroke);
+    let x2 = Path::new(|b| {
+        b.move_to(Point::new(17.5, 9.0));
+        b.line_to(Point::new(12.5, 15.0));
+    });
+    frame.stroke(&x2, stroke);
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）

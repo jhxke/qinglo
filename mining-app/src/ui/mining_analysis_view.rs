@@ -163,7 +163,7 @@ fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
             .align_y(Alignment::Center);
         button(label_widget)
             .width(Length::Fill)
-            .height(Length::Fixed(26.0))
+            .height(Length::Fixed(32.0))
             .padding(Padding::default())
             .on_press(msg)
             .style(move |_t, status| {
@@ -212,13 +212,13 @@ fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
         tab_button("算子面板", matches!(active, Operators), Message::SwitchLeftPanel(Operators)),
     ]
     .width(Length::Fill)
-    .height(Length::Fixed(26.0))
+    .height(Length::Fixed(36.0))
     .spacing(4.0)
     .padding(Padding { top: 2.0, bottom: 2.0, left: 8.0, right: 8.0 });
 
     container(inner)
         .width(Length::Fill)
-        .height(Length::Fixed(30.0))
+        .height(Length::Fixed(36.0))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color::from(theme::SIDEBAR_BG).into());
@@ -398,12 +398,18 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
     .spacing(2)
     .width(Length::Fill);
 
-    // 操作按钮（仅非激活态时弱化显示，激活态更明显）
-    let rename_btn = card_icon_button("✎", Message::RenameModelClick(m.id.clone()), is_active);
-    let delete_btn = card_icon_button(
-        "✕",
+    // 操作按钮：编辑（铅笔）+ 删除（垃圾桶，红色警示），矢量图标同尺寸协调
+    let rename_btn = card_icon_button_kind(
+        IconKind::Pencil,
+        Message::RenameModelClick(m.id.clone()),
+        is_active,
+        None,
+    );
+    let delete_btn = card_icon_button_kind(
+        IconKind::Trash,
         Message::DeleteModelClick(m.id.clone(), m.name.clone()),
         is_active,
+        Some(theme::danger()),
     );
     let actions = row![rename_btn, delete_btn].spacing(2);
 
@@ -442,32 +448,46 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
     mid.into()
 }
 
-/// 卡片上的小图标按钮（激活态自适应对比度）
-fn card_icon_button(label: &'static str, msg: Message, is_active: bool) -> Element<'static, Message> {
-    let normal_color = if is_active {
-        Color { r: 1.0, g: 1.0, b: 1.0, a: 220.0 / 255.0 }
-    } else {
-        theme::text_weak()
+/// 建模列表卡片操作按钮（矢量图标版）：26×26 透明底，hover 微亮背景，
+/// 用 `icons::view_icon_with_stroke` 矢量图标统一风格。编辑用铅笔、删除用垃圾桶。
+///
+/// `tone` 传入 `Some(color)` 时，图标常态即用该语义色（删除按钮传 danger 红）；
+/// `None` 时按激活/非激活自动取近白/弱灰，hover 提亮到近白。
+fn card_icon_button_kind(
+    icon_kind: IconKind,
+    msg: Message,
+    is_active: bool,
+    tone: Option<Color>,
+) -> Element<'static, Message> {
+    let normal_color = match tone {
+        Some(c) => c,
+        None => if is_active {
+            Color { r: 1.0, g: 1.0, b: 1.0, a: 220.0 / 255.0 }
+        } else {
+            theme::text_weak()
+        },
     };
-    let hover_color = if is_active {
-        Color::WHITE
-    } else {
-        theme::text_strong()
+    let hover_color = match tone {
+        Some(c) => c,
+        None => if is_active {
+            Color::WHITE
+        } else {
+            theme::text_strong()
+        },
     };
-    let icon_widget = container(
-        text(label).color(normal_color).size(12.0)
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center);
+    let icon = icons::view_icon_with_stroke(icon_kind, normal_color, 13.0, 1.4);
+    let icon_widget = container(icon)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
     button(icon_widget)
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
         .style(move |_t, status| {
             let mut s = iced::widget::button::Style::default();
             s.background = Some(Color::TRANSPARENT.into());
-            s.text_color = normal_color;
+            s.text_color = hover_color;
             s.border.radius = 6.0.into();
             if matches!(status, iced::widget::button::Status::Hovered) {
                 let hover_alpha = if is_active { 30.0 } else { 18.0 };
@@ -486,61 +506,14 @@ fn view_main_area(state: &UiState) -> Element<'_, Message> {
     let top_bar = view_top_bar(state);
     let middle = view_middle(state);
 
-    // 日志面板：根据 log_panel_visible 决定是展开完整面板还是显示折叠条
+    // 日志面板：可见时显示完整面板，折叠时不再占用主区下方空间，
+    // 而是缩小到状态栏右侧（详见 status_bar::view_status_bar）。
     let log_area: Element<'_, Message> = if state.dag_editor.log_panel_visible {
         super::log_panel::view_log_panel(state)
     } else {
-        // 折叠态：一条细条 + 「▲ 运行日志」按钮，点击重新展开
-        let top_divider = container(row![])
+        container(column![])
             .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(|_t| {
-                let mut s = iced::widget::container::Style::default();
-                s.background = Some(Color::from(theme::divider()).into());
-                s
-            });
-
-        let expand_icon = icons::view_icon_with_stroke(IconKind::Diamond, theme::text_weak(), 10.0, 1.3);
-        let label = row![
-            expand_icon,
-            text("运行日志").color(theme::text_weak()).size(10.5),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-
-        let label_content = container(label)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center);
-
-        let expand_btn = button(label_content)
-            .width(Length::Fill)
-            .height(Length::Fixed(22.0))
-            .padding(Padding::default())
-            .on_press(Message::ToggleLogPanel)
-            .style(|_t, status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(theme::panel_bg()).into());
-                s.text_color = theme::text_weak();
-                s.border.radius = 0.0.into();
-                match status {
-                    iced::widget::button::Status::Hovered => {
-                        s.background = Some(Color::from(theme::hover_bg()).into());
-                        s.text_color = theme::text_hover();
-                    }
-                    _ => {}
-                }
-                s
-            });
-
-        let col = column![top_divider, expand_btn]
-            .width(Length::Fill)
-            .spacing(0);
-
-        container(col)
-            .width(Length::Fill)
-            .height(Length::Shrink)
+            .height(Length::Fixed(0.0))
             .into()
     };
 
