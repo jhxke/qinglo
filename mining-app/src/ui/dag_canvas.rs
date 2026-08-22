@@ -680,7 +680,7 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         let dx = (p2.x - p1.x).max(20.0) * 0.5;
         let c1 = Point::new(p1.x + dx, p1.y);
         let c2 = Point::new(p2.x - dx, p2.y);
-        // 源/目标执行状态：用于边着色与数据流动光点
+        // 源/目标执行状态：用于边着色
         let src_status = p.node_statuses.get(&edge.source_node_id).copied().unwrap_or(0u8);
         let dst_status = p.node_statuses.get(&edge.target_node_id).copied().unwrap_or(0u8);
         // 边色随状态语义化：两端完成→翠绿、流向执行中→靛青、失败端→珊瑚红
@@ -701,14 +701,6 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
 
         // 连线中部箭头：在贝塞尔曲线 t=0.5 处画一个小三角形，指向 p2 方向
         draw_edge_arrow(frame, p1, c1, c2, p2, edge_color);
-
-        // 数据流动光点：源已完成 && 目标执行中/未执行 → 沿曲线流动的青色光点
-        if (src_status == 2) && (dst_status == 1 || dst_status == 0) && !p.dragging_in_progress {
-            let dot_color = Color::from(theme::accent_teal());
-            let base = p.anim_time * 0.6;
-            draw_flow_dot(frame, p1, c1, c2, p2, base % 1.0, dot_color);
-            draw_flow_dot(frame, p1, c1, c2, p2, (base + 0.5) % 1.0, dot_color);
-        }
     }
 
     // 3.5) 连线创建临时贝塞尔
@@ -761,23 +753,19 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         // === 执行状态视觉（运行动画） ===
         // 0=未执行 1=执行中 2=完成 3=失败 4=过期
         let status = p.node_statuses.get(&node.id).copied().unwrap_or(0u8);
-        // 呼吸因子 0..1：执行中/失败节点用 sin 调制发光强度与边框宽度
+        // 呼吸因子 0..1：失败节点用 sin 调制发光强度与边框宽度
+        // 注意：执行中(1)/完成(2) 不再驱动卡片呼吸发光——
+        //   执行中改由"输出端口圈闪烁"表达（见 draw_ports_indexed），
+        //   完成态改由"节点右上角成功标识小绿点"表达（见循环末尾）。
         let pulse = (p.anim_time * 2.5).sin() * 0.5 + 0.5;
         // 状态边框 (颜色, 宽度)；None 表示无状态视觉，回退到选中/默认
         let status_border: Option<(Color, f32)> = match status {
-            1 => Some((Color::from(theme::accent()), 2.0 + pulse * 0.8)),
-            2 => Some((Color::from(theme::success()), 1.6)),
             3 => Some((Color::from(theme::danger()), 1.6)),
             4 => Some((Color::from(theme::warning()), 1.4)),
             _ => None,
         };
-        // 状态外发光 (颜色, alpha)；执行中混入算子色避免单调
+        // 状态外发光 (颜色, alpha)；仅失败态保留外发光呼吸
         let status_glow: Option<(Color, f32)> = match status {
-            1 => Some((
-                mix_color(Color::from(theme::accent()), op_color, 0.3),
-                0.30 + pulse * 0.40,
-            )),
-            2 => Some((Color::from(theme::success()), 0.22)),
             3 => Some((Color::from(theme::danger()), 0.35 + pulse * 0.20)),
             _ => None,
         };
@@ -888,7 +876,32 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         }
 
         if draw_ports {
-            draw_ports_indexed(frame, node, w, h, &out_has_fan, &in_occupied, op_color);
+            draw_ports_indexed(frame, node, w, h, &out_has_fan, &in_occupied, op_color, status, p.anim_time);
+        }
+
+        // 完成态成功标识：节点右上角内部绿色徽章 + 白色对勾（静态，无动画）
+        // 用户要求：成功后做一个标识即可，标识用"勾"
+        if status == 2 {
+            let bc = Point::new(node.position.x + w - 9.0, node.position.y + 9.0);
+            // 外圈柔光
+            let halo = Path::circle(bc, 6.0);
+            frame.fill(&halo, with_alpha(Color::from(theme::success()), 0.25));
+            // 实心绿色圆背景
+            let badge = Path::circle(bc, 5.0);
+            frame.fill(&badge, Color::from(theme::success()));
+            // 白色对勾：左下 → 底部转折 → 右上
+            let check = Path::new(|b| {
+                b.move_to(Point::new(bc.x - 2.4, bc.y + 0.3));
+                b.line_to(Point::new(bc.x - 0.6, bc.y + 2.0));
+                b.line_to(Point::new(bc.x + 2.6, bc.y - 1.8));
+            });
+            frame.stroke(&check, Stroke {
+                style: stroke::Style::Solid(Color { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }),
+                width: 1.8,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Default::default()
+            });
         }
     }
 }
@@ -976,34 +989,11 @@ fn with_alpha(c: Color, alpha: f32) -> Color {
     Color { a: alpha, ..c }
 }
 
-/// 在三次贝塞尔曲线参数 t（0..1）处绘制一个流动光点（外发光 + 实心芯）。
-///
-/// 用于 DAG 执行时沿边展示数据流动方向：源节点已完成、目标节点执行中/未执行
-/// 时，光点从源端口流向目标端口，配合 ~80ms 的 `AnimTick` 形成连续流动感。
-fn draw_flow_dot(
-    frame: &mut canvas::Frame,
-    p0: Point,
-    p1: Point,
-    p2: Point,
-    p3: Point,
-    t: f32,
-    color: Color,
-) {
-    let omt = 1.0 - t;
-    // 三次贝塞尔位置：B(t) = (1-t)³P0 + 3(1-t)²t P1 + 3(1-t)t² P2 + t³ P3
-    let pos = Point::new(
-        omt * omt * omt * p0.x + 3.0 * omt * omt * t * p1.x + 3.0 * omt * t * t * p2.x + t * t * t * p3.x,
-        omt * omt * omt * p0.y + 3.0 * omt * omt * t * p1.y + 3.0 * omt * t * t * p2.y + t * t * t * p3.y,
-    );
-    // 外发光（半透明大圆）+ 实心芯（亮色小圆）
-    let glow = Path::circle(pos, 5.0);
-    frame.fill(&glow, with_alpha(color, 0.25));
-    let core = Path::circle(pos, 2.5);
-    frame.fill(&core, color);
-}
-
 /// 使用预建索引绘制单个节点的所有端口。
 /// 输出端口统一使用靛青色（theme::accent），输入端口使用算子色。
+///
+/// 执行中节点（status==1）的输出端口圈做脉冲闪烁，替代旧的节点卡片呼吸发光
+/// 动画——用户要求：DAG 运行时只需输出端口圈闪烁即可。
 fn draw_ports_indexed(
     frame: &mut canvas::Frame,
     node: &crate::dag::Node,
@@ -1012,20 +1002,32 @@ fn draw_ports_indexed(
     out_has_fan: &HashMap<PortKey, bool>,
     in_occupied: &HashMap<PortKey, bool>,
     op_color: Color,
+    status: u8,
+    anim_time: f32,
 ) {
     let output_count = node.operator_type.output_count();
     let input_count = node.operator_type.input_count();
 
     // 输出端口（右侧，统一靛青色）
     let out_color = Color::from(theme::accent());
+    // 执行中：输出端口圈做"放大缩小"脉动动效（sin 调制半径）
+    let running = status == 1;
+    let pulse = (anim_time * 2.5).sin() * 0.5 + 0.5;
     for i in 0..output_count {
         let p = port_world_position(node.position, w, h, true, i, output_count);
         let key: PortKey = (node.id.clone(), i, true);
         let has_fan = out_has_fan.get(&key).copied().unwrap_or(false);
-        // 有 fan-out 时白色环 + 外发光，指示可继续分发
-        let glow_alpha = if has_fan { 170.0 / 255.0 } else { 0.0 };
-        let ring_color = if has_fan { Color::WHITE } else { Color::from(theme::card_stroke()) };
-        draw_port_cached(frame, p, ring_color, out_color, glow_alpha);
+        if running {
+            // 执行中：半径在 PORT_RADIUS ~ +20% 间往复脉动，外发光配合明暗
+            let radius = PORT_RADIUS * (1.0 + 0.20 * pulse);
+            let glow_alpha = 0.20 + pulse * 0.55;
+            draw_port_cached(frame, p, out_color, out_color, glow_alpha, radius);
+        } else {
+            // 有 fan-out 时白色环 + 外发光，指示可继续分发
+            let glow_alpha = if has_fan { 170.0 / 255.0 } else { 0.0 };
+            let ring_color = if has_fan { Color::WHITE } else { Color::from(theme::card_stroke()) };
+            draw_port_cached(frame, p, ring_color, out_color, glow_alpha, PORT_RADIUS);
+        }
     }
 
     // 输入端口（左侧）
@@ -1040,7 +1042,7 @@ fn draw_ports_indexed(
         } else {
             op_color
         };
-        draw_port_cached(frame, p, ring_color, op_color, glow_alpha);
+        draw_port_cached(frame, p, ring_color, op_color, glow_alpha, PORT_RADIUS);
     }
 }
 
@@ -1049,6 +1051,9 @@ fn draw_ports_indexed(
 ///   2) 描边环（ring_color）— 状态指示
 ///   3) 彩色填充（fill_color）— 类型指示（输入青 / 输出靛）
 ///   4) 中心小白点 — 增加精致感与点击目标感
+///
+/// `radius` 为主基准半径，四层结构按比例同缩放，保证整体协调。
+/// 静态端口传 `PORT_RADIUS`；执行中端口传脉动半径实现"放大缩小"动效。
 #[inline(always)]
 fn draw_port_cached(
     frame: &mut canvas::Frame,
@@ -1056,15 +1061,18 @@ fn draw_port_cached(
     ring_color: Color,
     fill_color: Color,
     glow_alpha: f32,
+    radius: f32,
 ) {
+    // 按基准半径比例缩放各层偏移，保证整体比例协调
+    let scale = radius / PORT_RADIUS;
     // 1) 外发光圈（仅 glow_alpha > 0 时绘制）
     if glow_alpha > 0.0 {
-        let glow_path = Path::circle(center, PORT_RADIUS + 2.5);
+        let glow_path = Path::circle(center, radius + 2.5 * scale);
         frame.stroke(
             &glow_path,
             Stroke {
                 style: stroke::Style::Solid(with_alpha(fill_color, glow_alpha)),
-                width: 2.5,
+                width: 2.5 * scale,
                 line_cap: LineCap::Round,
                 line_join: LineJoin::Round,
                 ..Default::default()
@@ -1072,13 +1080,13 @@ fn draw_port_cached(
         );
     }
     // 2) 描边环
-    let outer = Path::circle(center, PORT_RADIUS);
+    let outer = Path::circle(center, radius);
     frame.stroke(&outer, port_stroke(ring_color));
     // 3) 彩色填充
-    let inner = Path::circle(center, PORT_RADIUS - 1.5);
+    let inner = Path::circle(center, (radius - 1.5 * scale).max(0.5));
     frame.fill(&inner, fill_color);
     // 4) 中心小白点，让端口从连线中更"抢眼"
-    let core = Path::circle(center, 1.6);
+    let core = Path::circle(center, 1.6 * scale);
     frame.fill(&core, Color {
         r: 1.0, g: 1.0, b: 1.0, a: 0.92,
     });

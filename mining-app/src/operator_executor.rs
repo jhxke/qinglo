@@ -588,7 +588,8 @@ fn as_millis_helper(d: std::time::Duration) -> u128 {
 /// 将单个节点的执行结果回填到 registry 与预览缓存。
 ///
 /// 从 [`apply_dag_execution_result`] 的循环体抽出，供「最终结果回填」和「进度回填」共用。
-/// 仅处理 `Completed` / `Failed` 终态；`Executing` 等中间态由调用方单独处理。
+/// 处理 `Completed` / `Failed` 终态与 `Executing` 中间态（标记节点为执行中，
+/// 驱动画布输出端口脉动动效）；其余非终态由 `other` 分支跳过。
 /// 返回 `Err` 仅对 `Failed` 状态（携带错误信息），调用方可据此决定是否中断后续。
 pub(crate) fn apply_dag_node_result(
     graph: &DagGraph,
@@ -632,6 +633,12 @@ pub(crate) fn apply_dag_node_result(
                 "节点 {} ({}) 执行失败: {}",
                 nr.node_id, display_name, error_msg
             ))
+        }
+        OperatorExecutionStatus::Executing => {
+            // 中间态：标记节点为执行中，驱动画布输出端口圈"放大缩小"脉动动效。
+            // inputs 不回传（与 Completed 分支一致，传空 Vec），仅用于切换状态码为 1。
+            registry.set_executing(&nr.node_id, Vec::new());
+            Ok(())
         }
         other => {
             eprintln!(
