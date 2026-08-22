@@ -124,13 +124,14 @@ fn port_stroke(color: Color) -> Stroke<'static> {
 /// 这样 `DagProgram::update` 在 CursorMoved 且无拖拽/连线时就不发 Message，
 /// 避免触发 update → view → draw 链。
 pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
-    let (graph, offset, zoom, selected_id, connecting_from, drag_world, dragging_in_progress, node_statuses, anim_time) =
+    let (graph, offset, zoom, selected_id, selected_ids, connecting_from, drag_world, dragging_in_progress, node_statuses, anim_time) =
         match state.dag_editor.active_tab() {
             Some(tab) => (
                 tab.graph.clone(),
                 tab.canvas_offset,
                 tab.canvas_zoom,
                 tab.selected_node_id.clone(),
+                tab.selected_node_ids.clone(),
                 tab.connecting_from.clone(),
                 tab.connecting_drag_world,
                 tab.dragging_node_id.is_some() || state.canvas_pan_anchor.is_some(),
@@ -142,6 +143,7 @@ pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
                 Vec2::ZERO,
                 1.0,
                 None,
+                Vec::new(),
                 None,
                 None,
                 false,
@@ -155,6 +157,7 @@ pub fn view_dag_canvas(state: &UiState) -> Element<'_, Message> {
         offset,
         zoom,
         selected_node_id: selected_id,
+        selected_node_ids: selected_ids,
         connecting_from,
         connecting_drag_world: drag_world,
         dragging_in_progress,
@@ -215,6 +218,10 @@ struct DagProgram {
     offset: Vec2,
     zoom: f32,
     selected_node_id: Option<String>,
+    /// 多选节点 ID 列表（Ctrl+Click 切换）。与 `selected_node_id` 互不影响：
+    /// 单选驱动参数面板，多选仅用于批量对齐。绘制时只要节点 id 出现在两者之一
+    /// 即用选中态描边，使多选状态视觉一致。
+    selected_node_ids: Vec<String>,
     connecting_from: Option<(String, usize, bool)>,
     connecting_drag_world: Option<Vec2>,
     /// 真 = 正在拖节点（dragging_node_id）或平移画布（canvas_pan_anchor），
@@ -250,6 +257,7 @@ impl DagProgram {
                 self.dragging_in_progress,
                 &self.graph,
                 self.selected_node_id.as_deref(),
+                &self.selected_node_ids,
                 self.connecting_from.as_ref(),
                 self.connecting_drag_world.as_ref(),
                 &self.node_statuses,
@@ -275,6 +283,7 @@ impl PartialEq for DagProgram {
             && self.offset == other.offset
             && self.zoom == other.zoom
             && self.selected_node_id == other.selected_node_id
+            && self.selected_node_ids == other.selected_node_ids
             && self.connecting_from == other.connecting_from
             && self.connecting_drag_world == other.connecting_drag_world
             && self.anim_time == other.anim_time
@@ -463,6 +472,7 @@ impl canvas::Program<Message> for DagProgram {
             self.dragging_in_progress,
             &self.graph,
             self.selected_node_id.as_deref(),
+            &self.selected_node_ids,
             self.connecting_from.as_ref(),
             self.connecting_drag_world.as_ref(),
             &self.node_statuses,
@@ -496,6 +506,7 @@ fn world_fingerprint_of(
     dragging_in_progress: bool,
     graph: &DagGraph,
     selected_node_id: Option<&str>,
+    selected_node_ids: &[String],
     connecting_from: Option<&(String, usize, bool)>,
     connecting_drag_world: Option<&Vec2>,
     node_statuses: &HashMap<String, u8>,
@@ -544,6 +555,12 @@ fn world_fingerprint_of(
         mix_bytes(&mut h, id.as_bytes());
     } else {
         mix_u64(&mut h, 0);
+    }
+
+    // 多选列表（顺序敏感，便于用户切换不同选择时触发重绘）
+    mix_u64(&mut h, selected_node_ids.len() as u64);
+    for id in selected_node_ids {
+        mix_bytes(&mut h, id.as_bytes());
     }
 
     if let Some((id, idx, is_out)) = connecting_from {
@@ -649,6 +666,12 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
     let text_strong = Color::from(theme::text_strong());
     let edge_stroke_val = edge_stroke();
     let selected_id = p.selected_node_id.as_deref();
+    // 多选集合：转 HashSet 加速查询（节点数通常 <100，但避免 O(n²) 退化）
+    let multi_selected: std::collections::HashSet<&str> = p
+        .selected_node_ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
 
     // 3) 连线（先画，被节点覆盖线头）
     for edge in &p.graph.edges {
@@ -749,7 +772,8 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
         let h = NODE_HEIGHT;
         let top_left = Point::new(node.position.x, node.position.y);
 
-        let is_selected = selected_id == Some(&node.id);
+        let is_selected = selected_id == Some(&node.id)
+            || multi_selected.contains(node.id.as_str());
         let op_color = node.operator_type.color();
 
         // === 执行状态视觉（运行动画） ===

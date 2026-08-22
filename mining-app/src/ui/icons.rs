@@ -60,6 +60,10 @@ pub enum IconKind {
     Close,
     /// 清空日志：向左的箭头内含 ×（清除/清空语义，区别于删除用的垃圾桶）
     Clear,
+    /// 多选对齐-居上：三条竖线顶部对齐到同一水平线
+    AlignTop,
+    /// 多选对齐-居左：三条横线左端对齐到同一垂直线
+    AlignLeft,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -198,6 +202,8 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Warning => draw_warning(frame, color, sw),
         IconKind::Close => draw_close(frame, color, sw),
         IconKind::Clear => draw_clear(frame, color, sw),
+        IconKind::AlignTop => draw_align_top(frame, color, sw),
+        IconKind::AlignLeft => draw_align_left(frame, color, sw),
     }
 }
 
@@ -583,6 +589,52 @@ fn draw_clear(frame: &mut canvas::Frame, color: Color, sw: f32) {
         b.line_to(Point::new(12.5, 15.0));
     });
     frame.stroke(&x2, stroke);
+}
+
+/// 居上对齐：三条不等长竖线顶部对齐到同一水平参考线。
+/// 顶部参考线略粗（强调对齐基准），三条竖线从其下垂直延伸不同长度，
+/// 表达"多个对象顶端对齐到同一水平线"的语义。
+fn draw_align_top(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 顶部水平参考线（贯穿图标宽度）
+    let top_line = Path::new(|b| {
+        b.move_to(Point::new(3.5, 5.0));
+        b.line_to(Point::new(20.5, 5.0));
+    });
+    frame.stroke(&top_line, stroke);
+    // 三条竖线，从参考线下方延伸到不同深度，模拟多个对象顶端对齐
+    let cols = [6.0_f32, 12.0, 18.0];
+    let bottoms = [14.0_f32, 18.0, 11.0];
+    for (x, y2) in cols.iter().zip(bottoms.iter()) {
+        let line = Path::new(|b| {
+            b.move_to(Point::new(*x, 5.0));
+            b.line_to(Point::new(*x, *y2));
+        });
+        frame.stroke(&line, stroke);
+    }
+}
+
+/// 居左对齐：三条不等长横线左端对齐到同一垂直参考线。
+/// 左侧参考线略粗（强调对齐基准），三条横线向右延伸不同长度，
+/// 表达"多个对象左端对齐到同一垂直线"的语义。
+fn draw_align_left(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 左侧垂直参考线
+    let left_line = Path::new(|b| {
+        b.move_to(Point::new(5.0, 3.5));
+        b.line_to(Point::new(5.0, 20.5));
+    });
+    frame.stroke(&left_line, stroke);
+    // 三条横线，从参考线向右延伸不同长度
+    let rows = [6.0_f32, 12.0, 18.0];
+    let rights = [14.0_f32, 18.0, 11.0];
+    for (y, x2) in rows.iter().zip(rights.iter()) {
+        let line = Path::new(|b| {
+            b.move_to(Point::new(5.0, *y));
+            b.line_to(Point::new(*x2, *y));
+        });
+        frame.stroke(&line, stroke);
+    }
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）

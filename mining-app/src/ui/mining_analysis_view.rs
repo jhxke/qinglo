@@ -856,20 +856,42 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
 /// - 半透明深色底 + 1px 微光边框 + 大圆角，漂浮于画布之上不遮挡节点
 /// - 图标来自 `icons::view_icon`（IconKind::Save / Run / Debug），零外部资源依赖
 /// - 次按钮透明底 + hover 提亮；主按钮 accent 实色填充；激活态（调试开）描边高亮
+/// - 当激活 tab 至少有 2 个多选节点时，追加居上 / 居左对齐按钮
 fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
     let debug_on = state
         .dag_editor
         .active_tab()
         .map(|t| t.debug_mode)
         .unwrap_or(false);
+    let multi_count = state
+        .dag_editor
+        .active_tab()
+        .map(|t| t.selected_node_ids.len())
+        .unwrap_or(0);
+    let show_align = multi_count >= 2;
 
-    let tools = row![
+    let mut tools = row![
         icon_only_tool_button(IconKind::Save, Message::SaveTab, false),
         icon_only_tool_button(IconKind::Run, Message::RunAllClick, true),
         icon_only_tool_button(IconKind::Debug, Message::ToggleDebug, debug_on),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
+
+    // 多选场景：追加对齐组（分隔线 + 居上 / 居左两个按钮）
+    if show_align {
+        tools = tools.push(toolbar_divider());
+        tools = tools.push(icon_only_tool_button(
+            IconKind::AlignTop,
+            Message::AlignTop,
+            false,
+        ));
+        tools = tools.push(icon_only_tool_button(
+            IconKind::AlignLeft,
+            Message::AlignLeft,
+            false,
+        ));
+    }
 
     container(tools)
         .padding(Padding { top: 4.0, bottom: 4.0, left: 6.0, right: 6.0 })
@@ -883,6 +905,21 @@ fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
             s.border.color = Color {
                 r: 1.0, g: 1.0, b: 1.0, a: 28.0/255.0
             };
+            s
+        })
+        .into()
+}
+
+/// 悬浮工具栏分组分隔线：1px 宽 + 16px 高的半透明竖线，与按钮同高对齐。
+fn toolbar_divider() -> Element<'static, Message> {
+    container(row![])
+        .width(Length::Fixed(1.0))
+        .height(Length::Fixed(16.0))
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 1.0, g: 1.0, b: 1.0, a: 28.0 / 255.0
+            }.into());
             s
         })
         .into()

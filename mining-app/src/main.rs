@@ -26,7 +26,7 @@ use iced::{
 };
 
 use mining_app::ui::{
-    Message, UiState, ViewType, LogLevel,
+    DagTab, Message, UiState, ViewType, LogLevel,
     view_activity_bar, view_mining_analysis, view_settings,
     view_status_bar, view_title_bar,
 };
@@ -392,6 +392,8 @@ impl MyApp {
                     if tab.selected_node_id.as_deref() == Some(&node_id) {
                         tab.selected_node_id = None;
                     }
+                    // 同步从多选列表中移除（若存在）
+                    tab.selected_node_ids.retain(|id| id != &node_id);
                     tab.graph.remove_node(&node_id);
                     tab.dirty = true;
                     tab.add_action_log(
@@ -400,6 +402,22 @@ impl MyApp {
                     );
                 }
             }
+
+            // ===== 多选与对齐 =====
+            Message::Keyboard(kb_event) => {
+                // 仅消费修饰键状态变化信息，其余按键事件忽略
+                use iced::keyboard::Event as KbEvent;
+                let mods = match kb_event {
+                    KbEvent::ModifiersChanged(m) => Some(m),
+                    KbEvent::KeyPressed { modifiers, .. }
+                    | KbEvent::KeyReleased { modifiers, .. } => Some(modifiers),
+                };
+                if let Some(m) = mods {
+                    state.modifiers = m;
+                }
+            }
+            Message::AlignTop => handle_align_top(state),
+            Message::AlignLeft => handle_align_left(state),
         }
         Task::none()
     }
@@ -467,11 +485,15 @@ impl MyApp {
                 || tab.pending_run_up_to.is_some()
                 || tab.io_registry.has_executing()
         });
+        // 键盘事件订阅：追踪 Ctrl/Shift 等修饰键状态，用于画布 Ctrl+Click 多选。
+        // iced::keyboard::listen 只会派发被 widget 链未消费的键盘事件，
+        // 不会干扰 text_input 等组件的按键处理。
+        let keyboard = iced::keyboard::listen().map(Message::Keyboard);
         if needs_anim {
             let anim = iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick);
-            Subscription::batch(vec![base, anim])
+            Subscription::batch(vec![base, anim, keyboard])
         } else {
-            base
+            Subscription::batch(vec![base, keyboard])
         }
     }
 
@@ -517,6 +539,13 @@ fn load_chinese_font() -> Vec<u8> {
 // - 世界坐标 world：`world = (pos - offset) / zoom`，对应 graph 中节点的 position
 
 /// 画布鼠标按下：命中节点 → 选中 + 开始拖拽；命中空白 → 开始平移画布。
+///
+/// Ctrl 多选语义：
+/// - Ctrl 按下 + 命中节点：toggle 该节点在 `selected_node_ids` 中的选中状态，
+///   不修改 `selected_node_id`（避免参数面板抖动），也不开始拖拽。
+///   若该节点是 `selected_node_id`，同步清空它，使下一次普通点击进入干净状态。
+/// - 普通点击 + 命中节点：清空 `selected_node_ids` 回到单选语义（旧行为）。
+/// - 普通点击 + 命中空白：清空 `selected_node_id` 与 `selected_node_ids`。
 fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
     // 先取 offset/zoom（Copy），避免后续借用冲突
     let (offset, zoom) = match state.dag_editor.active_tab() {
@@ -524,6 +553,7 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
         None => return,
     };
     let world = screen_to_world(pos, offset, zoom);
+    let ctrl_pressed = state.modifiers.control();
 
     // 在只读 tab 上做命中检测，并取出命中节点的当前位置
     let hit = state.dag_editor.active_tab().and_then(|tab| {
@@ -537,6 +567,28 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
     if let Some(tab) = state.dag_editor.active_tab_mut() {
         match hit {
             Some((node_id, node_pos)) => {
+                if ctrl_pressed {
+                    // Ctrl+Click：toggle 多选；保持参数面板稳定不动 selected_node_id；
+                    // 同步：若被取消的正是 selected_node_id 自身则清空它，使参数面板隐藏
+                    if let Some(pos_idx) = tab.selected_node_ids.iter().position(|id| id == &node_id) {
+                        tab.selected_node_ids.remove(pos_idx);
+                        if tab.selected_node_id.as_deref() == Some(&node_id) {
+                            tab.selected_node_id = None;
+                        }
+                    } else {
+                        tab.selected_node_ids.push(node_id.clone());
+                        // 若当前无主选中节点，则把它升格为 selected_node_id 便于参数面板展示
+                        if tab.selected_node_id.is_none() {
+                            tab.selected_node_id = Some(node_id);
+                        }
+                    }
+                    tab.dragging_node_id = None;
+                    // 不触发平移锚点，但也不开始拖拽：直接 return
+                    state.canvas_pan_anchor = None;
+                    return;
+                }
+                // 普通 Click：清空多选，进入单选 + 拖拽
+                tab.selected_node_ids.clear();
                 tab.selected_node_id = Some(node_id.clone());
                 tab.dragging_node_id = Some(node_id);
                 tab.drag_offset =
@@ -544,7 +596,9 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
                 hit_node = true;
             }
             None => {
+                // 点击空白：清空所有选中（含多选列表）
                 tab.selected_node_id = None;
+                tab.selected_node_ids.clear();
                 tab.dragging_node_id = None;
             }
         }
@@ -552,6 +606,9 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
 
     // UiState 级别的平移锚点（与 tab.dragging_node_id 互斥）
     if hit_node {
+        state.canvas_pan_anchor = None;
+    } else if ctrl_pressed {
+        // Ctrl+Click 空白：不开始平移，避免误拖动画布
         state.canvas_pan_anchor = None;
     } else {
         state.canvas_pan_anchor = Some((pos, offset));
@@ -734,4 +791,102 @@ fn handle_add_operator_by_name(state: &mut UiState, op_name: String) {
         tab.dirty = true;
         tab.add_action_log(format!("已添加算子 {}", op_name), LogLevel::Info);
     }
+}
+
+// ===== 多选对齐 =====
+//
+// 居上 / 居左对齐共用同一段"快照压栈 + 沿单轴重写位置"的逻辑，
+// 仅维度（y / x）与取值方向（min）不同。撤销快照按字段约定压入
+// `DagTab::node_position_history`，容量上限 50，超出丢弃最旧。
+
+/// 把当前所有节点的 (id, position) 快照压入撤销栈，超出容量上限 50 时丢弃最旧。
+fn push_node_position_snapshot(tab: &mut DagTab) {
+    let snapshot: Vec<(String, Vec2)> = tab
+        .graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.position))
+        .collect();
+    const HISTORY_CAP: usize = 50;
+    tab.node_position_history.push(snapshot);
+    while tab.node_position_history.len() > HISTORY_CAP {
+        tab.node_position_history.remove(0);
+    }
+}
+
+/// 多选对齐通用实现：对 `selected_node_ids` 中的所有节点，
+/// 把 `pick_dim(position)` 字段统一改为这些节点的最小值；其他维度保持不变。
+///
+/// - 居上对齐：`pick_dim = |p| p.y`，把所有节点 y 改为最小 y → 顶端对齐
+/// - 居左对齐：`pick_dim = |p| p.x`，把所有节点 x 改为最小 x → 左端对齐
+///
+/// 同时把 `new_pos` 回填到对应节点的 position 字段。
+fn align_selected<F, G>(
+    state: &mut UiState,
+    pick_dim: F,
+    set_dim: G,
+    label: &str,
+) where
+    F: Fn(Vec2) -> f32,
+    G: Fn(Vec2, f32) -> Vec2,
+{
+    let Some(tab) = state.dag_editor.active_tab_mut() else { return; };
+    if tab.selected_node_ids.len() < 2 {
+        tab.add_action_log(
+            "至少选中 2 个算子再执行对齐".to_string(),
+            LogLevel::Warning,
+        );
+        return;
+    }
+
+    // 收集选中节点的当前位置（仅取存在节点）
+    let mut coords: Vec<(String, f32)> = Vec::with_capacity(tab.selected_node_ids.len());
+    for id in &tab.selected_node_ids {
+        if let Some(n) = tab.graph.get_node(id) {
+            coords.push((id.clone(), pick_dim(n.position)));
+        }
+    }
+    if coords.len() < 2 {
+        tab.add_action_log(
+            "可对齐的选中算子不足 2 个".to_string(),
+            LogLevel::Warning,
+        );
+        return;
+    }
+    let target = coords.iter().map(|(_, v)| *v).fold(f32::INFINITY, f32::min);
+
+    // 压栈快照（用于将来撤销）
+    push_node_position_snapshot(tab);
+
+    // 应用对齐
+    for (id, _) in &coords {
+        if let Some(n) = tab.graph.get_node_mut(id) {
+            n.position = set_dim(n.position, target);
+        }
+    }
+    tab.dirty = true;
+    tab.add_action_log(
+        format!("已{}对齐 {} 个算子", label, coords.len()),
+        LogLevel::Info,
+    );
+}
+
+/// 居上对齐：所有选中节点的 y 统一为最小值。
+fn handle_align_top(state: &mut UiState) {
+    align_selected(
+        state,
+        |p| p.y,
+        |p, v| Vec2::new(p.x, v),
+        "居上",
+    );
+}
+
+/// 居左对齐：所有选中节点的 x 统一为最小值。
+fn handle_align_left(state: &mut UiState) {
+    align_selected(
+        state,
+        |p| p.x,
+        |p, v| Vec2::new(v, p.y),
+        "居左",
+    );
 }

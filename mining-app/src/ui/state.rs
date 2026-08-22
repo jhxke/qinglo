@@ -285,6 +285,17 @@ pub enum Message {
 
     /// 参数面板中某个参数输入框内容变化。参数为 (node_id, param_name, new_value)。
     ParamInput(String, String, String),
+
+    // ===== 多选与对齐 =====
+
+    /// 键盘事件：由 `iced::keyboard::listen` 订阅转发，用于追踪 Ctrl/Shift 等修饰键状态。
+    /// 仅 `ModifiersChanged` 与 `KeyPressed/KeyReleased` 中的 modifiers 字段会被消费
+    /// 写入 `UiState.modifiers`，其余事件忽略。
+    Keyboard(iced::keyboard::Event),
+    /// 多选对齐：将所有选中节点的 y 坐标对齐到最小值（顶部对齐）。
+    AlignTop,
+    /// 多选对齐：将所有选中节点的 x 坐标对齐到最小值（左侧对齐）。
+    AlignLeft,
 }
 
 /// 自定义算子编辑器的 Debug 面板状态。
@@ -318,6 +329,9 @@ pub struct UiState {
     /// 左键释放或切换 tab 时清空。与 `DagTab.dragging_node_id` 互斥：
     /// 同一时刻只有一个为非空（拖节点或平移画布）。
     pub canvas_pan_anchor: Option<(Vec2, Vec2)>,
+    /// 当前键盘修饰键状态（Ctrl/Shift/Alt/Logo）。由 `iced::keyboard::listen`
+    /// 订阅驱动，画布左键按下时用于判断是否为 Ctrl+Click 多选。
+    pub modifiers: iced::keyboard::Modifiers,
 }
 
 impl Default for UiState {
@@ -330,6 +344,7 @@ impl Default for UiState {
             anim_time: 0.0,
             main_window_id: None,
             canvas_pan_anchor: None,
+            modifiers: iced::keyboard::Modifiers::default(),
         }
     }
 }
