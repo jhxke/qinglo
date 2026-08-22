@@ -415,16 +415,23 @@ impl canvas::Program<Message> for DagProgram {
         };
         let world = screen_to_world(Vec2::new(pos.x, pos.y), self.offset, self.zoom);
 
+        // 正在连线：十字光标（端口命中优先级最高）
         if self.connecting_from.is_some() {
             return mouse::Interaction::Crosshair;
         }
         if hit_test_port(&self.graph, world).is_some() {
             return mouse::Interaction::Crosshair;
         }
+        // 拖动中（平移画布或拖节点）：抓握手
+        if self.dragging_in_progress {
+            return mouse::Interaction::Grabbing;
+        }
+        // 命中节点：节点可拖
         if hit_test_node(&self.graph, world).is_some() {
             return mouse::Interaction::Grab;
         }
-        mouse::Interaction::default()
+        // 画布空白：手形光标，提示可拖动平移画布
+        mouse::Interaction::Grab
     }
 
     fn draw(
