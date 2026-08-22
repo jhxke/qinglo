@@ -8,6 +8,7 @@
 //! - Tab 栏：点击切换、× 关闭
 //! - 工具栏：保存 / 执行 DAG（置 pending 标志，由 Tick 轮询 spawn）/ 调试切换 / 清空日志
 //! - 日志面板：三子标签（提醒 / 算子运行 / 通信报文）+ scrollable 渲染
+//!   （日志面板的视图代码位于 `super::log_panel` 模块）
 //! - 对话框用 `stack::Stack` 叠加半透明遮罩 + 居中卡片实现
 //!
 //! 后台执行 spawn：`try_spawn_pending_dag_exec` 在 Tick 中被调用，检查激活 tab 的
@@ -25,14 +26,15 @@ use iced::{
 };
 
 // ===== iced_aw 组件导入 =====
-// 引入 iced_aw::TabBar / TabLabel / Card / Badge，替换部分手搓组件，提升 UI 质感。
-use iced_aw::widget::{Card, TabBar, TabLabel};
+// 引入 iced_aw::Card / Badge，替换部分手搓组件，提升 UI 质感。
+// 日志面板的 TabBar / TabLabel 已迁出至 log_panel 模块。
+use iced_aw::widget::Card;
 use iced_aw::widget::badge::Badge;
 
 use super::icons::{self, IconKind};
 use super::state::{
     DagEditorState, DagExecKind, DagExecMessage, DagExecTask, DagTab,
-    JsonDirection, LeftPanelTab, LogCategory, LogLevel, Message, UiState,
+    LeftPanelTab, LogLevel, Message, UiState,
 };
 use super::theme;
 use crate::dag_store;
@@ -49,13 +51,9 @@ use operator_executor_client::protocol::OperatorExecutionStatus;
 /// 历史上建模列表为 220px、算子面板为 240px；二者合并到同一侧栏后取较大值 240px，
 /// 既保证算子卡片有足够展示空间，又让画布水平方向多出 220px。
 const LEFT_PANEL_WIDTH: f32 = 240.0;
-/// 顶部栏高度：Tab 行 34px + 1px 分隔线 = 35px。
+/// 顶部栏高度：Tab 行 36px + 1px 分隔线 = 37px。
 /// 工具栏已迁移为画布上的悬浮条状，不再占用顶部栏空间。
-const TOP_BAR_HEIGHT: f32 = 35.0;
-/// 底部日志面板高度。
-const LOG_PANEL_HEIGHT: f32 = 220.0;
-/// 日志面板最多渲染条数（避免千条日志拖垮渲染）。
-const LOG_RENDER_LIMIT: usize = 200;
+const TOP_BAR_HEIGHT: f32 = 37.0;
 /// 对话框基础宽度（实际对话框可能覆盖此值）。
 #[allow(dead_code)]
 const DIALOG_WIDTH: f32 = 360.0;
@@ -147,21 +145,78 @@ fn view_sidebar(state: &UiState) -> Element<'_, Message> {
 
 /// 左侧面板顶部 tab 栏：[建模列表 | 算子面板]。
 ///
-/// 用 iced_aw::TabBar 替换手搓实现，统一选中态/hover/边框样式；
-/// LeftPanelTab 已实现 Eq + Clone + Copy，满足 TabBar 对 TabId 的约束。
-/// 点击切换 `active_left_panel`。
+/// 手搓两个 button 实现，激活态实色靛紫填充 + 白字，未激活透明底 + 灰字，
+/// 完全避免 iced_aw::TabBar 样式派发失效问题。点击切换 `active_left_panel`。
 fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
-    let bar = TabBar::new(|tab: LeftPanelTab| Message::SwitchLeftPanel(tab))
-        .push(LeftPanelTab::Models, TabLabel::Text(String::from("建模列表")))
-        .push(LeftPanelTab::Operators, TabLabel::Text(String::from("算子面板")))
-        .set_active_tab(&active)
-        .style(theme::left_panel_tab_bar_style())
-        .height(Length::Fixed(30.0))
-        .width(Length::Fill)
-        .text_size(11.0)
-        .tab_width(Length::Fill);
+    use LeftPanelTab::{Models, Operators};
 
-    container(bar)
+    fn tab_button(
+        label: &'static str,
+        is_active: bool,
+        msg: Message,
+    ) -> Element<'static, Message> {
+        let txt_color = if is_active { Color::WHITE } else { theme::text_weak() };
+        let label_widget = container(text(label).color(txt_color).size(11.0))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
+        button(label_widget)
+            .width(Length::Fill)
+            .height(Length::Fixed(26.0))
+            .padding(Padding::default())
+            .on_press(msg)
+            .style(move |_t, status| {
+                let mut s = iced::widget::button::Style::default();
+                s.border.radius = 6.0.into();
+                if is_active {
+                    // 激活 tab：实色靛紫填充 + 亮紫边框 + 白字
+                    s.background = Some(Color::from(theme::accent()).into());
+                    s.text_color = Color::WHITE;
+                    s.border.width = 1.0;
+                    s.border.color = theme::accent_bright();
+                    match status {
+                        iced::widget::button::Status::Hovered => {
+                            s.background = Some(Color::from(theme::accent_bright()).into());
+                        }
+                        iced::widget::button::Status::Pressed => {
+                            s.background = Some(Color::from(theme::accent_dark()).into());
+                            s.border.color = theme::accent();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // 未激活 tab：透明底 + 灰字，hover 时微亮
+                    s.background = Some(Color::TRANSPARENT.into());
+                    s.text_color = theme::text_weak();
+                    s.border.width = 0.0;
+                    s.border.color = Color::TRANSPARENT;
+                    match status {
+                        iced::widget::button::Status::Hovered => {
+                            s.background = Some(Color::from(theme::hover_bg()).into());
+                            s.text_color = theme::text_hover();
+                        }
+                        iced::widget::button::Status::Pressed => {
+                            s.background = Some(Color::from(theme::card_bg()).into());
+                        }
+                        _ => {}
+                    }
+                }
+                s
+            })
+            .into()
+    }
+
+    let inner = row![
+        tab_button("建模列表", matches!(active, Models), Message::SwitchLeftPanel(Models)),
+        tab_button("算子面板", matches!(active, Operators), Message::SwitchLeftPanel(Operators)),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fixed(26.0))
+    .spacing(4.0)
+    .padding(Padding { top: 2.0, bottom: 2.0, left: 8.0, right: 8.0 });
+
+    container(inner)
         .width(Length::Fill)
         .height(Length::Fixed(30.0))
         .style(|_t| {
@@ -430,7 +485,7 @@ fn card_icon_button(label: &'static str, msg: Message, is_active: bool) -> Eleme
 fn view_main_area(state: &UiState) -> Element<'_, Message> {
     let top_bar = view_top_bar(state);
     let middle = view_middle(state);
-    let log_panel = view_log_panel(state);
+    let log_panel = super::log_panel::view_log_panel(state);
 
     let col = column![top_bar, middle, log_panel]
         .width(Length::Fill)
@@ -444,49 +499,36 @@ fn view_main_area(state: &UiState) -> Element<'_, Message> {
 
 // ===== 顶部 Tab 栏 =====
 
-/// 顶部栏：仅 Tab 卡片列表（34px）+ 1px 分隔线 = 35px。
-/// 工具栏已迁移为画布上的悬浮条状（见 `view_floating_toolbar`），
-/// 调试切换 / 清日志 位于底部日志面板的标题栏。
-/// Tab 行使用 iced_aw::TabBar 替换手搓 button+close 组合，
-/// 自动渲染关闭图标，TabId = usize（即 tab 索引）。
+/// 顶部栏：Tab 卡片列表 + 分隔线。
+/// 现代风格：无边框、选中态底部 accent 色指示条、关闭按钮仅 hover 显形。
 fn view_top_bar(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
-
-    // Tab 卡片列表（独占第一行，使用 iced_aw::TabBar）
-    let mut tabs_bar = TabBar::new(|i: usize| Message::SwitchTab(i))
-        .on_close(|i: usize| Message::CloseTab(i))
-        .style(theme::top_tab_bar_style())
-        .height(Length::Fixed(34.0))
-        .width(Length::Fill)
-        .text_size(11.0)
-        .tab_width(Length::Shrink)
-        .spacing(4.0);
-
-    for (i, tab) in editor.tabs.iter().enumerate() {
-        let label = if tab.dirty {
-            format!("{} •", tab.name)
-        } else {
-            tab.name.clone()
-        };
-        tabs_bar = tabs_bar.push(i, TabLabel::Text(label));
-    }
-    if let Some(active_idx) = editor.active_tab_index {
-        tabs_bar = tabs_bar.set_active_tab(&active_idx);
-    }
 
     // 空状态：未打开建模时显示占位文本
     let tabs_row: Element<'_, Message> = if editor.tabs.is_empty() {
         container(text("未打开建模").color(theme::text_weak()).size(11.0))
             .padding(Padding { top: 0.0, bottom: 0.0, left: 14.0, right: 0.0 })
             .width(Length::Fill)
-            .height(Length::Fixed(34.0))
+            .height(Length::Fixed(36.0))
             .align_y(Alignment::Center)
             .into()
     } else {
-        container(tabs_bar)
+        let tabs: Vec<Element<'_, Message>> = editor.tabs.iter().enumerate().map(|(i, tab)| {
+            let is_active = editor.active_tab_index == Some(i);
+            let is_hovered = editor.hovered_tab == Some(i);
+            let label = if tab.dirty {
+                format!("{} •", tab.name)
+            } else {
+                tab.name.clone()
+            };
+            view_tab_item(i, label, is_active, is_hovered)
+        }).collect();
+
+        iced::widget::row::Row::with_children(tabs)
+            .spacing(2.0)
             .width(Length::Fill)
-            .height(Length::Fixed(34.0))
-            .padding(Padding { top: 2.0, bottom: 0.0, left: 10.0, right: 10.0 })
+            .height(Length::Fixed(36.0))
+            .padding(Padding { top: 0.0, bottom: 0.0, left: 8.0, right: 8.0 })
             .align_y(Alignment::Center)
             .into()
     };
@@ -516,66 +558,149 @@ fn view_top_bar(state: &UiState) -> Element<'_, Message> {
         .into()
 }
 
-/// 工具栏按钮 v3：更精致胶囊样式，主按钮带渐变高光 + 微阴影感。
-fn tool_button(label: &str, msg: Message, primary: bool) -> Element<'_, Message> {
-    let txt_color = if primary { Color::WHITE } else { theme::text_hover() };
-    let label_widget = container(
-        text(label).color(txt_color).size(11.0)
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center);
-    button(label_widget)
-        .height(Length::Fixed(30.0))
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 16.0, right: 16.0 })
-        .style(move |_t, status| {
-            let mut s = iced::widget::button::Style::default();
-            s.border.radius = 9.0.into();
-            if primary {
-                // 主按钮：靛蓝主色 + 亮边框高光 + 极细外描边（微阴影错觉）
-                s.background = Some(Color::from(theme::accent()).into());
-                s.text_color = Color::WHITE;
-                s.border.width = 1.0;
-                s.border.color = Color {
-                    r: 165.0/255.0, g: 180.0/255.0, b: 252.0/255.0, a: 1.0
-                };
-                match status {
-                    iced::widget::button::Status::Hovered => {
-                        s.background = Some(Color::from(theme::accent_bright()).into());
-                        s.border.color = Color {
-                            r: 199.0/255.0, g: 210.0/255.0, b: 254.0/255.0, a: 1.0
-                        };
-                    }
-                    iced::widget::button::Status::Pressed => {
-                        s.background = Some(Color::from(theme::accent_dark()).into());
-                        s.border.color = Color::from(theme::accent());
-                    }
-                    _ => {}
+/// 现代 Tab 卡片：标签 + 关闭图标视觉融为一体。
+/// 选中 tab 始终显示 ×，未选中 tab hover 时显示 ×。
+/// 文字按钮与关闭按钮无间隙拼接，外观如一体。
+fn view_tab_item(
+    idx: usize,
+    label: String,
+    is_active: bool,
+    is_hovered: bool,
+) -> Element<'static, Message> {
+    let show_close = is_active || is_hovered;
+
+    // 统一的文字颜色
+    let text_color = if is_active { Color::WHITE } else { theme::text_weak() };
+
+    // 通用样式闭包（选中态 vs 未选中态）
+    let make_style = move |_t: &iced::Theme, status: iced::widget::button::Status| {
+        let mut s = iced::widget::button::Style::default();
+        s.border.radius = 0.0.into();
+        s.border.width = 0.0;
+        s.border.color = Color::TRANSPARENT;
+        if is_active {
+            s.background = Some(Color {
+                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0,
+            }.into());
+            match status {
+                iced::widget::button::Status::Hovered => {
+                    s.background = Some(Color {
+                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0,
+                    }.into());
                 }
-            } else {
-                // 次按钮：卡片底色 + 细边框，hover 提亮背景 + 文字
-                s.background = Some(Color::from(theme::card_bg()).into());
-                s.text_color = theme::text_hover();
-                s.border.width = 1.0;
-                s.border.color = theme::card_stroke();
-                match status {
-                    iced::widget::button::Status::Hovered => {
-                        s.background = Some(Color::from(theme::hover_bg()).into());
-                        s.text_color = theme::text_strong();
-                        s.border.color = Color {
-                            r: 1.0, g: 1.0, b: 1.0, a: 45.0/255.0
-                        };
-                    }
-                    iced::widget::button::Status::Pressed => {
-                        s.background = Some(Color::from(theme::pressed_bg()).into());
-                    }
-                    _ => {}
+                iced::widget::button::Status::Pressed => {
+                    s.background = Some(Color {
+                        r: 79.0/255.0, g: 70.0/255.0, b: 229.0/255.0, a: 40.0/255.0,
+                    }.into());
                 }
+                _ => {}
             }
+        } else {
+            s.background = Some(Color::TRANSPARENT.into());
+            match status {
+                iced::widget::button::Status::Hovered => {
+                    s.background = Some(Color::from(theme::hover_bg()).into());
+                    s.text_color = theme::text_strong();
+                }
+                iced::widget::button::Status::Pressed => {
+                    s.background = Some(Color::from(theme::pressed_bg()).into());
+                }
+                _ => {}
+            }
+        }
+        s
+    };
+
+    // 文字按钮（左部分）
+    let text_widget = container(
+        text(label).color(text_color).size(11.0)
+    )
+    .width(Length::Shrink)
+    .height(Length::Fixed(32.0))
+    .padding(Padding { top: 0.0, bottom: 0.0, left: 12.0, right: 2.0 })
+    .align_y(Alignment::Center);
+
+    let text_btn = button(text_widget)
+        .width(Length::Shrink)
+        .height(Length::Fixed(32.0))
+        .padding(Padding::default())
+        .on_press(Message::SwitchTab(idx))
+        .style(make_style.clone());
+
+    // 关闭按钮区域（始终占位，仅在需要时显示 × 图标）
+    let close_slot: Element<'static, Message> = if show_close {
+        let close_color = if is_active {
+            Color { r: 235.0/255.0, g: 238.0/255.0, b: 250.0/255.0, a: 0.65 }
+        } else {
+            theme::text_weak()
+        };
+        let close_icon = icons::view_icon_with_stroke(IconKind::Close, close_color, 10.0, 1.2);
+        let close_content = container(close_icon)
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(32.0))
+            .padding(Padding { top: 0.0, bottom: 0.0, left: 0.0, right: 8.0 })
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
+        button(close_content)
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(32.0))
+            .padding(Padding::default())
+            .on_press(Message::CloseTab(idx))
+            .style(make_style.clone())
+            .into()
+    } else {
+        // 空占位也可点击切换 tab
+        button(container(row![]).width(Length::Fixed(26.0)).height(Length::Fixed(32.0)))
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(32.0))
+            .padding(Padding::default())
+            .on_press(Message::SwitchTab(idx))
+            .style(make_style.clone())
+            .into()
+    };
+
+    // 拼接文字 + 关闭按钮（无间隙，关闭区域始终占位）
+    let tab_content = row![text_btn, close_slot]
+        .spacing(0.0)
+        .height(Length::Fixed(32.0))
+        .align_y(Alignment::Center);
+
+    // 外层：hover 追踪 + 圆角裁剪
+    let hover_aware = mouse_area(tab_content)
+        .on_enter(Message::TabHover(Some(idx)))
+        .on_exit(Message::TabHover(None));
+
+    // 用 container 裁剪圆角
+    let rounded = container(hover_aware)
+        .width(Length::Shrink)
+        .height(Length::Fixed(32.0))
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.border.radius = 8.0.into();
             s
-        })
-        .on_press(msg)
+        });
+
+    // 底部 accent 指示条
+    let bottom_bar: Element<'_, Message> = if is_active {
+        container(row![])
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::accent()).into());
+                s
+            })
+            .into()
+    } else {
+        container(row![])
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .into()
+    };
+
+    column![rounded, bottom_bar]
+        .width(Length::Shrink)
+        .height(Length::Fixed(36.0))
         .into()
 }
 
@@ -1313,162 +1438,6 @@ fn view_context_menu_if_any(state: &UiState) -> Option<Element<'_, Message>> {
         .width(Length::Fill)
         .height(Length::Fill);
     Some(stacked.into())
-}
-
-// ===== 底部：日志面板 v3 =====
-
-/// 底部日志面板：标题栏左为"运行日志"标题 + 日志分类胶囊 Tab，右侧为调试开关与清日志按钮。
-///
-/// v3 调整：将原先位于顶部工具栏的「调试切换」与「清日志」两个低频操作迁移到此处，
-/// 顶部工具栏因此只保留「保存 / 执行 DAG」两个核心操作，避免主操作区过度拥挤。
-fn view_log_panel(state: &UiState) -> Element<'_, Message> {
-    let editor = &state.dag_editor;
-    let active = editor.active_tab();
-
-    // 顶部细分隔条
-    let top_divider = container(row![])
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::divider()).into());
-            s
-        });
-
-    // 子标签栏：用 iced_aw::TabBar 替换手搓胶囊 button，
-    // 圆角通过 log_tab_bar_style 的 tab_border_radius = 8px 实现。
-    let current_cat = active.map(|t| t.active_log_category).unwrap_or_default();
-    let tabs_bar = TabBar::new(|c: LogCategory| Message::SwitchLogCategory(c))
-        .push(LogCategory::Action, TabLabel::Text(String::from("提醒")))
-        .push(LogCategory::Runtime, TabLabel::Text(String::from("算子运行")))
-        .push(LogCategory::Json, TabLabel::Text(String::from("通信报文")))
-        .set_active_tab(&current_cat)
-        .style(theme::log_tab_bar_style())
-        .height(Length::Fixed(32.0))
-        .text_size(11.0)
-        .tab_width(Length::Shrink)
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 4.0, right: 4.0 })
-        .spacing(4.0);
-
-    // 右侧操作组：清日志
-    let actions = row![
-        tool_button("⌫ 清日志", Message::ClearLogs, false),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-
-    let title = container(text("运行日志").color(theme::text_strong()).size(12.0))
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 2.0, right: 0.0 });
-
-    let header_inner = row![
-        title,
-        tabs_bar,
-        row![].width(Length::Fill),
-        actions,
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .padding(Padding { top: 8.0, bottom: 6.0, left: 12.0, right: 12.0 });
-
-    let body: Element<'_, Message> = match active {
-        None => text("未打开建模").color(theme::text_weak()).size(11.0).into(),
-        Some(tab) => match current_cat {
-            LogCategory::Action => view_run_logs(&tab.action_logs),
-            LogCategory::Runtime => view_run_logs(&tab.runtime_logs),
-            LogCategory::Json => view_json_logs(&tab.json_logs),
-        },
-    };
-
-    let body_wrap = container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(Padding { top: 2.0, bottom: 6.0, left: 0.0, right: 0.0 });
-
-    let body_scroll = scrollable(body_wrap)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-    let col = column![top_divider, header_inner, body_scroll]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .spacing(0);
-
-    container(col)
-        .width(Length::Fill)
-        .height(Length::Fixed(LOG_PANEL_HEIGHT))
-        .style(|_t| {
-            let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::panel_bg()).into());
-            s
-        })
-        .into()
-}
-
-/// 渲染运行日志（action / runtime 共用）：每条 [时间戳 消息]，按 level 着色。
-fn view_run_logs(logs: &[super::state::RunLogEntry]) -> Element<'_, Message> {
-    if logs.is_empty() {
-        return text("(无日志)").color(theme::TEXT_WEAK).size(11.0).into();
-    }
-    let mut col = column![].spacing(1).padding(Padding {
-        top: 4.0,
-        bottom: 4.0,
-        left: 8.0,
-        right: 8.0,
-    });
-    for entry in logs.iter().rev().take(LOG_RENDER_LIMIT).rev() {
-        let msg_color = match entry.level {
-            super::state::LogLevel::Info => theme::TEXT_HOVER,
-            super::state::LogLevel::Success => theme::success(),
-            super::state::LogLevel::Warning => theme::warning(),
-            super::state::LogLevel::Error => theme::danger(),
-        };
-        let line = row![
-            text(entry.timestamp.clone()).color(theme::TEXT_WEAK).size(10.0),
-            text(entry.message.clone()).color(msg_color).size(11.0).width(Length::Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-        col = col.push(line);
-    }
-    col.into()
-}
-
-/// 渲染 JSON 通信报文日志：每条 [方向 时间戳 标题]，payload 缩进显示。
-fn view_json_logs(logs: &[super::state::JsonLogEntry]) -> Element<'_, Message> {
-    if logs.is_empty() {
-        return text("(无通信报文)").color(theme::TEXT_WEAK).size(11.0).into();
-    }
-    let mut col = column![].spacing(2).padding(Padding {
-        top: 4.0,
-        bottom: 4.0,
-        left: 8.0,
-        right: 8.0,
-    });
-    for entry in logs.iter().rev().take(LOG_RENDER_LIMIT).rev() {
-        let dir_color = match entry.direction {
-            JsonDirection::Send => theme::accent(),
-            JsonDirection::Receive => theme::success(),
-        };
-        let dir_label = match entry.direction {
-            JsonDirection::Send => "→",
-            JsonDirection::Receive => "←",
-        };
-        let head = row![
-            text(dir_label).color(dir_color).size(11.0),
-            text(entry.timestamp.clone()).color(theme::TEXT_WEAK).size(10.0),
-            text(entry.title.clone()).color(theme::TEXT_HOVER).size(11.0).width(Length::Fill),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-        let payload = text(entry.payload.clone())
-            .color(theme::TEXT_WEAK)
-            .size(10.0)
-            .width(Length::Fill);
-        col = col.push(column![head, payload].spacing(2));
-    }
-    col.into()
 }
 
 // ===== 对话框叠加层 v2 =====

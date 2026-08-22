@@ -56,6 +56,8 @@ pub enum IconKind {
     Edit,
     /// 删除确认对话框头部：三角警告 + 感叹号
     Warning,
+    /// Tab 关闭按钮：精致 × 叉号（两条交叉对角线，圆角端点）
+    Close,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -192,6 +194,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Sparkle => draw_sparkle(frame, color),
         IconKind::Edit => draw_pencil(frame, color, sw),
         IconKind::Warning => draw_warning(frame, color, sw),
+        IconKind::Close => draw_close(frame, color, sw),
     }
 }
 
@@ -533,6 +536,23 @@ fn draw_warning(frame: &mut canvas::Frame, color: Color, sw: f32) {
     // 感叹号圆点
     let dot = Path::circle(Point::new(12.0, 17.0), 0.9);
     frame.fill(&dot, color);
+}
+
+/// 关闭：精致 × 叉号（两条交叉对角线，圆角端点，视觉上更柔和）
+fn draw_close(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 左上到右下的对角线
+    let line1 = Path::new(|b| {
+        b.move_to(Point::new(6.0, 6.0));
+        b.line_to(Point::new(18.0, 18.0));
+    });
+    frame.stroke(&line1, stroke);
+    // 右上到左下的对角线
+    let line2 = Path::new(|b| {
+        b.move_to(Point::new(18.0, 6.0));
+        b.line_to(Point::new(6.0, 18.0));
+    });
+    frame.stroke(&line2, stroke);
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）

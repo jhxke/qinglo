@@ -7,6 +7,7 @@ pub mod histogram_view;
 pub mod icons;
 pub mod kline_chart_view;
 pub mod line_chart_view;
+pub mod log_panel;
 pub mod markdown_view;
 pub mod mining_analysis_view;
 pub mod operator_params_editor;

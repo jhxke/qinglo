@@ -257,6 +257,10 @@ impl MyApp {
             }
             Message::CloseTab(i) => {
                 state.dag_editor.close_tab(i);
+                state.dag_editor.hovered_tab = None;
+            }
+            Message::TabHover(idx) => {
+                state.dag_editor.hovered_tab = idx;
             }
 
             // ===== 工具栏 =====

@@ -214,6 +214,9 @@ pub enum Message {
     SwitchTab(usize),
     /// 点击 Tab 关闭按钮 ×：关闭指定索引的 tab。
     CloseTab(usize),
+    /// 鼠标悬停在某个 tab 上：用于追踪 hover 状态以显示/隐藏关闭按钮。
+    /// 参数为 tab 索引，None 表示鼠标移出所有 tab。
+    TabHover(Option<usize>),
 
     // ===== 工具栏 =====
 
@@ -593,6 +596,8 @@ pub struct DagEditorState {
     pub tabs: Vec<DagTab>,
     /// 当前激活的 tab 索引；None 表示无打开的 tab
     pub active_tab_index: Option<usize>,
+    /// 当前鼠标悬停的 tab 索引；None 表示无 hover
+    pub hovered_tab: Option<usize>,
     /// 磁盘上的建模历史元数据列表（懒加载，首次进入挖掘分析视图时填充）
     pub models: Vec<DagModelMeta>,
     /// models 是否已从磁盘加载
@@ -626,6 +631,7 @@ impl Default for DagEditorState {
         Self {
             tabs: Vec::new(),
             active_tab_index: None,
+            hovered_tab: None,
             models: Vec::new(),
             models_loaded: false,
             active_left_panel: LeftPanelTab::default(),
