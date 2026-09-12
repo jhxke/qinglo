@@ -1,0 +1,11 @@
+{
+  "id": "clock",
+  "title": "数字时钟",
+  "description": "外部插件示例 · 免编译加载",
+  "section": "tool",
+  "order": 10,
+  "enabled": true,
+  "full_width": false,
+  "body_file": "body.html",
+  "script_file": "main.js"
+}

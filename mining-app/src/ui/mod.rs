@@ -19,6 +19,9 @@ pub mod title_bar;
 /// wry WebView2 菜单试验（仅 Windows）。
 #[cfg(windows)]
 pub mod webview_menu;
+/// 网页菜单插件系统：trait + 注册表 + 内外部插件动态加载（仅 Windows）。
+#[cfg(windows)]
+pub mod webview_plugins;
 
 pub use state::*;
 

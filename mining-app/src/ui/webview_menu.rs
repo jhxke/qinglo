@@ -20,9 +20,13 @@
 //! - popup 定位在内容区屏幕坐标（避开自绘标题栏 / 活动栏 / 状态栏），
 //!   主窗口移动 / resize / DPI 变化时重新定位。
 //!
-//! 通信：
-//! - JS → Rust：`window.ipc.postMessage(...)` → IPC handler → mpsc → Tick 轮询
-//! - Rust → JS：`WebView::evaluate_script("window.rustReply(...)")`
+//! 通信（插件协议见 `webview_plugins` 模块文档）：
+//! - JS → Rust：`window.ipc.postMessage("cmd|插件|动作|参数")` → IPC handler
+//!   → mpsc → Tick 轮询 → [`super::webview_plugins::PluginRegistry`] 路由
+//! - Rust → JS：`WebView::evaluate_script("window.rustReply(plugin, kind, text)")`
+//!
+//! 菜单内容完全插件化：页面 HTML 由插件注册表动态拼装（内置插件 +
+//! `webview_plugins/` 目录下的外部插件），本模块只负责窗口宿主与消息收发。
 //!
 //! 注意：`wry::WebView` 是 `!Send`，整个生命周期必须留在 UI 主线程，
 //! 因此本模块所有方法都只在 `MyApp::update`（winit 主线程）中调用。
@@ -44,6 +48,10 @@ use wry::raw_window_handle::{
 };
 use wry::{Rect, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
+use super::webview_plugins::{
+    IncomingMessage, PluginOutcome, PluginRegistry, parse_message,
+};
+
 // ===== 内容区边距（相对 iced 主窗口客户区，逻辑像素）=====
 // 与 title_bar.rs / activity_bar.rs / status_bar.rs 的布局常量保持一致：
 // 标题栏 40 + 下分隔 1；活动栏 62 + 右分隔 1；状态栏 29。
@@ -51,17 +59,7 @@ const LEFT_INSET: f64 = 63.0;
 const TOP_INSET: f64 = 41.0;
 const BOTTOM_INSET: f64 = 29.0;
 
-/// JS → Rust 的 IPC 指令（测试协议：纯文本、`|` 分隔）。
-pub enum IpcCommand {
-    /// 网页内「返回主界面」：隐藏 webview，切回挖掘分析视图。
-    Back,
-    /// 请求 Rust 做求和，参数为两个数字。
-    Sum(f64, f64),
-    /// 回声测试，参数为任意文本。
-    Echo(String),
-}
-
-/// WebView2 菜单测试页的宿主状态。
+/// WebView2 菜单页的宿主状态。
 ///
 /// `webview` 为 None 时尚未创建（首次进入菜单时懒创建）；
 /// 创建后常驻，切走时仅隐藏 popup，避免反复启动浏览器进程。
@@ -78,6 +76,8 @@ pub struct WebViewMenu {
     visible: bool,
     /// IPC 接收端；Sender 在 build 时 move 进 wry 的 ipc handler。
     ipc_rx: Option<Receiver<String>>,
+    /// 菜单插件注册表：内置插件 + 外部 `webview_plugins/` 扫描结果。
+    registry: PluginRegistry,
 }
 
 impl Default for WebViewMenu {
@@ -90,6 +90,7 @@ impl Default for WebViewMenu {
             height: 0.0,
             visible: false,
             ipc_rx: None,
+            registry: PluginRegistry::load(),
         }
     }
 }
@@ -159,10 +160,13 @@ impl WebViewMenu {
             WindowHandle::borrow_raw(RawWindowHandle::Win32(win32))
         };
 
+        // 页面 HTML 由插件注册表动态拼装（内置插件 + 外部插件）。
+        let page_html = self.registry.render_page();
+
         // 2) WebView2 作为 popup 的子窗口铺满整个 popup 客户区。
         let webview = WebViewBuilder::new()
             .with_bounds(self.content_rect())
-            .with_html(MENU_HTML)
+            .with_html(&page_html)
             // 控制器背景透明：popup 无重定向表面，首帧网页内容到达前
             // 透出后面的 iced 占位层（天然的"加载中"背景）。
             .with_transparent(true)
@@ -471,33 +475,57 @@ impl WebViewMenu {
         }
     }
 
-    /// 非阻塞排空 JS → Rust 的 IPC 消息并解析为指令。
-    pub fn drain_commands(&mut self) -> Vec<IpcCommand> {
-        let Some(rx) = &self.ipc_rx else { return Vec::new() };
-        let mut commands = Vec::new();
-        while let Ok(body) = rx.try_recv() {
-            // JS 诊断心跳只写日志，不产生指令。
-            if let Some(info) = body.strip_prefix("hb|") {
-                diag(&format!("JS 心跳：{info}"));
-                continue;
-            }
-            if let Some(cmd) = parse_command(&body) {
-                commands.push(cmd);
-            } else {
-                diag(&format!("IPC 无法解析：{body}"));
+    /// 非阻塞排空 JS → Rust 的 IPC 消息，解析并经插件注册表路由，
+    /// 返回各插件处理后的结果（回复 / 宿主动作）。
+    pub fn drain_commands(&mut self) -> Vec<PluginOutcome> {
+        let Some(rx) = &self.ipc_rx else {
+            return Vec::new();
+        };
+        // 先把通道内消息收集出来，释放对 self.ipc_rx 的不可变借用，
+        // 随后才能可变借用 self.registry 做分发。
+        let bodies: Vec<String> = rx.try_iter().collect();
+        let mut outcomes = Vec::new();
+        for body in bodies {
+            match parse_message(&body) {
+                Some(IncomingMessage::Heartbeat(info)) => {
+                    // JS 诊断心跳只写日志，不产生指令。
+                    diag(&format!("JS 心跳：{info}"));
+                }
+                Some(IncomingMessage::Command(plugin, action, payload)) => {
+                    diag(&format!(
+                        "IPC 插件指令：{plugin}/{action}{}",
+                        if payload.is_empty() {
+                            String::new()
+                        } else {
+                            format!("：{payload}")
+                        }
+                    ));
+                    match self.registry.dispatch(&plugin, &action, &payload) {
+                        Some(outcome) => outcomes.push(outcome),
+                        None => diag(&format!("无插件处理指令：{plugin}/{action}")),
+                    }
+                }
+                None => diag(&format!("IPC 无法解析：{body}")),
             }
         }
-        commands
+        outcomes
     }
 
-    /// Rust → JS：调用页面注入的 `window.rustReply(kind, text)` 回填结果。
-    pub fn notify(&self, kind: &str, text: &str) {
+    /// Rust → JS：调用页面注入的 `window.rustReply(plugin, kind, text)`
+    /// 把结果回填给指定插件。
+    pub fn notify_reply(&self, plugin: &str, kind: &str, text: &str) {
         if let Some(webview) = &self.webview {
+            let plugin_json =
+                serde_json::to_string(plugin).unwrap_or_else(|_| "\"\"".into());
             let kind_json = serde_json::to_string(kind).unwrap_or_else(|_| "\"\"".into());
             let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
-            let js = format!("window.rustReply && window.rustReply({kind_json}, {text_json});");
+            let js = format!(
+                "window.rustReply && window.rustReply({plugin_json}, {kind_json}, {text_json});"
+            );
             match webview.evaluate_script(&js) {
-                Ok(()) => diag(&format!("evaluate_script 成功：{kind} / {text}")),
+                Ok(()) => diag(&format!(
+                    "evaluate_script 成功：{plugin} / {kind} / {text}"
+                )),
                 Err(e) => diag(&format!("evaluate_script 失败：{e}")),
             }
         }
@@ -512,7 +540,9 @@ extern "system" {
 }
 
 /// 追加一行诊断日志到 `%TEMP%\qinglo_webview_menu.log`。
-fn diag(msg: &str) {
+///
+/// `pub(crate)` 供同属菜单体系的 `webview_plugins` 模块复用同一日志文件。
+pub(crate) fn diag(msg: &str) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -523,211 +553,3 @@ fn diag(msg: &str) {
     }
 }
 
-/// 解析网页 IPC 文本协议：
-/// - `back`
-/// - `sum|<a>|<b>`
-/// - `echo|<任意文本>`
-fn parse_command(body: &str) -> Option<IpcCommand> {
-    let body = body.trim();
-    if body == "back" {
-        return Some(IpcCommand::Back);
-    }
-    if let Some(rest) = body.strip_prefix("sum|") {
-        let mut parts = rest.splitn(2, '|');
-        let a = parts.next()?.trim().parse::<f64>().ok()?;
-        let b = parts.next()?.trim().parse::<f64>().ok()?;
-        return Some(IpcCommand::Sum(a, b));
-    }
-    if let Some(text) = body.strip_prefix("echo|") {
-        return Some(IpcCommand::Echo(text.to_string()));
-    }
-    None
-}
-
-/// 菜单测试页 HTML。
-///
-/// 整页自带深色风格，验证项：
-/// 1. 纯 HTML/CSS 菜单渲染 + CSS 动画（合成器存活）
-/// 2. navigator.userAgent 识别 WebView2/Edge 内核版本
-/// 3. 视口实时尺寸（验证 set_bounds resize 跟随）
-/// 4. JS → Rust IPC：返回 / 求和 / 回声（加载后自动跑一次双向自测）
-/// 5. Rust → JS：结果经 window.rustReply 回填到日志区
-const MENU_HTML: &str = r##"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>青萝 · WebView 菜单</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body {
-    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-    background: #0b1020;
-    color: #e2e8f0;
-    overflow: hidden;
-  }
-  .app { display: flex; flex-direction: column; height: 100%; }
-  header {
-    display: flex; align-items: center; gap: 14px;
-    padding: 0 18px; height: 52px;
-    background: linear-gradient(90deg, rgba(99,102,241,.22), rgba(34,211,238,.10));
-    border-bottom: 1px solid rgba(148,163,184,.18);
-  }
-  .logo {
-    width: 26px; height: 26px; border-radius: 8px;
-    background: linear-gradient(135deg, #6366f1, #22d3ee);
-    display: grid; place-items: center; font-weight: 700; color: #0b1020;
-  }
-  h1 { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
-  .sub { font-size: 11px; color: #94a3b8; }
-  .spacer { flex: 1; }
-  .btn {
-    border: 1px solid rgba(148,163,184,.35); background: rgba(30,41,59,.7);
-    color: #e2e8f0; border-radius: 8px; padding: 7px 14px; font-size: 12px;
-    cursor: pointer; transition: background .15s, border-color .15s;
-  }
-  .btn:hover { background: rgba(71,85,105,.9); border-color: rgba(148,163,184,.6); }
-  .btn.primary { border-color: rgba(34,211,238,.55); color: #a5f3fc; }
-  main {
-    flex: 1; overflow: auto; padding: 18px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-    align-content: start;
-  }
-  .card {
-    background: rgba(30,41,59,.55);
-    border: 1px solid rgba(148,163,184,.16);
-    border-radius: 12px; padding: 16px;
-  }
-  .card h2 { font-size: 13px; color: #a5f3fc; margin-bottom: 12px; font-weight: 600; }
-  .kv { font-size: 12px; color: #cbd5e1; line-height: 1.9; word-break: break-all; }
-  .kv b { color: #94a3b8; font-weight: 400; margin-right: 6px; }
-  .row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
-  input {
-    background: #0f172a; border: 1px solid rgba(148,163,184,.3);
-    border-radius: 7px; color: #e2e8f0; padding: 7px 10px; font-size: 12px;
-    outline: none; min-width: 0;
-  }
-  input:focus { border-color: rgba(34,211,238,.7); }
-  input.num { width: 90px; }
-  input.txt { flex: 1; min-width: 140px; }
-  button.action {
-    background: linear-gradient(135deg, #6366f1, #0ea5e9);
-    border: none; border-radius: 7px; color: #fff;
-    padding: 8px 16px; font-size: 12px; cursor: pointer;
-  }
-  button.action:active { transform: translateY(1px); }
-  #log {
-    margin-top: 10px; height: 150px; overflow: auto;
-    background: #0b1226; border: 1px solid rgba(148,163,184,.14);
-    border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.8;
-    font-family: Consolas, monospace;
-  }
-  .log-rust { color: #6ee7b7; }
-  .log-js { color: #93c5fd; }
-  .bar {
-    height: 4px; border-radius: 2px; margin-top: 14px;
-    background: linear-gradient(90deg, #6366f1, #22d3ee, #6366f1);
-    background-size: 200% 100%;
-    animation: flow 2.2s linear infinite;
-  }
-  @keyframes flow { from { background-position: 0 0; } to { background-position: -200% 0; } }
-  .tag { display:inline-block; font-size:10px; padding:2px 8px; border-radius:99px;
-         background:rgba(34,211,238,.15); color:#67e8f9; margin-left:8px; }
-</style>
-</head>
-<body>
-<div class="app">
-  <header>
-    <div class="logo">萝</div>
-    <div>
-      <h1>青萝 · WebView 菜单 <span class="tag">wry + WebView2</span></h1>
-      <div class="sub">整个菜单由浏览器窗口渲染 — 可行性验证页</div>
-    </div>
-    <div class="spacer"></div>
-    <button class="btn primary" onclick="send('back')">← 返回主界面</button>
-  </header>
-
-  <main>
-    <section class="card">
-      <h2>运行环境</h2>
-      <div class="kv"><b>内核</b><span id="ua">检测中…</span></div>
-      <div class="kv"><b>视口</b><span id="vp">-</span>（窗口 resize 应实时变化）</div>
-      <div class="kv"><b>渲染</b>HTML / CSS / 浏览器合成器（非 wgpu）</div>
-      <div class="bar"></div>
-    </section>
-
-    <section class="card">
-      <h2>JS → Rust IPC</h2>
-      <div class="kv" style="margin-bottom:4px">Rust 求和：
-        <div class="row">
-          <input class="num" id="a" type="number" value="1">
-          <span>+</span>
-          <input class="num" id="b" type="number" value="2">
-          <button class="action" onclick="sendSum()">请求 Rust 计算</button>
-        </div>
-      </div>
-      <div class="kv" style="margin-top:12px">回声：
-        <div class="row">
-          <input class="txt" id="msg" value="你好，Rust！">
-          <button class="action" onclick="sendEcho()">发送</button>
-        </div>
-      </div>
-    </section>
-
-    <section class="card" style="grid-column: 1 / -1">
-      <h2>双向通信日志</h2>
-      <div id="log"></div>
-    </section>
-  </main>
-</div>
-
-<script>
-  function log(cls, who, text) {
-    var el = document.getElementById('log');
-    var line = document.createElement('div');
-    line.className = cls;
-    line.textContent = '[' + who + '] ' + text;
-    el.appendChild(line);
-    el.scrollTop = el.scrollHeight;
-  }
-  function send(payload) {
-    log('log-js', 'JS → Rust', payload);
-    window.ipc.postMessage(payload);
-  }
-  function sendSum() {
-    var a = document.getElementById('a').value;
-    var b = document.getElementById('b').value;
-    send('sum|' + a + '|' + b);
-  }
-  function sendEcho() {
-    send('echo|' + document.getElementById('msg').value);
-  }
-  // Rust → JS 回填入口
-  window.rustReply = function (kind, text) {
-    log('log-rust', 'Rust → JS', kind + '：' + text);
-  };
-  // 环境信息
-  document.getElementById('ua').textContent = navigator.userAgent;
-  function updateVp() {
-    document.getElementById('vp').textContent =
-      window.innerWidth + ' × ' + window.innerHeight + ' 逻辑像素';
-  }
-  updateVp();
-  window.addEventListener('resize', updateVp);
-  log('log-js', 'JS', '页面加载完成，window.ipc 可用：' + (!!window.ipc));
-  // 自动发起一次双向 IPC 自测：若日志区出现绿色 Rust → JS 行，说明双向链路正常
-  send('echo|自动双向 IPC 自测');
-  // 诊断心跳：每秒上报可见性 / 焦点 / rAF 累计帧数 / 视口。
-  var rafCount = 0;
-  function rafLoop() { rafCount++; requestAnimationFrame(rafLoop); }
-  rafLoop();
-  setInterval(function () {
-    window.ipc.postMessage('hb|' + document.visibilityState + '|hidden=' + document.hidden
-      + '|focus=' + document.hasFocus() + '|raf=' + rafCount
-      + '|vp=' + window.innerWidth + 'x' + window.innerHeight);
-  }, 1000);
-</script>
-</body>
-</html>
-"##;

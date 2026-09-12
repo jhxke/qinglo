@@ -522,8 +522,8 @@ impl MyApp {
                     e,
                 ),
                 None => mining_app::ui::placeholder_view(
-                    "WebView 菜单（wry 测试）",
-                    "网页层加载中……若长时间未显示，请查看 %TEMP%\\qinglo_webview_menu.log",
+                    "WebView 菜单（插件化）",
+                    "网页层加载中……菜单功能正由插件注册表动态组装；若长时间未显示，请查看 %TEMP%\\qinglo_webview_menu.log",
                 ),
             },
         };
@@ -652,26 +652,22 @@ fn enter_webview_menu(state: &mut UiState) -> Task<Message> {
     }
 }
 
-/// 排空网页菜单 JS → Rust IPC 并处理指令。
+/// 排空网页菜单 JS → Rust IPC：经插件注册表路由后，把各插件的回复
+/// 回填页面，并执行插件请求的宿主动作（如返回主视图）。
 #[cfg(windows)]
 fn handle_webview_ipc(state: &mut UiState) {
-    use mining_app::ui::webview_menu::IpcCommand;
+    use mining_app::ui::webview_plugins::HostAction;
 
-    let commands = state.webview_menu.drain_commands();
-    for cmd in commands {
-        match cmd {
-            IpcCommand::Back => {
-                state.webview_menu.hide();
-                state.current_view = ViewType::MiningAnalysis;
-            }
-            IpcCommand::Sum(a, b) => {
-                state
-                    .webview_menu
-                    .notify("sum", &format!("{a} + {b} = {}", a + b));
-            }
-            IpcCommand::Echo(text) => {
-                state.webview_menu.notify("echo", &text);
-            }
+    let outcomes = state.webview_menu.drain_commands();
+    for outcome in outcomes {
+        if let Some((kind, text)) = outcome.reply {
+            state
+                .webview_menu
+                .notify_reply(&outcome.plugin, &kind, &text);
+        }
+        if outcome.host == Some(HostAction::Back) {
+            state.webview_menu.hide();
+            state.current_view = ViewType::MiningAnalysis;
         }
     }
 }
