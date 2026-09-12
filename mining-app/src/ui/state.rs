@@ -3,14 +3,14 @@ use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 use iced::Rectangle;
 use iced::window::Id as WindowId;
-use crate::geom::Vec2;
+use crate::mining::geom::Vec2;
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
-use crate::dag::{DagGraph, OperatorType, NodeIORegistry};
-use crate::dag_store::{self, DagModelMeta, DagModelRecord};
+use crate::mining::dag::{DagGraph, OperatorType, NodeIORegistry};
+use crate::mining::dag_store::{self, DagModelMeta, DagModelRecord};
 
-use crate::debug_executor::DebugDiagnostics;
+use crate::mining::debug_executor::DebugDiagnostics;
 
 /// 后台 DAG 执行任务的工作线程 → UI 线程消息。
 ///
@@ -314,6 +314,17 @@ pub enum Message {
     AlignTop,
     /// 多选对齐：将所有选中节点的 x 坐标对齐到最小值（左侧对齐）。
     AlignLeft,
+
+    // ===== 设置页 =====
+
+    /// 设置页「隐藏挖掘 DAG 入口」开关切换。
+    ///
+    /// 由设置页 toggle 控件 on_toggled 发布；`MyApp::update` 据此：
+    /// 1) 翻转 `state.settings.hide_mining`（即时影响活动栏渲染）；
+    /// 2) 调用 `config::save_hide_mining` 落盘；
+    /// 3) 若开关从 false→true 且当前正在 MiningAnalysis 视图，
+    ///    自动切换到 Settings 视图，避免用户停留在已裁掉的视图里。
+    ToggleHideMining,
 }
 
 /// 自定义算子编辑器的 Debug 面板状态。
@@ -386,12 +397,14 @@ impl Default for UiState {
 /// `rust_path_input` 是 Rust 工具链路径文本框中的内容（可能尚未保存）；
 /// `compile_dir_input` 是编译目录文本框中的内容（可能尚未保存）；
 /// `initialized` 用于首次进入设置页时从磁盘配置懒加载输入框内容；
-/// `last_result` 记录最近一次「测试 / 保存 / 自动检测」操作的结果。
+/// `hide_mining` 控制「挖掘」入口在活动栏是否可见，开关切换即时生效并落盘；
+/// `last_result` 记录最近一次「测试 / 保存 / 自动检测 / 切换挖掘入口」操作的结果。
 #[derive(Clone)]
 pub struct SettingsState {
     pub rust_path_input: String,
     pub compile_dir_input: String,
     pub initialized: bool,
+    pub hide_mining: bool,
     pub last_result: Option<(bool, String)>,
 }
 
@@ -401,6 +414,7 @@ impl Default for SettingsState {
             rust_path_input: String::new(),
             compile_dir_input: String::new(),
             initialized: false,
+            hide_mining: false,
             last_result: None,
         }
     }

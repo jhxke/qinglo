@@ -27,8 +27,8 @@ use std::collections::HashMap;
 
 use super::state::{Message, UiState};
 use super::theme;
-use crate::dag::DagGraph;
-use crate::geom::Vec2;
+use crate::mining::dag::DagGraph;
+use crate::mining::geom::Vec2;
 
 /// 节点固定高度（像素）。v3：从 32 → 38，呼吸感更好，文字不贴边。
 const NODE_HEIGHT: f32 = 38.0;
@@ -1022,7 +1022,7 @@ fn with_alpha(c: Color, alpha: f32) -> Color {
 /// 动画——用户要求：DAG 运行时只需输出端口圈闪烁即可。
 fn draw_ports_indexed(
     frame: &mut canvas::Frame,
-    node: &crate::dag::Node,
+    node: &crate::mining::dag::Node,
     w: f32,
     h: f32,
     out_has_fan: &HashMap<PortKey, bool>,

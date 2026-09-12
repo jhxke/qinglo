@@ -17,7 +17,7 @@ use operator_executor_client::protocol::{
 use operator_executor_client::PortData;
 
 use crate::config::get_compile_directory;
-use crate::dag::{
+use crate::mining::dag::{
     DagGraph, Node, OperatorType, NodeIORegistry,
     OperatorPortParamDef, PortDirection, CustomOperatorDef, ParamType,
 };
@@ -226,12 +226,12 @@ pub fn inject_params_into_code(code: &str, params: &[&OperatorPortParamDef]) -> 
         .map(|p| executor_lib::OperatorPortParamDef {
             name: p.name.clone(),
             param_type: match p.param_type {
-                crate::dag::ParamType::Float => executor_lib::ParamType::Float,
-                crate::dag::ParamType::Int => executor_lib::ParamType::Int,
-                crate::dag::ParamType::Bool => executor_lib::ParamType::Bool,
-                crate::dag::ParamType::String => executor_lib::ParamType::String,
-                crate::dag::ParamType::DataFrame => executor_lib::ParamType::DataFrame,
-                crate::dag::ParamType::DataFrameArray => executor_lib::ParamType::DataFrameArray,
+                crate::mining::dag::ParamType::Float => executor_lib::ParamType::Float,
+                crate::mining::dag::ParamType::Int => executor_lib::ParamType::Int,
+                crate::mining::dag::ParamType::Bool => executor_lib::ParamType::Bool,
+                crate::mining::dag::ParamType::String => executor_lib::ParamType::String,
+                crate::mining::dag::ParamType::DataFrame => executor_lib::ParamType::DataFrame,
+                crate::mining::dag::ParamType::DataFrameArray => executor_lib::ParamType::DataFrameArray,
             },
             default_value: p.default_value.clone(),
         })
@@ -329,7 +329,7 @@ pub fn execute_node_with_result(node: &Node, inputs: &[PortData]) -> Result<Exec
             let params_json = build_params_json(def);
 
             // 优先从服务器缓存的算子分类中查找 DLL 路径
-            if let Some(dll_path) = crate::dag::find_operator_dll_path(algorithm_name) {
+            if let Some(dll_path) = crate::mining::dag::find_operator_dll_path(algorithm_name) {
                 let dll_path_buf = std::path::PathBuf::from(&dll_path);
                 if dll_path_buf.exists() {
                     return with_runtime_client(|client| {
@@ -413,9 +413,9 @@ pub fn enable_operator(def: &CustomOperatorDef) -> Result<String, String> {
     let json_content = serde_json::to_string_pretty(def).map_err(|e| format!("序列化算子定义失败: {}", e))?;
     fs::write(&json_path, json_content).map_err(|e| format!("保存 JSON 失败: {}", e))?;
 
-    crate::dag::refresh_operator_types_cache();
+    crate::mining::dag::refresh_operator_types_cache();
     // 同步失效服务器侧算子分类缓存，使新算子在下次渲染时立即出现
-    crate::dag::refresh_operator_categories();
+    crate::mining::dag::refresh_operator_categories();
 
     Ok(format!("算子启用成功!\n算子目录: {}", op_target_dir.display()))
 }
@@ -599,7 +599,7 @@ pub(crate) fn apply_dag_node_result(
     match nr.execution_result.status {
         OperatorExecutionStatus::Completed => {
             // 落盘预览缓存（前 200 行），失败不影响整体结果
-            if let Err(e) = crate::data_preview::save_preview_from_truncated(
+            if let Err(e) = crate::mining::data_preview::save_preview_from_truncated(
                 &nr.node_id,
                 &nr.operator_name,
                 &nr.outputs,
@@ -678,7 +678,7 @@ pub(crate) fn apply_dag_execution_result(
 /// 由服务端在算子库目录中按名兜底查找。
 fn resolve_operator_dll_path(operator_name: &str) -> Option<String> {
     // 1. 服务端缓存的算子分类
-    if let Some(dll_path) = crate::dag::find_operator_dll_path(operator_name) {
+    if let Some(dll_path) = crate::mining::dag::find_operator_dll_path(operator_name) {
         let path = std::path::PathBuf::from(&dll_path);
         if path.exists() {
             return Some(dll_path);

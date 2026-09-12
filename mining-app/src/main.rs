@@ -30,10 +30,10 @@ use mining_app::ui::{
     view_activity_bar, view_mining_analysis, view_settings,
     view_status_bar, view_title_bar,
 };
-use mining_app::ui::dag_canvas::{hit_test_node, hit_test_port, screen_to_world};
+use mining_app::ui::mining::dag_canvas::{hit_test_node, hit_test_port, screen_to_world};
 use mining_app::ui::theme;
-use mining_app::dag_store;
-use mining_app::geom::Vec2;
+use mining_app::mining::dag_store;
+use mining_app::mining::geom::Vec2;
 
 // ===== 主入口 =====
 fn main() -> iced::Result {
@@ -91,7 +91,13 @@ impl MyApp {
     fn boot() -> (UiState, Task<Message>) {
         let task = iced::window::oldest()
             .map(Message::SetMainWindowId);
-        (UiState::default(), task)
+        let mut state = UiState::default();
+        // 启动时从磁盘配置读取 hide_mining，写入 SettingsState，
+        // 让活动栏首帧即按用户上次选择渲染（不闪一下挖掘按钮）。
+        if let Ok(cfg) = mining_app::config::load_config() {
+            state.settings.hide_mining = cfg.hide_mining;
+        }
+        (state, task)
     }
 
     fn title(_state: &UiState) -> String {
@@ -104,7 +110,7 @@ impl MyApp {
                 if state.current_view == ViewType::MiningAnalysis
                     && vt != ViewType::MiningAnalysis
                 {
-                    mining_app::ui::mining_analysis_view::release_all_debug_sessions(
+                    mining_app::ui::mining::mining_analysis_view::release_all_debug_sessions(
                         &mut state.dag_editor,
                     );
                 }
@@ -504,6 +510,29 @@ impl MyApp {
             }
             Message::AlignTop => handle_align_top(state),
             Message::AlignLeft => handle_align_left(state),
+            Message::ToggleHideMining => {
+                // 翻转内存开关 → 即时影响活动栏渲染
+                state.settings.hide_mining = !state.settings.hide_mining;
+                let now_hidden = state.settings.hide_mining;
+                // 落盘：失败不阻断 UI，仅写入 settings.last_result 供后续提示
+                let save_msg = match mining_app::config::save_hide_mining(now_hidden) {
+                    Ok(()) => format!(
+                        "已{}「挖掘」入口并保存",
+                        if now_hidden { "隐藏" } else { "显示" }
+                    ),
+                    Err(e) => format!("保存失败：{e}"),
+                };
+                state.settings.last_result = Some((true, save_msg));
+                // 若当前正在 MiningAnalysis 视图且切到隐藏，自动跳到 Settings，
+                // 避免用户停留在已裁掉的视图里无入口返回。
+                if now_hidden && state.current_view == ViewType::MiningAnalysis {
+                    // 释放挖掘视图占用的调试会话再切走
+                    mining_app::ui::mining::mining_analysis_view::release_all_debug_sessions(
+                        &mut state.dag_editor,
+                    );
+                    state.current_view = ViewType::Settings;
+                }
+            }
         }
         Task::none()
     }
@@ -893,7 +922,7 @@ fn handle_canvas_right_click(state: &mut UiState, pos: Vec2) {
 /// 连线创建：ConnectRelease → 命中端口，两端方向相反（Output→Input / Input→Output）
 /// 则调用 tab.graph.add_edge 创建一条新边；否则只清空 dragging 状态。
 fn handle_connect_release(state: &mut UiState, screen_pos: Vec2) {
-    use mining_app::dag::Edge;
+    use mining_app::mining::dag::Edge;
 
     let (from_info, offset, zoom) = match state.dag_editor.active_tab() {
         Some(tab) => (
@@ -949,7 +978,7 @@ fn handle_connect_release(state: &mut UiState, screen_pos: Vec2) {
 /// AddOperator：在激活 tab 画布中心/鼠标最后位置（或世界原点）新增一个节点，
 /// 从 `dag::get_all_operator_types()` 按名称匹配 OperatorType。
 fn handle_add_operator_by_name(state: &mut UiState, op_name: String) {
-    use mining_app::dag::{get_all_operator_types, Node};
+    use mining_app::mining::dag::{get_all_operator_types, Node};
 
     let op_type = match get_all_operator_types()
         .into_iter()

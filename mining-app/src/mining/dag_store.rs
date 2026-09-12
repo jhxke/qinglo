@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::get_models_directory;
-use crate::dag::DagGraph;
+use crate::mining::dag::DagGraph;
 
 /// 建模的轻量元数据，用于左侧历史列表展示与按更新时间排序。
 ///

@@ -576,11 +576,11 @@ impl OperatorType {
 pub struct Node {
     pub id: String,
     pub operator_type: OperatorType,
-    pub position: crate::geom::Vec2,
+    pub position: crate::mining::geom::Vec2,
 }
 
 impl Node {
-    pub fn new(operator_type: OperatorType, position: crate::geom::Vec2) -> Self {
+    pub fn new(operator_type: OperatorType, position: crate::mining::geom::Vec2) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             operator_type,
@@ -963,10 +963,10 @@ pub fn operator_info_to_type(info: &ProtoOperatorInfo) -> OperatorType {
 
 /// 从服务器加载层级化算子列表（同步阻塞，应在后台线程调用）。
 ///
-/// 复用 [`crate::operator_executor::with_runtime_client`] 的全局持久连接，
+/// 复用 [`crate::mining::operator_executor::with_runtime_client`] 的全局持久连接，
 /// 不再各自 `RuntimeClient::new` 产生端口不断变化的短连接。
 pub fn load_operators_from_server() -> Option<Vec<OperatorCategory>> {
-    crate::operator_executor::with_runtime_client(|client| client.list_operators())
+    crate::mining::operator_executor::with_runtime_client(|client| client.list_operators())
         .map_err(|e| eprintln!("从服务器获取算子列表失败: {}", e))
         .ok()
 }
@@ -1461,7 +1461,7 @@ impl NodeIORegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::Vec2;
+    use crate::mining::geom::Vec2;
 
     fn make_graph() -> (DagGraph, String, String, String) {
         let mut g = DagGraph::new();

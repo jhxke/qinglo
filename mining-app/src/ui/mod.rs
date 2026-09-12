@@ -1,16 +1,6 @@
 pub mod activity_bar;
-pub mod chat_view;
-pub mod code_editor;
-pub mod dag_canvas;
-pub mod data_preview_view;
-pub mod histogram_view;
 pub mod icons;
-pub mod kline_chart_view;
-pub mod line_chart_view;
-pub mod log_panel;
-pub mod markdown_view;
-pub mod mining_analysis_view;
-pub mod operator_params_editor;
+pub mod mining;
 pub mod settings_view;
 pub mod state;
 pub mod status_bar;
@@ -26,10 +16,12 @@ pub mod webview_plugins;
 pub use state::*;
 
 pub use activity_bar::view_activity_bar;
-pub use mining_analysis_view::view_mining_analysis;
-pub use mining_analysis_view::poll_dag_exec_task;
-pub use mining_analysis_view::release_all_debug_sessions;
-pub use mining_analysis_view::try_spawn_pending_dag_exec;
+// DAG 视图族统一收敛到 `mining` 子模块；为保持 main.rs 调用路径兼容，
+// 在 ui 顶层继续 re-export 其公共入口函数。
+pub use mining::view_mining_analysis;
+pub use mining::poll_dag_exec_task;
+pub use mining::release_all_debug_sessions;
+pub use mining::try_spawn_pending_dag_exec;
 pub use settings_view::view_settings;
 pub use status_bar::view_status_bar;
 pub use title_bar::view_title_bar;

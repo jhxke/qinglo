@@ -1,9 +1,6 @@
 pub mod config;
-pub mod dag;
-pub mod dag_store;
-pub mod data_preview;
-pub mod debug_executor;
-pub mod geom;
 pub mod icon;
-pub mod operator_executor;
+/// 挖掘子系统（DAG 数据层）：dag / dag_store / geom / debug_executor /
+/// operator_executor / data_preview。对应 UI 层在 [`ui::mining`]。
+pub mod mining;
 pub mod ui;

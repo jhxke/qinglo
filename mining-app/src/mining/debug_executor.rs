@@ -7,7 +7,7 @@ use std::time::Instant;
 use operator_executor_client::{PortData, DataFrame};
 
 use crate::config::get_compile_directory;
-use crate::operator_executor::cargo_project_build;
+use crate::mining::operator_executor::cargo_project_build;
 use operator_executor_client::ensure_runtime_loaded;
 
 /// Rust 原生算子执行函数签名，直接传递 PortData 指针

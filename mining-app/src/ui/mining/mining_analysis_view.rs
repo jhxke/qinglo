@@ -37,8 +37,8 @@ use super::state::{
     LeftPanelTab, LogLevel, Message, UiState,
 };
 use super::theme;
-use crate::dag_store;
-use crate::operator_executor::{
+use crate::mining::dag_store;
+use crate::mining::operator_executor::{
     apply_dag_execution_result, apply_dag_node_result,
     execute_dag_on_server_streaming_debug,
     execute_dag_up_to_detached_streaming_debug,
@@ -1199,7 +1199,7 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
         .padding(Padding { top: 8.0, bottom: 6.0, left: 10.0, right: 10.0 });
 
     // 算子目录递归渲染
-    let categories = crate::dag::get_operator_categories();
+    let categories = crate::mining::dag::get_operator_categories();
     let filter = search_value.trim().to_lowercase();
     let mut op_col = column![].spacing(5).padding(Padding {
         top: 2.0, bottom: 8.0, left: 8.0, right: 8.0,

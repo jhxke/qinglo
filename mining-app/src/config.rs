@@ -22,6 +22,14 @@ pub struct AppConfig {
     /// 为 None 或空字符串时使用系统临时目录。
     #[serde(default)]
     pub compile_directory: Option<String>,
+    /// 是否在活动栏隐藏「挖掘」入口（DAG 编排视图）。
+    ///
+    /// 用于按需裁剪功能面：关闭后活动栏不再显示挖掘按钮，
+    /// 切换到挖掘视图的快捷路径也会回退到下一个可用视图，
+    /// 避免用户进入被裁掉的视图后无入口返回。运行时通过设置页开关
+    /// 修改并落盘，无需重新编译。
+    #[serde(default)]
+    pub hide_mining: bool,
 }
 
 impl Default for AppConfig {
@@ -29,6 +37,7 @@ impl Default for AppConfig {
         Self {
             rust_toolchain_path: None,
             compile_directory: None,
+            hide_mining: false,
         }
     }
 }
@@ -285,5 +294,16 @@ pub fn save_compile_directory(path: Option<String>) -> Result<(), ConfigError> {
         if trimmed.is_empty() { None } else { Some(trimmed) }
     });
     config.compile_directory = normalized;
+    save_config(&config)
+}
+
+/// 仅更新配置中的 hide_mining 字段，保留其它字段。
+///
+/// 用于设置页"隐藏挖掘 DAG 入口"开关的持久化：开关变更先写入
+/// 内存中的 SettingsState（即时生效），用户点击保存时再调用本函数
+/// 落盘。采用「加载-修改-保存」模式，避免覆盖其它字段。
+pub fn save_hide_mining(hide: bool) -> Result<(), ConfigError> {
+    let mut config = load_config().unwrap_or_default();
+    config.hide_mining = hide;
     save_config(&config)
 }
