@@ -862,9 +862,7 @@ fn draw_world_content_optimized(frame: &mut canvas::Frame, p: &DagProgram) {
                     NODE_ROUNDING + 1.0,
                 );
                 let glow_color = mix_color(
-                    Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 140.0/255.0
-                    },
+                    with_alpha(Color::from(theme::accent()), 140.0/255.0),
                     with_alpha(op_color, 140.0/255.0),
                     0.5,
                 );

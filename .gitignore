@@ -22,6 +22,7 @@ models/
 lib/
 dag/
 cache/
+release/
 # .vscode/ 视团队约定，默认保留以共享配置
 
 # ===== 操作系统杂项 =====

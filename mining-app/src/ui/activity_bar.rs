@@ -58,8 +58,8 @@ fn view_activity_button(
     // v3：激活态图标用双色渐变首末颜色之间的"中间色"模拟发光；
     // 非激活态：弱化 text_weak()
     let icon_color = if is_active {
-        // 靛蓝 6366F1 → 青蓝 22D3EE，取一个高饱和紫色
-        Color::from_rgb8(139, 148, 250) // 偏亮 Indigo-400
+        // 石墨主题：激活态电光青，科技感发光
+        Color::from_rgb8(34, 211, 238) // Cyan-400
     } else {
         theme::text_weak()
     };
@@ -95,13 +95,13 @@ fn view_activity_button(
             s.background = Some(Color::TRANSPARENT.into());
             s.border.radius = 10.0.into();
             if is_active {
-                // v3：激活态靛蓝半透明 + 青蓝微光边框
+                // 石墨主题：激活态青色半透明底 + 电光青微光边框
                 s.background = Some(Color {
-                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 22.0/255.0
+                    r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 22.0/255.0
                 }.into());
                 s.border.width = 1.0;
                 s.border.color = Color {
-                    r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 40.0/255.0
+                    r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 60.0/255.0
                 };
             } else if matches!(status, iced::widget::button::Status::Hovered) {
                 // hover：更柔和的填充，圆角与激活一致

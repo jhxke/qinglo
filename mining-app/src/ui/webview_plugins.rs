@@ -769,7 +769,7 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   html, body { height: 100%; }
   body {
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-    background: #0b1020;
+    background: #0b0c0f;
     color: #e2e8f0;
     overflow: hidden;
   }
@@ -777,23 +777,23 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   header.topbar {
     display: flex; align-items: center; gap: 14px;
     padding: 0 18px; height: 52px;
-    background: linear-gradient(90deg, rgba(99,102,241,.22), rgba(34,211,238,.10));
+    background: linear-gradient(90deg, rgba(8,145,178,.22), rgba(34,211,238,.10));
     border-bottom: 1px solid rgba(148,163,184,.18);
   }
   .logo {
     width: 26px; height: 26px; border-radius: 8px;
-    background: linear-gradient(135deg, #6366f1, #22d3ee);
-    display: grid; place-items: center; font-weight: 700; color: #0b1020;
+    background: linear-gradient(135deg, #0891b2, #22d3ee);
+    display: grid; place-items: center; font-weight: 700; color: #0b0c0f;
   }
   h1 { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
   .sub { font-size: 11px; color: #94a3b8; }
   .spacer { flex: 1; }
   .btn {
-    border: 1px solid rgba(148,163,184,.35); background: rgba(30,41,59,.7);
+    border: 1px solid rgba(148,163,184,.35); background: rgba(27,29,34,.8);
     color: #e2e8f0; border-radius: 8px; padding: 7px 14px; font-size: 12px;
     cursor: pointer; transition: background .15s, border-color .15s;
   }
-  .btn:hover { background: rgba(71,85,105,.9); border-color: rgba(148,163,184,.6); }
+  .btn:hover { background: rgba(55,60,70,.9); border-color: rgba(148,163,184,.6); }
   .btn.primary { border-color: rgba(34,211,238,.55); color: #a5f3fc; }
   main {
     flex: 1; overflow: auto; padding: 18px;
@@ -806,7 +806,7 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
     margin: 4px 2px -4px;
   }
   .card {
-    background: rgba(30,41,59,.55);
+    background: rgba(27,29,34,.7);
     border: 1px solid rgba(148,163,184,.16);
     border-radius: 12px; overflow: hidden;
   }
@@ -832,7 +832,7 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   .row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
   .result { margin-top: 10px; font-size: 12px; color: #6ee7b7; }
   input {
-    background: #0f172a; border: 1px solid rgba(148,163,184,.3);
+    background: #141519; border: 1px solid rgba(148,163,184,.3);
     border-radius: 7px; color: #e2e8f0; padding: 7px 10px; font-size: 12px;
     outline: none; min-width: 0;
   }
@@ -840,22 +840,22 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   input.num { width: 90px; }
   input.txt { flex: 1; min-width: 140px; }
   button.action {
-    background: linear-gradient(135deg, #6366f1, #0ea5e9);
+    background: linear-gradient(135deg, #0891b2, #22d3ee);
     border: none; border-radius: 7px; color: #fff;
     padding: 8px 16px; font-size: 12px; cursor: pointer;
   }
   button.action:active { transform: translateY(1px); }
   .logbox {
     height: 150px; overflow: auto;
-    background: #0b1226; border: 1px solid rgba(148,163,184,.14);
+    background: #0a0b0e; border: 1px solid rgba(148,163,184,.14);
     border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.8;
     font-family: Consolas, monospace;
   }
   .log-rust { color: #6ee7b7; }
-  .log-js { color: #93c5fd; }
+  .log-js { color: #7dd3fc; }
   .bar {
     height: 4px; border-radius: 2px; margin-top: 14px;
-    background: linear-gradient(90deg, #6366f1, #22d3ee, #6366f1);
+    background: linear-gradient(90deg, #0891b2, #22d3ee, #0891b2);
     background-size: 200% 100%;
     animation: flow 2.2s linear infinite;
   }

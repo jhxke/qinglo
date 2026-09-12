@@ -374,7 +374,7 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
         Color::from(theme::accent())
     } else {
         Color {
-            r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 15.0/255.0
+            r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 15.0/255.0
         }
     };
     let icon_block = container(
@@ -430,9 +430,9 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
         s.border.radius = theme::CARD_ROUNDING.into();
         s.border.width = 1.0;
         if is_active {
-            // 激活态：靛蓝渐变 + 边框发光
+            // 激活态：深青填充 + 亮青边框发光
             s.background = Some(Color {
-                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 95.0/255.0
+                r: 14.0/255.0, g: 116.0/255.0, b: 144.0/255.0, a: 95.0/255.0
             }.into());
             s.border.color = Color::from(theme::accent_bright());
             s.text_color = Color::WHITE;
@@ -613,17 +613,17 @@ fn view_tab_item(
         s.border.color = Color::TRANSPARENT;
         if is_active {
             s.background = Some(Color {
-                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0,
+                r: 14.0/255.0, g: 116.0/255.0, b: 144.0/255.0, a: 30.0/255.0,
             }.into());
             match status {
                 iced::widget::button::Status::Hovered => {
                     s.background = Some(Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0,
+                        r: 14.0/255.0, g: 116.0/255.0, b: 144.0/255.0, a: 50.0/255.0,
                     }.into());
                 }
                 iced::widget::button::Status::Pressed => {
                     s.background = Some(Color {
-                        r: 79.0/255.0, g: 70.0/255.0, b: 229.0/255.0, a: 40.0/255.0,
+                        r: 21.0/255.0, g: 94.0/255.0, b: 117.0/255.0, a: 40.0/255.0,
                     }.into());
                 }
                 _ => {}
@@ -663,7 +663,7 @@ fn view_tab_item(
     // 关闭按钮区域（始终占位，仅在需要时显示 × 图标）
     let close_slot: Element<'static, Message> = if show_close {
         let close_color = if is_active {
-            Color { r: 235.0/255.0, g: 238.0/255.0, b: 250.0/255.0, a: 0.65 }
+            Color { r: 233.0/255.0, g: 235.0/255.0, b: 239.0/255.0, a: 0.65 }
         } else {
             theme::text_weak()
         };
@@ -746,10 +746,10 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
         // 未打开建模：精美的引导占位 + 快捷操作提示
         let guide_card = container(
             column![
-                // 大图标：蓝紫渐变发光装饰
+                // 大图标：青色发光装饰
                 container(
                     text("◇").color(Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
+                        r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 180.0/255.0
                     }).size(54.0)
                 )
                 .width(Length::Fixed(88.0))
@@ -759,12 +759,12 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
                 .style(|_t| {
                     let mut s = iced::widget::container::Style::default();
                     s.background = Some(Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 10.0/255.0
+                        r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 10.0/255.0
                     }.into());
                     s.border.radius = 24.0.into();
                     s.border.width = 1.0;
                     s.border.color = Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 35.0/255.0
+                        r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 35.0/255.0
                     };
                     s
                 }),
@@ -805,7 +805,7 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
-                r: 24.0/255.0, g: 30.0/255.0, b: 48.0/255.0, a: 180.0/255.0
+                r: 27.0/255.0, g: 29.0/255.0, b: 34.0/255.0, a: 200.0/255.0
             }.into());
             s.border.radius = 20.0.into();
             s.border.width = 1.0;
@@ -1014,7 +1014,7 @@ fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
-                r: 13.0/255.0, g: 17.0/255.0, b: 28.0/255.0, a: 200.0/255.0
+                r: 13.0/255.0, g: 14.0/255.0, b: 17.0/255.0, a: 210.0/255.0
             }.into());
             s.border.radius = 12.0.into();
             s.border.width = 1.0;
@@ -1052,10 +1052,10 @@ fn icon_only_tool_button(
     let is_primary = matches!(icon, IconKind::Run);
 
     let icon_color = if is_primary {
-        // 主按钮：靛蓝实色底 → 图标用 WHITE 保证对比度
+        // 主按钮：深青实色底 → 图标用 WHITE 保证对比度
         Color::WHITE
     } else if primary_or_active {
-        // 激活态（调试开）：半透明靛蓝底 → 亮靛蓝图标
+        // 激活态（调试开）：半透明青底 → 亮青图标
         theme::accent_bright()
     } else {
         theme::text_hover()
@@ -1075,14 +1075,14 @@ fn icon_only_tool_button(
             let mut s = iced::widget::button::Style::default();
             s.border.radius = 9.0.into();
             if primary_or_active {
-                // 主按钮（▶ 执行 DAG）：靛蓝实色 + 亮边框高光；调试激活态：半透明底 + accent 描边
+                // 主按钮（▶ 执行 DAG）：深青实色 + 亮青边框高光；调试激活态：半透明底 + accent 描边
                 let is_primary = matches!(icon, IconKind::Run);
                 if is_primary {
                     s.background = Some(Color::from(theme::accent()).into());
                     s.text_color = Color::WHITE;
                     s.border.width = 1.0;
                     s.border.color = Color {
-                        r: 165.0/255.0, g: 180.0/255.0, b: 252.0/255.0, a: 1.0
+                        r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 1.0
                     };
                     if matches!(status, iced::widget::button::Status::Hovered) {
                         s.background = Some(Color::from(theme::accent_bright()).into());
@@ -1091,16 +1091,16 @@ fn icon_only_tool_button(
                     }
                 } else {
                     s.background = Some(Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 30.0/255.0
+                        r: 14.0/255.0, g: 116.0/255.0, b: 144.0/255.0, a: 30.0/255.0
                     }.into());
                     s.text_color = theme::accent_bright();
                     s.border.width = 1.0;
                     s.border.color = Color {
-                        r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 180.0/255.0
+                        r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 180.0/255.0
                     };
                     if matches!(status, iced::widget::button::Status::Hovered) {
                         s.background = Some(Color {
-                            r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 50.0/255.0
+                            r: 14.0/255.0, g: 116.0/255.0, b: 144.0/255.0, a: 50.0/255.0
                         }.into());
                     }
                 }
@@ -1592,7 +1592,7 @@ fn view_new_model_dialog(state: &UiState) -> Element<'_, Message> {
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
-                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 15.0/255.0
+                r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 15.0/255.0
             }.into());
             s.border.radius = 12.0.into();
             s
@@ -1757,7 +1757,7 @@ fn dialog_overlay(card: Element<'_, Message>, cancel: Message) -> Element<'_, Me
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
-                r: 5.0/255.0, g: 8.0/255.0, b: 18.0/255.0, a: 0.72
+                r: 6.0/255.0, g: 7.0/255.0, b: 9.0/255.0, a: 0.72
             }.into());
             s
         });

@@ -89,7 +89,7 @@ pub fn view_title_bar(state: &UiState) -> Element<'_, Message> {
         .style(|_theme| {
             let mut s = iced::widget::container::Style::default();
             s.background = Some(Color {
-                r: 99.0/255.0, g: 102.0/255.0, b: 241.0/255.0, a: 25.0/255.0
+                r: 34.0/255.0, g: 211.0/255.0, b: 238.0/255.0, a: 35.0/255.0
             }.into());
             s
         });
@@ -184,9 +184,9 @@ impl<Message> canvas::Program<Message> for LogoProgram {
             px(18.0, -18.0 + breathe),
         ];
 
-        // 新配色：靛蓝 → 青蓝（更符合 v2 蓝紫主题）
-        let start_color = Color::from_rgba8(99, 102, 241, 1.0);   // #6366F1 靛蓝
-        let end_color = Color::from_rgba8(34, 211, 238, 1.0);     // #22D3EE 青蓝
+        // 石墨主题：深青 → 电光青，黑色底上的发光数据线
+        let start_color = Color::from_rgba8(8, 145, 178, 1.0);    // #0891B2 深青
+        let end_color = Color::from_rgba8(34, 211, 238, 1.0);     // #22D3EE 电光青
 
         // 阴影
         let shadow_path = Path::new(|b| {
@@ -198,7 +198,7 @@ impl<Message> canvas::Program<Message> for LogoProgram {
         frame.stroke(
             &shadow_path,
             Stroke {
-                style: stroke::Style::Solid(Color::from_rgba8(99, 102, 241, 80.0 / 255.0)),
+                style: stroke::Style::Solid(Color::from_rgba8(8, 145, 178, 80.0 / 255.0)),
                 width: 2.0 * s,
                 line_cap: LineCap::Round,
                 ..Default::default()
