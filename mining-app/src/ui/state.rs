@@ -125,6 +125,8 @@ pub struct JsonLogEntry {
 pub enum ViewType {
     MiningAnalysis,
     Settings,
+    /// wry WebView2 菜单测试页（整个视图由浏览器子窗口渲染）。
+    WebViewMenu,
 }
 
 /// Iced Elm 架构的全局消息。
@@ -160,6 +162,19 @@ pub enum Message {
     /// 用户无法直接构造，只能通过 `iced::window::oldest()` 异步查询。
     /// boot 时返回该 Task，resolve 后通过此消息把 Id 落到 UiState。
     SetMainWindowId(Option<WindowId>),
+
+    // ===== wry WebView 菜单测试 =====
+
+    /// `iced::window::run` 回调取到的主窗口 HWND（None 表示非 Win32 平台）。
+    WebViewHwnd(Option<isize>),
+    /// `iced::window::size` 异步回填的窗口逻辑尺寸，用于首次创建 webview / 校准 bounds。
+    WebViewWindowSize(iced::Size),
+    /// 主窗口 resize 事件携带的新逻辑尺寸（resize_events 订阅）。
+    WindowResized(iced::Size),
+    /// 主窗口位置变化（window::events 的 Moved）：popup 宿主窗口需重新定位。
+    WindowMoved(iced::Point),
+    /// WebView 菜单可见期间的高频 Tick（~120ms），用于低延迟轮询 JS→Rust IPC。
+    WebViewTick,
     /// 画布鼠标按下：参数为鼠标相对于画布左上角的屏幕坐标（已扣除画布偏移）。
     /// 由 `DagProgram::update` 在 `ButtonPressed(Left)` 时发布，`MyApp::update`
     /// 据此判断是命中节点（选中 + 开始拖拽）还是命中空白（开始平移画布）。
@@ -339,6 +354,11 @@ pub struct UiState {
     /// 若两次按下间隔 < 400ms 且命中同一节点 → 视为双击，弹出右侧参数抽屉。
     pub last_canvas_press_at: Option<std::time::Instant>,
     pub last_canvas_press_node_id: Option<String>,
+    /// wry WebView2 菜单测试页宿主（仅 Windows；!Send，只在主线程访问）。
+    #[cfg(windows)]
+    pub webview_menu: super::webview_menu::WebViewMenu,
+    /// WebView2 创建/运行错误（None = 无错误），用于在占位页直接展示。
+    pub webview_error: Option<String>,
 }
 
 impl Default for UiState {
@@ -354,6 +374,9 @@ impl Default for UiState {
             modifiers: iced::keyboard::Modifiers::default(),
             last_canvas_press_at: None,
             last_canvas_press_node_id: None,
+            #[cfg(windows)]
+            webview_menu: Default::default(),
+            webview_error: None,
         }
     }
 }

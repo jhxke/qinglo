@@ -16,6 +16,9 @@ pub mod state;
 pub mod status_bar;
 pub mod theme;
 pub mod title_bar;
+/// wry WebView2 菜单试验（仅 Windows）。
+#[cfg(windows)]
+pub mod webview_menu;
 
 pub use state::*;
 
@@ -32,9 +35,19 @@ use iced::{Alignment, Element, Length};
 use iced::widget::{column, container, text};
 
 /// 阶段 1 占位视图 helper：居中显示标题 + 副标题，背景为默认暗色。
-pub fn placeholder_view(title: &'static str, hint: &'static str) -> Element<'static, Message> {
-    let title_w = text(title).color(theme::TEXT_STRONG).size(18.0);
-    let hint_w = text(hint).color(theme::TEXT_WEAK).size(12.0);
+///
+/// 接受任意生命周期的字符串（错误信息是运行时构造的 String），
+/// 副标题限宽 480px 自动换行，避免长错误串横向溢出。
+pub fn placeholder_view(
+    title: impl Into<String>,
+    hint: impl Into<String>,
+) -> Element<'static, Message> {
+    let title_w = text(title.into()).color(theme::TEXT_STRONG).size(18.0);
+    let hint_w = text(hint.into())
+        .color(theme::TEXT_WEAK)
+        .size(12.0)
+        .width(Length::Fixed(480.0))
+        .align_x(iced::alignment::Horizontal::Center);
     let col = column![title_w, hint_w].spacing(8).align_x(Alignment::Center);
     container(col)
         .width(Length::Fill)

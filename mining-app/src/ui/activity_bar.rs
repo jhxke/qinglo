@@ -18,6 +18,7 @@ const BUTTON_SIZE: f32 = 58.0;
 
 pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
     let mining_btn = view_activity_button(IconKind::Mining, "挖掘", ViewType::MiningAnalysis, state.current_view);
+    let webview_btn = view_activity_button(IconKind::Sparkle, "网页", ViewType::WebViewMenu, state.current_view);
     let settings_btn = view_activity_button(IconKind::Settings, "设置", ViewType::Settings, state.current_view);
 
     let spacer_top = container(text("").size(1.0))
@@ -25,7 +26,7 @@ pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
         .height(Length::Fixed(14.0));
 
     // 把按钮推到上面，底部留白（呼应 VSCode / JetBrains 式布局）
-    let col = column![spacer_top, mining_btn, settings_btn]
+    let col = column![spacer_top, mining_btn, webview_btn, settings_btn]
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(3);

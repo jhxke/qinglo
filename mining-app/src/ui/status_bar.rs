@@ -18,6 +18,7 @@ pub fn view_status_bar(state: &UiState) -> Element<'_, Message> {
     let view_name = match state.current_view {
         ViewType::MiningAnalysis => "挖掘分析",
         ViewType::Settings => "系统设置",
+        ViewType::WebViewMenu => "WebView 菜单",
     };
     let (level, msg) = current_status(state);
 
@@ -176,6 +177,9 @@ fn current_status(state: &UiState) -> (LogLevel, String) {
                 let level = if *ok { LogLevel::Success } else { LogLevel::Error };
                 return (level, msg.clone());
             }
+        }
+        ViewType::WebViewMenu => {
+            // 网页层覆盖整个窗口时状态栏不可见，无需特殊状态
         }
     }
     (LogLevel::Info, "就绪".into())

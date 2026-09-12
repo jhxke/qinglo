@@ -30,3 +30,8 @@ lazy_static = "1"
 once_cell = "1"
 operator_executor_client = { path = "../operator_executor_client" }
 rfd = "0.14"
+
+# wry 仅用于 Windows 下的 WebView2 菜单/富文本试验（build_as_child 嵌入 iced 主窗口）。
+# 关闭 default-features 避免拉入 Linux(gtk/webkit/x11/tao) 依赖。
+[target.'cfg(windows)'.dependencies]
+wry = { version = "0.56", default-features = false }

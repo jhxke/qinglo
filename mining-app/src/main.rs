@@ -108,7 +108,19 @@ impl MyApp {
                         &mut state.dag_editor,
                     );
                 }
+                // 离开网页菜单视图时隐藏 WebView2 子窗口（airspace 遮挡）
+                #[cfg(windows)]
+                if state.current_view == ViewType::WebViewMenu
+                    && vt != ViewType::WebViewMenu
+                {
+                    state.webview_menu.hide();
+                }
                 state.current_view = vt;
+                // 进入网页菜单视图：懒创建 / 显示 WebView2 子窗口
+                #[cfg(windows)]
+                if vt == ViewType::WebViewMenu {
+                    return enter_webview_menu(state);
+                }
             }
             Message::Tick => {
                 // 先 spawn（消费 pending_run_all / pending_run_up_to）再 poll，
@@ -123,12 +135,81 @@ impl MyApp {
                 }
                 // 推进 Logo 动画时间（每 Tick 0.5s）
                 state.logo_time += 0.5;
+                // 轮询网页菜单 JS → Rust IPC
+                #[cfg(windows)]
+                handle_webview_ipc(state);
             }
             Message::AnimTick => {
                 // 高频轮询执行任务，及时回填节点状态（与主 Tick 合并 poll 无副作用）
                 mining_app::ui::poll_dag_exec_task(&mut state.dag_editor);
                 // 推进运行动画时间（~80ms → 0.08s）
                 state.anim_time += 0.08;
+                #[cfg(windows)]
+                handle_webview_ipc(state);
+            }
+            // 网页菜单可见期间的高频 IPC 轮询 + popup 位置兜底校准
+            Message::WebViewTick => {
+                #[cfg(windows)]
+                {
+                    handle_webview_ipc(state);
+                    state.webview_menu.sync_bounds();
+                }
+            }
+            // ===== wry WebView 菜单测试 =====
+            Message::WebViewHwnd(hwnd) => {
+                #[cfg(windows)]
+                {
+                    if let Some(hwnd) = hwnd {
+                        state.webview_menu.set_hwnd(hwnd);
+                        if let Some(id) = state.main_window_id {
+                            return iced::window::size(id)
+                                .map(Message::WebViewWindowSize);
+                        }
+                    } else {
+                        state.webview_error =
+                            Some("无法获取 Win32 窗口句柄，WebView 仅支持 Windows".into());
+                        eprintln!("[webview-menu] 无法获取 Win32 窗口句柄");
+                    }
+                }
+                #[cfg(not(windows))]
+                let _ = hwnd;
+            }
+            Message::WebViewWindowSize(size) => {
+                #[cfg(windows)]
+                {
+                    if state.webview_menu.is_ready() {
+                        // 再次进入：仅校准矩形并确保可见
+                        state.webview_menu.set_size(size);
+                        state.webview_menu.show();
+                        state.webview_error = None;
+                    } else if let Err(e) = state.webview_menu.build(size) {
+                        state.webview_error = Some(e);
+                    } else {
+                        state.webview_error = None;
+                        // 首次创建：popup 创建时无 WS_VISIBLE，build 成功后立即显示
+                        state.webview_menu.show();
+                    }
+                }
+                #[cfg(not(windows))]
+                let _ = size;
+            }
+            Message::WindowResized(size) => {
+                // 仅网页菜单可见时需要跟随（其他视图 wgpu 自行处理）
+                #[cfg(windows)]
+                if state.current_view == ViewType::WebViewMenu {
+                    state.webview_menu.set_size(size);
+                }
+                #[cfg(not(windows))]
+                let _ = size;
+            }
+            Message::WindowMoved(_point) => {
+                // 主窗口移动后 popup 重新定位（relocate 内部自行取屏幕坐标）
+                #[cfg(windows)]
+                if state.current_view == ViewType::WebViewMenu {
+                    state.webview_menu.relocate();
+                }
+                #[cfg(not(windows))]
+                let _ = _point;
             }
             Message::SetMainWindowId(id) => {
                 state.main_window_id = id;
@@ -434,6 +515,17 @@ impl MyApp {
         let main_content = match state.current_view {
             ViewType::MiningAnalysis => view_mining_analysis(state),
             ViewType::Settings => view_settings(state),
+            // 实际界面由 WebView2 子窗口覆盖渲染；这里只作为加载前/失败时的底层占位
+            ViewType::WebViewMenu => match &state.webview_error {
+                Some(e) => mining_app::ui::placeholder_view(
+                    "WebView 菜单加载失败",
+                    e,
+                ),
+                None => mining_app::ui::placeholder_view(
+                    "WebView 菜单（wry 测试）",
+                    "网页层加载中……若长时间未显示，请查看 %TEMP%\\qinglo_webview_menu.log",
+                ),
+            },
         };
 
         // 活动栏和主体之间加极细分隔线
@@ -494,12 +586,29 @@ impl MyApp {
         // iced::keyboard::listen 只会派发被 widget 链未消费的键盘事件，
         // 不会干扰 text_input 等组件的按键处理。
         let keyboard = iced::keyboard::listen().map(Message::Keyboard);
+        // 窗口尺寸变化：网页菜单可见时用于同步 popup 宿主窗口尺寸
+        let resize = iced::window::resize_events()
+            .map(|(_id, size)| Message::WindowResized(size));
+        // 窗口移动：popup 是独立顶级窗口，必须跟随主窗口重新定位
+        let moved = iced::window::events().filter_map(|(_id, event)| match event {
+            window::Event::Moved(point) => Some(Message::WindowMoved(point)),
+            _ => None,
+        });
+
+        let mut subs = vec![base, keyboard, resize, moved];
         if needs_anim {
-            let anim = iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick);
-            Subscription::batch(vec![base, anim, keyboard])
-        } else {
-            Subscription::batch(vec![base, keyboard])
+            // DAG 执行中追加高频动画 Tick（80ms）
+            subs.push(
+                iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick),
+            );
         }
+        // 网页菜单可见时追加 120ms IPC 轮询 Tick，其余时间不发出以节省开销
+        if state.current_view == ViewType::WebViewMenu {
+            subs.push(
+                iced::time::every(Duration::from_millis(120)).map(|_| Message::WebViewTick),
+            );
+        }
+        Subscription::batch(subs)
     }
 
     fn theme(_state: &UiState) -> Theme {
@@ -508,6 +617,62 @@ impl MyApp {
 
     fn scale_factor(_state: &UiState) -> f32 {
         1.0
+    }
+}
+
+// ===== wry WebView 菜单测试（仅 Windows）=====
+//
+// WebView 是 !Send，整个创建/调用链都留在 winit 主线程的 update 中：
+//
+//   SwitchView(WebViewMenu)
+//     → window::run(id, extract_hwnd)        // Task<Option<isize>>
+//     → Message::WebViewHwnd(Some(hwnd))
+//     → window::size(id)                     // Task<Size>
+//     → Message::WebViewWindowSize(size)
+//     → WebViewMenu::build(size)             // build_as_child 子 HWND
+//
+// 再次进入时 webview 已存在，直接 set_visible(true) 并校准 bounds。
+
+/// 进入网页菜单视图：已创建则显示，否则启动「取 HWND → 取尺寸 → 创建」链路。
+#[cfg(windows)]
+fn enter_webview_menu(state: &mut UiState) -> Task<Message> {
+    use mining_app::ui::webview_menu::WebViewMenu;
+
+    let ready = state.webview_menu.is_ready();
+    if ready {
+        state.webview_menu.show();
+    }
+    match state.main_window_id {
+        Some(id) if !ready => {
+            // 回调返回 Send 的 Option<isize>，不跨线程传递任何 !Send 资源
+            iced::window::run(id, WebViewMenu::extract_hwnd).map(Message::WebViewHwnd)
+        }
+        Some(id) => iced::window::size(id).map(Message::WebViewWindowSize),
+        None => Task::none(),
+    }
+}
+
+/// 排空网页菜单 JS → Rust IPC 并处理指令。
+#[cfg(windows)]
+fn handle_webview_ipc(state: &mut UiState) {
+    use mining_app::ui::webview_menu::IpcCommand;
+
+    let commands = state.webview_menu.drain_commands();
+    for cmd in commands {
+        match cmd {
+            IpcCommand::Back => {
+                state.webview_menu.hide();
+                state.current_view = ViewType::MiningAnalysis;
+            }
+            IpcCommand::Sum(a, b) => {
+                state
+                    .webview_menu
+                    .notify("sum", &format!("{a} + {b} = {}", a + b));
+            }
+            IpcCommand::Echo(text) => {
+                state.webview_menu.notify("echo", &text);
+            }
+        }
     }
 }
 
