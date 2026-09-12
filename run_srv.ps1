@@ -42,6 +42,7 @@ $operators = @(
     @{ Group = $grpMathOp; Name = "highest_operator"; Dir = [char]0x6700 + [char]0x9AD8 + [char]0x4EF7 + [char]0x7B97 + [char]0x5B50; Json = "operator\highest_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "return_histogram_operator"; Dir = [char]0x6536 + [char]0x76CA + [char]0x7387 + [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x7B97 + [char]0x5B50; Json = "operator\return_histogram_operator\operator.json" }
     @{ Group = $grpMathOp; Name = "factor_histogram_operator"; Dir = [char]0x56E0 + [char]0x5B50 + [char]0x76F4 + [char]0x65B9 + [char]0x56FE + [char]0x7B97 + [char]0x5B50; Json = "operator\factor_histogram_operator\operator.json" }
+    @{ Group = $grpMathOp; Name = "column_stream_operator"; Dir = [char]0x5217 + [char]0x8F6C + [char]0x5B57 + [char]0x7B26 + [char]0x4E32 + [char]0x6D41 + [char]0x7B97 + [char]0x5B50; Json = "operator\column_stream_operator\operator.json" }
 
     # ===== visualization =====
     @{ Group = $grpViz; Name = "kline_visualization_operator"; Dir = [char]0x53EF + [char]0x89C6 + [char]0x5316 + [char]0x7B97 + [char]0x5B50;                         Json = "operator\kline_visualization_operator\operator.json" }
