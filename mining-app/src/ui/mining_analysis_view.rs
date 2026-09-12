@@ -44,6 +44,7 @@ use crate::operator_executor::{
     execute_dag_up_to_detached_streaming_debug,
 };
 use operator_executor_client::protocol::OperatorExecutionStatus;
+use operator_executor_client::PortData;
 
 // ===== 布局尺寸常量 =====
 /// 左侧合并面板（建模列表 / 算子面板共用）宽度。
@@ -1957,6 +1958,47 @@ pub fn try_spawn_pending_dag_exec(editor_state: &mut DagEditorState) {
     }
 }
 
+/// 流式 chunk 在日志中的最大展示字符数（超出截断并标注总长度）。
+const STREAM_CHUNK_LOG_MAX_CHARS: usize = 200;
+
+/// 把流式 chunk 格式化成单行日志摘要。
+///
+/// - String：转义换行/制表符等控制字符后按字符截断，避免长文本
+///   （chat DSL 快照、长行文本等）一条日志刷掉整个面板；
+/// - Float/Int/Bool：直接显示值；
+/// - DataFrame/DataFrameArray：显示行 × 列 / 帧数摘要，不展开数据。
+fn format_stream_chunk_preview(chunk: &PortData) -> String {
+    match chunk {
+        PortData::String(s) => {
+            // 先转义反斜杠，再转义控制字符，保证日志始终单行
+            let escaped = s
+                .replace('\\', r"\\")
+                .replace('\r', r"\r")
+                .replace('\n', r"\n")
+                .replace('\t', r"\t");
+            let total = escaped.chars().count();
+            if total == 0 {
+                "String(空)".to_string()
+            } else if total <= STREAM_CHUNK_LOG_MAX_CHARS {
+                format!("\"{}\"", escaped)
+            } else {
+                let head: String = escaped.chars().take(STREAM_CHUNK_LOG_MAX_CHARS).collect();
+                format!("\"{}\"…(共 {} 字符)", head, total)
+            }
+        }
+        PortData::Float(v) => format!("Float({})", v),
+        PortData::Int(v) => format!("Int({})", v),
+        PortData::Bool(v) => format!("Bool({})", v),
+        PortData::DataFrame(df) => {
+            format!("DataFrame({} 行 × {} 列)", df.row_count, df.columns.len())
+        }
+        PortData::DataFrameArray(dfs) => {
+            let rows: usize = dfs.iter().map(|df| df.row_count).sum();
+            format!("DataFrameArray({} 帧, 共 {} 行)", dfs.len(), rows)
+        }
+    }
+}
+
 fn poll_exec_task_messages(editor_state: &mut DagEditorState) -> bool {
     let task = match editor_state.dag_exec_task.take() {
         Some(t) => t,
@@ -2009,12 +2051,16 @@ fn poll_exec_task_messages(editor_state: &mut DagEditorState) -> bool {
                     }
                 }
             }
-            DagExecMessage::StreamChunk { node_id, chunk: _ } => {
+            DagExecMessage::StreamChunk { node_id, chunk } => {
                 // 流式 chunk（chat DSL 等）的实时预览留待 chat_preview 窗口接入；
-                // 暂记一条运行日志便于排查
+                // 日志中先打印 chunk 内容摘要（字符串转义截断为单行），便于排查
                 if let Some(i) = tab_idx {
                     editor_state.tabs[i].add_runtime_log(
-                        format!("节点 {} 流式 chunk 接收", node_id),
+                        format!(
+                            "节点 {} 流式 chunk: {}",
+                            node_id,
+                            format_stream_chunk_preview(&chunk)
+                        ),
                         LogLevel::Info,
                     );
                 }
