@@ -1,0 +1,18 @@
+[package]
+name = "frame_index_operator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "frame_index_operator"
+
+[[bin]]
+name = "frame_index_operator_debug"
+path = "src/debug_main.rs"
+
+[dependencies]
+operator_runtime = { path = "../../operator_runtime" }
+operator_executor_client = { path = "../../operator_executor_client" }
+serde_json = "1.0"

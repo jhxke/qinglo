@@ -1,0 +1,28 @@
+{
+  "name": "数组取帧算子",
+  "description": "输入一个 DataFrameArray，按参数 frame_index 指定的下标取出其中一帧，输出单个 DataFrame（支持负下标倒序取帧）",
+  "code": "",
+  "color": [217, 119, 6],
+  "summary": "按整数下标从 DataFrameArray 中取一帧 DataFrame 输出，支持 -1 取最后一帧",
+  "description_md": "# 数组取帧算子\n\n从 **DataFrameArray**（多帧数据表）中按**下标**取出指定的一帧，输出单个 **DataFrame**。常用于数据源按分组产出多帧后，挑选其中某一组（如某只股票、某段时间）交给下游单表算子处理。\n\n## 输入输出\n\n- **输入**：`input`（DataFrameArray）—— 多帧 DataFrame 数组，仅接受 DataFrameArray\n- **输出**：`output`（DataFrame）—— 下标对应位置的那一帧（移动所有权，不复制列数据）\n\n## 参数\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `frame_index` | Int | `0` | 要取出的帧下标，从 `0` 开始；支持**负下标**：`-1` 表示最后一帧、`-2` 表示倒数第二帧，以此类推 |\n\n## 取帧规则\n\n设数组长度为 `n`：\n\n| `frame_index` | 实际位置 | 说明 |\n| --- | --- | --- |\n| `0` | 第 1 帧 | 默认取首帧 |\n| `k`（0 ≤ k < n） | 第 k+1 帧 | 正向取帧 |\n| `-1` | 第 n 帧 | 最后一帧 |\n| `-m`（1 ≤ m ≤ n） | 第 n-m+1 帧 | 倒数取帧 |\n\n## 注意事项\n\n- 下标越界（`frame_index >= n` 或负下标绝对值超过数组长度）时执行失败，并在错误信息中返回数组长度便于排查。\n- 输入为空数组（0 帧）时执行失败。\n- 仅接受 DataFrameArray；传入单个 DataFrame 会返回类型错误（单表无需取帧，可直连下游）。\n- 本算子为非流式批量算子（`stream=false`）。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "DataFrameArray",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrame",
+      "default_value": ""
+    },
+    {
+      "name": "frame_index",
+      "direction": "Param",
+      "param_type": "Int",
+      "default_value": "0"
+    }
+  ]
+}

@@ -1387,6 +1387,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frame_index_operator"
+version = "0.1.0"
+dependencies = [
+ "operator_executor_client",
+ "operator_runtime",
+ "serde_json",
+]
+
+[[package]]
 name = "future_return_operator"
 version = "0.1.0"
 dependencies = [

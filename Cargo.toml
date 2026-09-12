@@ -24,6 +24,7 @@ members = [
     "operator/highest_operator",
     "operator/daily_return_operator",
     "operator/factor_vc_operator",
+    "operator/frame_index_operator",
     "operator_executor_client",
     "operator_sdk",
     "operator_runtime_server",
