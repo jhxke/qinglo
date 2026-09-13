@@ -74,6 +74,8 @@ pub enum IconKind {
     Service,
     /// 发布按钮（工具栏）：纸飞机 / 火箭升空语义，表"发布/上线"
     Publish,
+    /// 刷新按钮：顺时针旋转的 270° 圆弧 + 末端箭头尖，表"刷新/重新加载"
+    Refresh,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -219,6 +221,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Move => draw_move(frame, color, sw),
         IconKind::Service => draw_service(frame, color, sw),
         IconKind::Publish => draw_publish(frame, color, sw),
+        IconKind::Refresh => draw_refresh(frame, color, sw),
     }
 }
 
@@ -737,24 +740,97 @@ fn draw_service(frame: &mut canvas::Frame, color: Color, sw: f32) {
     }
 }
 
-/// 发布图标：纸飞机（上升右指三角形 + 折叠线），表"发布 / 上线 / 发送"。
+/// 发布图标：火箭（尖锥头部 + 主体胶囊 + 舷窗 + 两侧尾翼 + 底部火焰）。
+/// 语义：火箭升空 → 发布 / 部署 / 上线 DAG 模型为服务。
 fn draw_publish(frame: &mut canvas::Frame, color: Color, sw: f32) {
     let stroke = solid_stroke(color, sw);
-    // 纸飞机外轮廓：左下 → 右上尖 → 左下，形成三角形主体
-    let plane = Path::new(|b| {
-        b.move_to(Point::new(4.0, 20.0));
-        b.line_to(Point::new(20.0, 4.0));
-        b.line_to(Point::new(20.0, 20.0));
-        b.line_to(Point::new(4.0, 20.0));
+
+    // 1. 火箭主体轮廓（尖锥头 + 胶囊身 + 底部收窄，一条连续路径）
+    let body_outline = Path::new(|b| {
+        b.move_to(Point::new(12.0, 2.5));        // 尖锥顶
+        b.line_to(Point::new(17.0, 8.0));        // 头底右
+        b.line_to(Point::new(17.0, 16.0));       // 主体右下
+        b.line_to(Point::new(14.0, 19.0));       // 主体底部收窄
+        b.line_to(Point::new(10.0, 19.0));       // 主体底部左
+        b.line_to(Point::new(7.0, 16.0));        // 主体左下
+        b.line_to(Point::new(7.0, 8.0));         // 头底左
+        b.close();
     });
-    frame.stroke(&plane, stroke);
-    // 内部折叠线：从尖端到底边中点
-    let fold = Path::new(|b| {
-        b.move_to(Point::new(20.0, 4.0));
-        b.line_to(Point::new(12.0, 14.0));
-        b.line_to(Point::new(20.0, 20.0));
+    frame.stroke(&body_outline, stroke);
+
+    // 2. 尖锥/主体过渡横线（头部与主体衔接）
+    let head_seam = Path::new(|b| {
+        b.move_to(Point::new(10.5, 6.5));
+        b.line_to(Point::new(13.5, 6.5));
     });
-    frame.stroke(&fold, stroke);
+    frame.stroke(&head_seam, stroke);
+
+    // 3. 舷窗：圆形 stroke
+    let window = Path::circle(Point::new(12.0, 12.0), 2.0);
+    frame.stroke(&window, stroke);
+
+    // 4. 左侧尾翼（小三角 stroke，连接主体左中部）
+    let left_fin = Path::new(|b| {
+        b.move_to(Point::new(7.0, 13.0));        // 主体左中部
+        b.line_to(Point::new(3.5, 17.5));        // 尾翼外尖
+        b.line_to(Point::new(7.0, 17.5));        // 尾翼内接主体底
+    });
+    frame.stroke(&left_fin, stroke);
+
+    // 5. 右侧尾翼（对称）
+    let right_fin = Path::new(|b| {
+        b.move_to(Point::new(17.0, 13.0));       // 主体右中部
+        b.line_to(Point::new(20.5, 17.5));       // 尾翼外尖
+        b.line_to(Point::new(17.0, 17.5));       // 尾翼内接主体底
+    });
+    frame.stroke(&right_fin, stroke);
+
+    // 6. 底部火焰（三股：中间高、两侧低）
+    // 中间主火焰
+    let flame_center = Path::new(|b| {
+        b.move_to(Point::new(10.5, 19.0));
+        b.line_to(Point::new(12.0, 23.5));
+        b.line_to(Point::new(13.5, 19.0));
+    });
+    frame.stroke(&flame_center, stroke);
+    // 左侧小火焰
+    let flame_left = Path::new(|b| {
+        b.move_to(Point::new(9.5, 19.0));
+        b.line_to(Point::new(8.5, 22.0));
+    });
+    frame.stroke(&flame_left, stroke);
+    // 右侧小火焰
+    let flame_right = Path::new(|b| {
+        b.move_to(Point::new(14.5, 19.0));
+        b.line_to(Point::new(15.5, 22.0));
+    });
+    frame.stroke(&flame_right, stroke);
+}
+
+/// 刷新：顺时针 270° 圆弧（右侧 90° 缺口）+ 弧终点处的向上箭头尖。
+/// 弧从右下(45°)经下、左、上到右上(315°)，缺口在右侧；
+/// 箭头尖为"^"形，底部与弧终点(17,7)对齐，尖部朝上（顺时针运动方向）。
+fn draw_refresh(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    let center = Point::new(12.0, 12.0);
+    let radius = 7.0_f32;
+    // 270° 弧：从 45°(右下) 到 315°(右上)，逆时针数学方向 = 屏幕顺时针
+    let arc = Path::new(|b| {
+        b.arc(canvas::path::Arc {
+            center,
+            radius,
+            start_angle: iced::Radians(std::f32::consts::FRAC_PI_4), // 45°
+            end_angle: iced::Radians(7.0 * std::f32::consts::FRAC_PI_4), // 315°
+        });
+    });
+    frame.stroke(&arc, stroke);
+    // 箭头尖："^"形，底部在弧终点(17,7)，尖部朝上
+    let arrow = Path::new(|b| {
+        b.move_to(Point::new(14.5, 7.0));
+        b.line_to(Point::new(17.0, 4.0));
+        b.line_to(Point::new(19.5, 7.0));
+    });
+    frame.stroke(&arrow, stroke);
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）

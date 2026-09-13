@@ -30,7 +30,7 @@ pub fn view_services(state: &UiState) -> Element<'_, Message> {
     let refresh_btn = button(
         container(
             row![
-                icons::view_icon(IconKind::Clear, theme::text_strong(), 14.0),
+                icons::view_icon(IconKind::Refresh, theme::text_strong(), 14.0),
                 text("刷新").size(11.5).color(theme::text_strong()),
             ]
             .spacing(6)
