@@ -93,6 +93,8 @@ pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
         Some(view_delete_confirm_dialog(state))
     } else if state.dag_editor.show_delete_folder_dialog {
         Some(view_delete_folder_confirm_dialog(state))
+    } else if state.dag_editor.show_move_model_dialog {
+        Some(view_move_model_dialog(state))
     } else {
         None
     };
@@ -593,7 +595,7 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
         }
     };
     let icon_block = container(
-        text("◆").color(icon_color).size(15.0)
+        icons::view_icon(IconKind::Model, icon_color, 16.0)
     )
     .width(Length::Fixed(34.0))
     .height(Length::Fixed(34.0))
@@ -616,10 +618,16 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
     .spacing(2)
     .width(Length::Fill);
 
-    // 操作按钮：编辑（铅笔）+ 删除（垃圾桶，红色警示），矢量图标同尺寸协调
+    // 操作按钮：编辑（铅笔）+ 移动到目录（箭头）+ 删除（垃圾桶，红色警示），矢量图标同尺寸协调
     let rename_btn = card_icon_button_kind(
         IconKind::Pencil,
         Message::RenameModelClick(m.id.clone()),
+        is_active,
+        None,
+    );
+    let move_btn = card_icon_button_kind(
+        IconKind::Move,
+        Message::MoveModelClick(m.id.clone(), m.name.clone()),
         is_active,
         None,
     );
@@ -629,7 +637,7 @@ fn view_model_card(m: &dag_store::DagModelMeta, is_active: bool) -> Element<'_, 
         is_active,
         Some(theme::danger()),
     );
-    let actions = row![rename_btn, delete_btn].spacing(4);
+    let actions = row![rename_btn, move_btn, delete_btn].spacing(4);
 
     let mid = button(
         row![icon_block, info_col, actions]
@@ -2477,6 +2485,102 @@ fn view_delete_folder_confirm_dialog(state: &UiState) -> Element<'_, Message> {
     .width(Length::Fixed(380.0));
 
     dialog_overlay(card.into(), Message::DeleteFolderCancel)
+}
+
+/// 「移动到目录」对话框：列出根目录 + 所有子目录，点击任一目录即把目标建模移动过去。
+fn view_move_model_dialog(state: &UiState) -> Element<'_, Message> {
+    let model_name = state
+        .dag_editor
+        .move_model_target_name
+        .clone()
+        .unwrap_or_default();
+
+    let icon = dialog_icon_block(icons::view_icon(IconKind::Move, theme::accent(), 22.0));
+    let title_col = column![
+        text("移动到目录").color(theme::text_strong()).size(15.0),
+        text(format!("将建模「{}」移动到：", model_name))
+            .color(theme::text_weak())
+            .size(10.5),
+    ]
+    .spacing(2);
+
+    // 目录列表：根目录在前，随后递归所有子目录（按字典序）
+    let mut items: Vec<Element<'static, Message>> = Vec::new();
+
+    // 根目录项
+    items.push(folder_pick_item("根目录".to_string(), String::new(), 0));
+
+    let all_folders = dag_store::list_all_folders();
+    for f in &all_folders {
+        let depth = f.id.matches('/').count();
+        let display = f.id.replace('/', " / ");
+        items.push(folder_pick_item(display, f.id.clone(), depth));
+    }
+
+    let list_col = if items.is_empty() {
+        column![
+            container(text("（没有可选目录）").color(theme::text_weak()).size(11.0))
+                .width(Length::Fill)
+                .align_x(Alignment::Center)
+                .padding(Padding { top: 16.0, bottom: 16.0, left: 0.0, right: 0.0 })
+        ]
+        .spacing(4)
+    } else {
+        let mut c = column![].spacing(4);
+        for it in items {
+            c = c.push(it);
+        }
+        c
+    };
+
+    let list_scroll = scrollable(list_col)
+        .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
+        .height(Length::Fixed(220.0))
+        .style(theme::cool_scrollbar_style());
+
+    let cancel_btn = dialog_button("取消", Message::MoveModelCancel, false);
+    let btns = row![row![].width(Length::Fill), cancel_btn]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        list_scroll,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 16.0, bottom: 12.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(380.0));
+
+    dialog_overlay(card.into(), Message::MoveModelCancel)
+}
+
+/// 移动对话框中的单个目录选项：文件夹图标 + 路径名，点击即移动到该目录。
+fn folder_pick_item(label: String, folder_id: String, depth: usize) -> Element<'static, Message> {
+    let indent = 10.0 + (depth as f32) * 14.0;
+    let icon = icons::view_icon(IconKind::Folder, theme::accent(), 14.0);
+    let content = row![icon, text(label).color(theme::text_strong()).size(11.5)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    let btn = button(content)
+        .width(Length::Fill)
+        .padding(Padding { top: 7.0, bottom: 7.0, left: indent, right: 10.0 })
+        .on_press(Message::MoveModelToFolder(folder_id))
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.background = Some(Color::TRANSPARENT.into());
+            s.text_color = theme::text_strong();
+            if matches!(status, iced::widget::button::Status::Hovered) {
+                s.background = Some(Color::from(theme::card_hover_bg()).into());
+                s.border.color = theme::accent_dim();
+            }
+            s
+        });
+    btn.into()
 }
 
 /// 通用对话框遮罩层 v2：靛蓝黑 + 居中卡片

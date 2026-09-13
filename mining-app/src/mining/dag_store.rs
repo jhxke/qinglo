@@ -339,6 +339,95 @@ pub fn new_model_id_in(folder: &str) -> String {
     join_id(folder, &new_model_id())
 }
 
+/// 递归列出 models 根目录下所有目录（不含根目录本身）。
+///
+/// 返回的 `ModelFolderMeta.id` 为完整相对路径（`/` 分隔），按字典序排序，
+/// 便于「移动到目录」对话框展示整棵目录树。软删除目录（`.deleted` 结尾）跳过。
+pub fn list_all_folders() -> Vec<ModelFolderMeta> {
+    let root = get_models_directory();
+    let mut out = Vec::new();
+    collect_folders(&root, "", &mut out);
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// 递归收集 `dir` 下的目录元数据；`prefix` 为 `dir` 相对 models 根的 id。
+fn collect_folders(dir: &PathBuf, prefix: &str, out: &mut Vec<ModelFolderMeta>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if is_deleted_name(name) || !path.is_dir() {
+            continue;
+        }
+        let id = join_id(prefix, name);
+        let mut nested = Vec::new();
+        collect_models(&path, "", &mut nested);
+        out.push(ModelFolderMeta {
+            id: id.clone(),
+            name: name.to_string(),
+            model_count: nested.len(),
+        });
+        collect_folders(&path, &id, out);
+    }
+}
+
+/// 将指定建模移动到目标目录下：把 `<id>.json` 重命名到 `target_folder/<stem>.json`，
+/// 并以磁盘路径覆写记录内 `id`（保持与 [`load_model`] 一致的"路径即 id"约定）。
+///
+/// - `target_folder` 为 `""` 表示移回根目录。
+/// - 若目标目录下已存在同 stem 的建模（UUID 碰撞，理论上不可能），返回错误。
+/// - 源文件不存在或 id 非法返回错误说明。
+///
+/// 成功返回移动后的新 id。
+pub fn move_model(id: &str, target_folder: &str) -> Result<String, String> {
+    let src = model_path(id).ok_or("建模路径非法")?;
+    if !src.exists() {
+        return Err("建模不存在".to_string());
+    }
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("建模路径非法")?
+        .to_string();
+    // 目标目录必须已存在（根目录除外，根目录即 models 目录本身必然存在）
+    if !target_folder.is_empty() {
+        let Some(t_dir) = folder_dir(target_folder) else {
+            return Err("目标目录路径非法".to_string());
+        };
+        if !t_dir.is_dir() {
+            return Err("目标目录不存在".to_string());
+        }
+    }
+    let new_id = join_id(target_folder, &stem);
+    // 同目录移动（目标 = 源）视为成功空操作
+    if new_id == id {
+        return Ok(new_id);
+    }
+    let Some(dst) = model_path(&new_id) else {
+        return Err("目标路径非法".to_string());
+    };
+    if dst.exists() {
+        return Err("目标目录已存在同名建模".to_string());
+    }
+    fs::rename(&src, &dst).map_err(|e| format!("移动建模失败: {}", e))?;
+    // 覆写记录内 id，保证 load_model / save_model 一致
+    if let Ok(content) = fs::read_to_string(&dst) {
+        if let Ok(mut rec) = serde_json::from_str::<DagModelRecord>(&content) {
+            rec.id = new_id.clone();
+            if let Ok(json) = serde_json::to_string_pretty(&rec) {
+                let _ = fs::write(&dst, &json);
+            }
+        }
+    }
+    Ok(new_id)
+}
+
 /// 加载指定 id 的建模完整记录。文件不存在或解析失败时返回 `None`。
 ///
 /// 返回记录的 `id` 以磁盘相对路径为准（防止 JSON 内 id 与文件位置不一致）。

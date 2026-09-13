@@ -270,6 +270,15 @@ pub enum Message {
     /// 删除目录确认对话框：取消。
     DeleteFolderCancel,
 
+    // ===== 建模：移动到目录 =====
+
+    /// 点击列表项右键/操作按钮「移动到目录」：弹出移动对话框，携带 (id, name)。
+    MoveModelClick(String, String),
+    /// 移动对话框：选择目标目录（`""` 为根目录）并执行移动。
+    MoveModelToFolder(String),
+    /// 移动对话框：取消。
+    MoveModelCancel,
+
     // ===== Tab 栏 =====
 
     /// 点击 Tab：切换到指定索引的 tab。
@@ -820,6 +829,12 @@ pub struct DagEditorState {
     pub delete_folder_target_id: Option<String>,
     /// 删除目录确认对话框：目标目录名称（用于对话框展示）
     pub delete_folder_target_name: Option<String>,
+    /// 移动到目录对话框：是否显示
+    pub show_move_model_dialog: bool,
+    /// 移动到目录对话框：目标建模 id
+    pub move_model_target_id: Option<String>,
+    /// 移动到目录对话框：目标建模名称（用于对话框展示）
+    pub move_model_target_name: Option<String>,
     /// 后台 DAG 执行任务（「执行 DAG」或「运行到此结点」）；None 表示无任务运行。
     /// 由 UI 线程持有，工作线程仅通过 mpsc `Sender` 回传消息。
     pub dag_exec_task: Option<DagExecTask>,
@@ -853,6 +868,9 @@ impl Default for DagEditorState {
             show_delete_folder_dialog: false,
             delete_folder_target_id: None,
             delete_folder_target_name: None,
+            show_move_model_dialog: false,
+            move_model_target_id: None,
+            move_model_target_name: None,
             dag_exec_task: None,
             log_panel_visible: true,
         }
@@ -1083,6 +1101,30 @@ impl DagEditorState {
         self.delete_folder_target_id = Some(id.to_string());
         self.delete_folder_target_name = Some(name.to_string());
         self.show_delete_folder_dialog = true;
+    }
+
+    /// 弹出「移动到目录」对话框。
+    pub fn request_move_model(&mut self, id: &str, name: &str) {
+        self.move_model_target_id = Some(id.to_string());
+        self.move_model_target_name = Some(name.to_string());
+        self.show_move_model_dialog = true;
+    }
+
+    /// 将指定建模移动到目标目录（`""` 为根目录）。
+    ///
+    /// 磁盘重命名 `<id>.json` → `target_folder/<stem>.json`，并同步已打开 tab
+    /// 的 `model_id`，保证保存时写回新位置。成功后刷新当前列表。
+    pub fn move_model(&mut self, id: &str, target_folder: &str) -> Result<(), String> {
+        let new_id = dag_store::move_model(id, target_folder)?;
+        if new_id != id {
+            for tab in &mut self.tabs {
+                if tab.model_id == id {
+                    tab.model_id = new_id.clone();
+                }
+            }
+        }
+        self.refresh_models();
+        Ok(())
     }
 }
 

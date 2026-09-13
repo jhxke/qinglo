@@ -493,6 +493,28 @@ impl MyApp {
                 state.dag_editor.show_delete_folder_dialog = false;
             }
 
+            // ===== 建模：移动到目录 =====
+
+            Message::MoveModelClick(id, name) => {
+                state.dag_editor.request_move_model(&id, &name);
+            }
+            Message::MoveModelToFolder(target) => {
+                if let Some(id) = state.dag_editor.move_model_target_id.take() {
+                    if let Err(e) = state.dag_editor.move_model(&id, &target) {
+                        if let Some(tab) = state.dag_editor.active_tab_mut() {
+                            tab.add_action_log(e, LogLevel::Error);
+                        }
+                    }
+                }
+                state.dag_editor.move_model_target_name = None;
+                state.dag_editor.show_move_model_dialog = false;
+            }
+            Message::MoveModelCancel => {
+                state.dag_editor.move_model_target_id = None;
+                state.dag_editor.move_model_target_name = None;
+                state.dag_editor.show_move_model_dialog = false;
+            }
+
             // ===== Tab 栏 =====
 
             Message::SwitchTab(i) => {

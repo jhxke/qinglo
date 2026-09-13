@@ -68,6 +68,8 @@ pub enum IconKind {
     AlignLeft,
     /// 画布空白右键菜单「重置视图」：四角括号（适应窗口/全屏语义）
     FitView,
+    /// 建模卡片「移动到目录」按钮：左侧竖线 + 右指箭头，表"移动/发送到"
+    Move,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -210,6 +212,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::AlignTop => draw_align_top(frame, color, sw),
         IconKind::AlignLeft => draw_align_left(frame, color, sw),
         IconKind::FitView => draw_fit_view(frame, color, sw),
+        IconKind::Move => draw_move(frame, color, sw),
     }
 }
 
@@ -685,6 +688,30 @@ fn draw_fit_view(frame: &mut canvas::Frame, color: Color, sw: f32) {
         });
         frame.stroke(&l, stroke);
     }
+}
+
+/// 移动：左侧竖线 + 右指箭头（含箭头头部），表"移动/发送到目录"语义。
+fn draw_move(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 左侧竖线（起点标识）
+    let bar = Path::new(|b| {
+        b.move_to(Point::new(5.0, 5.5));
+        b.line_to(Point::new(5.0, 18.5));
+    });
+    frame.stroke(&bar, stroke);
+    // 箭头杆
+    let shaft = Path::new(|b| {
+        b.move_to(Point::new(8.0, 12.0));
+        b.line_to(Point::new(17.0, 12.0));
+    });
+    frame.stroke(&shaft, stroke);
+    // 箭头头部（右上、右下两条线汇聚到尖端）
+    let head = Path::new(|b| {
+        b.move_to(Point::new(13.0, 8.0));
+        b.line_to(Point::new(18.0, 12.0));
+        b.line_to(Point::new(13.0, 16.0));
+    });
+    frame.stroke(&head, stroke);
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）
