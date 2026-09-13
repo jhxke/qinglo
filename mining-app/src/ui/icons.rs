@@ -40,6 +40,8 @@ pub enum IconKind {
     Debug,
     /// 建模列表项图标：折角文档，象征一份建模文件
     Model,
+    /// 建模目录图标：经典文件夹剪影（填充），象征建模分类目录
+    Folder,
     /// 重命名按钮：铅笔，象征编辑
     Pencil,
     /// 删除按钮：垃圾桶（避免使用 ✕ 叉号）
@@ -194,6 +196,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Run => draw_run(frame, color),
         IconKind::Debug => draw_debug(frame, color, sw),
         IconKind::Model => draw_model(frame, color, sw),
+        IconKind::Folder => draw_folder(frame, color),
         IconKind::Pencil => draw_pencil(frame, color, sw),
         IconKind::Trash => draw_trash(frame, color, sw),
         IconKind::Search => draw_search(frame, color, sw),
@@ -408,6 +411,22 @@ fn draw_model(frame: &mut canvas::Frame, color: Color, sw: f32) {
         b.line_to(Point::new(15.0, 16.0));
     });
     frame.stroke(&l2, stroke);
+}
+
+/// 建模目录：经典标签文件夹剪影（填充），小尺寸下辨识度高。
+///
+/// 几何：左下起点 → 顶部标签（左低段 + 折角 + 右高段）→ 右侧到底 → 闭合。
+fn draw_folder(frame: &mut canvas::Frame, color: Color) {
+    let path = Path::new(|b| {
+        b.move_to(Point::new(3.0, 7.5));
+        b.line_to(Point::new(9.2, 7.5));
+        b.line_to(Point::new(11.2, 9.5));
+        b.line_to(Point::new(21.0, 9.5));
+        b.line_to(Point::new(21.0, 18.0));
+        b.line_to(Point::new(3.0, 18.0));
+        b.close();
+    });
+    frame.fill(&path, color);
 }
 
 /// 铅笔：斜置笔身 + 笔尖三角

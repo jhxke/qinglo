@@ -9,7 +9,7 @@ use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
 use crate::mining::dag::{DagGraph, OperatorType, NodeIORegistry};
-use crate::mining::dag_store::{self, DagModelMeta, DagModelRecord};
+use crate::mining::dag_store::{self, DagModelMeta, DagModelRecord, ModelEntry, ModelFolderMeta};
 pub use crate::config::{BrandConfig, LogoSource, TitleLogo};
 
 use crate::mining::debug_executor::DebugDiagnostics;
@@ -240,6 +240,35 @@ pub enum Message {
     DeleteModelConfirm,
     /// 删除确认对话框：取消。
     DeleteModelCancel,
+
+    // ===== 建模目录（分类文件夹） =====
+
+    /// 点击目录卡片：进入该目录（参数为目录相对 id）。
+    OpenFolder(String),
+    /// 面包屑导航：跳转到指定目录（`""` 为根目录）。
+    FolderNav(String),
+    /// 点击「新建目录」按钮：弹出新建目录对话框。
+    NewFolderClick,
+    /// 新建目录对话框名字输入框内容变化。
+    NewFolderNameInput(String),
+    /// 新建目录对话框：确认。
+    NewFolderConfirm,
+    /// 新建目录对话框：取消。
+    NewFolderCancel,
+    /// 点击目录卡片的重命名图标：弹出重命名目录对话框，携带目录 id。
+    RenameFolderClick(String),
+    /// 重命名目录对话框输入框内容变化。
+    RenameFolderInput(String),
+    /// 重命名目录对话框：确认。
+    RenameFolderConfirm,
+    /// 重命名目录对话框：取消。
+    RenameFolderCancel,
+    /// 点击目录卡片的删除图标：弹出删除目录确认对话框，携带 (id, name)。
+    DeleteFolderClick(String, String),
+    /// 删除目录确认对话框：确认删除。
+    DeleteFolderConfirm,
+    /// 删除目录确认对话框：取消。
+    DeleteFolderCancel,
 
     // ===== Tab 栏 =====
 
@@ -749,9 +778,14 @@ pub struct DagEditorState {
     pub active_tab_index: Option<usize>,
     /// 当前鼠标悬停的 tab 索引；None 表示无 hover
     pub hovered_tab: Option<usize>,
-    /// 磁盘上的建模历史元数据列表（懒加载，首次进入挖掘分析视图时填充）
+    /// 当前浏览的目录（`/` 分隔的相对 id，`""` 表示 models 根目录）。
+    /// 新建模 / 新建目录均落在此目录内；由目录卡片点击与面包屑导航改变。
+    pub current_folder: String,
+    /// 当前目录下一层的子目录列表（与 [`Self::models`] 同属当前目录视图）
+    pub folders: Vec<ModelFolderMeta>,
+    /// 磁盘上当前目录内的建模元数据列表（懒加载，首次进入挖掘分析视图时填充）
     pub models: Vec<DagModelMeta>,
-    /// models 是否已从磁盘加载
+    /// models / folders 是否已从磁盘加载
     pub models_loaded: bool,
     /// 左侧合并面板当前激活的子标签页（建模列表 / 算子面板）。
     /// 由 [`Message::SwitchLeftPanel`] 切换；新建模后自动跳到 Operators 以便添加算子。
@@ -772,6 +806,20 @@ pub struct DagEditorState {
     pub delete_model_target_id: Option<String>,
     /// 删除建模确认对话框：目标建模名称（用于对话框展示）
     pub delete_model_target_name: Option<String>,
+    /// 新建目录对话框：是否显示
+    pub show_new_folder_dialog: bool,
+    /// 新建目录对话框：名字输入框内容
+    pub new_folder_name_input: String,
+    /// 重命名目录对话框：目标目录 id
+    pub rename_folder_target_id: Option<String>,
+    /// 重命名目录对话框：名字输入框内容
+    pub rename_folder_input: String,
+    /// 删除目录确认对话框：是否显示
+    pub show_delete_folder_dialog: bool,
+    /// 删除目录确认对话框：目标目录 id
+    pub delete_folder_target_id: Option<String>,
+    /// 删除目录确认对话框：目标目录名称（用于对话框展示）
+    pub delete_folder_target_name: Option<String>,
     /// 后台 DAG 执行任务（「执行 DAG」或「运行到此结点」）；None 表示无任务运行。
     /// 由 UI 线程持有，工作线程仅通过 mpsc `Sender` 回传消息。
     pub dag_exec_task: Option<DagExecTask>,
@@ -785,6 +833,8 @@ impl Default for DagEditorState {
             tabs: Vec::new(),
             active_tab_index: None,
             hovered_tab: None,
+            current_folder: String::new(),
+            folders: Vec::new(),
             models: Vec::new(),
             models_loaded: false,
             active_left_panel: LeftPanelTab::default(),
@@ -796,6 +846,13 @@ impl Default for DagEditorState {
             show_delete_model_dialog: false,
             delete_model_target_id: None,
             delete_model_target_name: None,
+            show_new_folder_dialog: false,
+            new_folder_name_input: String::new(),
+            rename_folder_target_id: None,
+            rename_folder_input: String::new(),
+            show_delete_folder_dialog: false,
+            delete_folder_target_id: None,
+            delete_folder_target_name: None,
             dag_exec_task: None,
             log_panel_visible: true,
         }
@@ -887,9 +944,9 @@ impl DagEditorState {
         self.active_tab_index = Some(self.tabs.len() - 1);
     }
 
-    /// 新建一个建模：生成 id、落盘空图、打开 tab、刷新历史列表。
+    /// 新建一个建模：在当前浏览目录内生成 id、落盘空图、打开 tab、刷新列表。
     pub fn create_model(&mut self, name: &str) {
-        let id = dag_store::new_model_id();
+        let id = dag_store::new_model_id_in(&self.current_folder);
         let graph = DagGraph::new();
         dag_store::save_model(&id, name, &graph);
         self.save_active_tab();
@@ -948,10 +1005,84 @@ impl DagEditorState {
         self.show_delete_model_dialog = true;
     }
 
-    /// 重新扫描磁盘建模列表。
+    /// 重新扫描磁盘建模列表（当前浏览目录下的子目录 + 建模）。
     pub fn refresh_models(&mut self) {
-        self.models = dag_store::list_models();
+        let entries = dag_store::list_entries_in(&self.current_folder);
+        self.folders.clear();
+        self.models.clear();
+        for entry in entries {
+            match entry {
+                ModelEntry::Folder(f) => self.folders.push(f),
+                ModelEntry::Model(m) => self.models.push(m),
+            }
+        }
         self.models_loaded = true;
+    }
+
+    /// 进入指定目录（卡片点击 / 面包屑导航统一入口，`""` 回到根目录）。
+    pub fn navigate_to_folder(&mut self, folder: &str) {
+        if self.current_folder != folder {
+            self.current_folder = folder.to_string();
+            self.refresh_models();
+        }
+    }
+
+    /// 在当前浏览目录下新建子目录；成功后刷新列表，失败返回中文错误说明。
+    pub fn create_folder(&mut self, name: &str) -> Result<String, String> {
+        let parent = self.current_folder.clone();
+        match dag_store::create_folder(&parent, name) {
+            Ok(id) => {
+                self.refresh_models();
+                Ok(id)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// 重命名目录：磁盘改名 + 重映射该目录内已打开 tab 的 model_id 与
+    /// 当前浏览路径，保证改名后保存 / 视图不漂移。
+    pub fn rename_folder(&mut self, id: &str, new_name: &str) -> Result<(), String> {
+        let new_id = dag_store::rename_folder(id, new_name)?;
+        let old_prefix = format!("{}/", id);
+        let new_prefix = format!("{}/", new_id);
+        for tab in &mut self.tabs {
+            if let Some(rest) = tab.model_id.strip_prefix(&old_prefix) {
+                tab.model_id = format!("{}{}", new_prefix, rest);
+            }
+        }
+        if self.current_folder == id {
+            self.current_folder = new_id;
+        } else if let Some(rest) = self.current_folder.strip_prefix(&old_prefix) {
+            self.current_folder = format!("{}{}", new_prefix, rest);
+        }
+        self.refresh_models();
+        Ok(())
+    }
+
+    /// 软删除目录：磁盘整体改名 `.deleted`，并关闭该目录内建模已打开的 tab
+    /// （否则 tab 保存时会用 `create_dir_all` 把已删除目录重新写回来）。
+    pub fn delete_folder(&mut self, id: &str) -> Result<(), String> {
+        dag_store::delete_folder(id)?;
+        let prefix = format!("{}/", id);
+        self.tabs.retain(|t| !t.model_id.starts_with(&prefix));
+        if let Some(a) = self.active_tab_index {
+            if a >= self.tabs.len() {
+                self.active_tab_index = if self.tabs.is_empty() {
+                    None
+                } else {
+                    Some(self.tabs.len() - 1)
+                };
+            }
+        }
+        self.refresh_models();
+        Ok(())
+    }
+
+    /// 弹出删除目录确认对话框。
+    pub fn request_delete_folder(&mut self, id: &str, name: &str) {
+        self.delete_folder_target_id = Some(id.to_string());
+        self.delete_folder_target_name = Some(name.to_string());
+        self.show_delete_folder_dialog = true;
     }
 }
 

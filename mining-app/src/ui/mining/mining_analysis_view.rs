@@ -83,10 +83,16 @@ pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
     // 对话框叠加层：同一时刻最多一个对话框
     let dialog_layer: Option<Element<'_, Message>> = if state.dag_editor.show_new_model_dialog {
         Some(view_new_model_dialog(state))
+    } else if state.dag_editor.show_new_folder_dialog {
+        Some(view_new_folder_dialog(state))
     } else if state.dag_editor.rename_target_id.is_some() {
         Some(view_rename_dialog(state))
+    } else if state.dag_editor.rename_folder_target_id.is_some() {
+        Some(view_rename_folder_dialog(state))
     } else if state.dag_editor.show_delete_model_dialog {
         Some(view_delete_confirm_dialog(state))
+    } else if state.dag_editor.show_delete_folder_dialog {
+        Some(view_delete_folder_confirm_dialog(state))
     } else {
         None
     };
@@ -227,16 +233,17 @@ fn view_left_panel_tabs(active: LeftPanelTab) -> Element<'static, Message> {
         .into()
 }
 
-/// 左侧面板「建模列表」子页 v2：精美卡片式列表。
+/// 左侧面板「建模列表」子页 v2：卡片式列表，支持目录分类浏览。
 fn view_models_panel(state: &UiState) -> Element<'_, Message> {
     let editor = &state.dag_editor;
     let active_model_id: Option<&str> = editor
         .active_tab()
         .map(|t| t.model_id.as_str());
 
-    // 头部：标题 + 计数徽章（iced_aw::Badge 替换手搓容器）
+    // 头部：标题 + 计数徽章（当前目录下 目录数 + 建模数）
+    let item_count = editor.folders.len() + editor.models.len();
     let count_badge = Badge::<Message>::new(
-        text(format!("{}", editor.models.len()))
+        text(format!("{}", item_count))
             .color(theme::accent_teal())
             .size(10.0)
     )
@@ -265,7 +272,14 @@ fn view_models_panel(state: &UiState) -> Element<'_, Message> {
             s
         });
 
-    // 建模卡片列表
+    // 面包屑（仅非根目录显示）：全部 / 子目录 / ...
+    let breadcrumb: Option<Element<'_, Message>> = if editor.current_folder.is_empty() {
+        None
+    } else {
+        Some(view_folder_breadcrumb(&editor.current_folder))
+    };
+
+    // 卡片列表：目录在前、建模在后
     let mut list_col = column![].spacing(6).padding(Padding {
         top: 8.0, bottom: 8.0, left: 10.0, right: 10.0,
     });
@@ -279,13 +293,18 @@ fn view_models_panel(state: &UiState) -> Element<'_, Message> {
             .align_x(Alignment::Center)
             .padding(Padding { top: 16.0, bottom: 16.0, left: 0.0, right: 0.0 }),
         );
-    } else if editor.models.is_empty() {
+    } else if editor.folders.is_empty() && editor.models.is_empty() {
         // 空状态：精美的占位卡片
+        let empty_hint = if editor.current_folder.is_empty() {
+            "点击下方按钮新建建模或目录".to_string()
+        } else {
+            "该目录为空，可在其中新建建模或子目录".to_string()
+        };
         let empty_card = container(
             column![
                 text("◇").color(theme::accent_dim()).size(32.0),
-                text("暂无建模").color(theme::text_strong()).size(12.0),
-                text("点击下方按钮创建第一个建模").color(theme::text_weak()).size(10.0),
+                text("暂无内容").color(theme::text_strong()).size(12.0),
+                text(empty_hint).color(theme::text_weak()).size(10.0),
             ]
             .spacing(4)
             .align_x(Alignment::Center)
@@ -304,43 +323,31 @@ fn view_models_panel(state: &UiState) -> Element<'_, Message> {
         });
         list_col = list_col.push(empty_card);
     } else {
+        for f in &editor.folders {
+            list_col = list_col.push(view_folder_card(f));
+        }
         for m in &editor.models {
             let is_active = active_model_id == Some(m.id.as_str());
             list_col = list_col.push(view_model_card(m, is_active));
         }
     }
 
-    // 新建模按钮：主色胶囊
-    let inner_content = container(
-        row![
-            text("＋").color(Color::WHITE).size(14.0),
-            text("新建建模").color(Color::WHITE).size(12.0),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center);
-
-    let new_btn = button(inner_content)
+    // 底部双按钮：新建目录（次要）+ 新建建模（主要），各占一半宽度
+    let new_folder_btn = panel_bottom_button(
+        icons::view_icon(IconKind::Folder, theme::text_strong(), 13.0),
+        "新建目录",
+        Message::NewFolderClick,
+        false,
+    );
+    let new_model_btn = panel_bottom_button(
+        icons::view_icon(IconKind::Plus, Color::WHITE, 13.0),
+        "新建建模",
+        Message::NewModelClick,
+        true,
+    );
+    let button_row = row![new_folder_btn, new_model_btn]
         .width(Length::Fill)
-        .height(Length::Fixed(32.0))
-        .on_press(Message::NewModelClick)
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 12.0, right: 12.0 })
-    .style(|_t, status| {
-        let mut s = iced::widget::button::Style::default();
-        s.background = Some(Color::from(theme::accent()).into());
-        s.text_color = Color::WHITE;
-        s.border.radius = 10.0.into();
-        if matches!(status, iced::widget::button::Status::Hovered) {
-            s.background = Some(Color::from(theme::accent_bright()).into());
-        } else if matches!(status, iced::widget::button::Status::Pressed) {
-            s.background = Some(Color::from(theme::accent_dark()).into());
-        }
-        s
-    });
+        .spacing(8);
 
     let body_scroll = scrollable(list_col)
         .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
@@ -348,19 +355,228 @@ fn view_models_panel(state: &UiState) -> Element<'_, Message> {
         .height(Length::Fill)
         .style(theme::cool_scrollbar_style());
 
-    let body = column![
-        header,
-        header_divider,
-        body_scroll,
-        container(new_btn)
-            .width(Length::Fill)
-            .padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, right: 10.0 }),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .spacing(0);
+    let mut body = column![header, header_divider];
+    if let Some(crumb) = breadcrumb {
+        body = body.push(crumb);
+    }
+    body = body
+        .push(body_scroll)
+        .push(
+            container(button_row)
+                .width(Length::Fill)
+                .padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, right: 10.0 }),
+        );
+
+    let body = body
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .spacing(0);
 
     container(body).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// 建模列表底部按钮：32px 高胶囊。`primary=true` 为主色实心（新建建模），
+/// `false` 为卡片底描边次按钮（新建目录）。
+fn panel_bottom_button<'a>(
+    icon: Element<'static, Message>,
+    label: &'a str,
+    msg: Message,
+    primary: bool,
+) -> Element<'a, Message> {
+    let content = container(
+        row![icon, text(label).size(12.0)]
+            .spacing(5)
+            .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center);
+
+    button(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(32.0))
+        .on_press(msg)
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 8.0, right: 8.0 })
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.border.radius = 10.0.into();
+            if primary {
+                s.background = Some(Color::from(theme::accent()).into());
+                s.text_color = Color::WHITE;
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color::from(theme::accent_bright()).into());
+                } else if matches!(status, iced::widget::button::Status::Pressed) {
+                    s.background = Some(Color::from(theme::accent_dark()).into());
+                }
+            } else {
+                s.background = Some(Color::from(theme::card_bg()).into());
+                s.text_color = theme::text_strong();
+                s.border.width = 1.0;
+                s.border.color = theme::card_stroke();
+                if matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color::from(theme::card_hover_bg()).into());
+                    s.border.color = theme::accent_dim();
+                    s.text_color = theme::text_hover();
+                } else if matches!(status, iced::widget::button::Status::Pressed) {
+                    s.background = Some(Color::from(theme::hover_bg()).into());
+                }
+            }
+            s
+        })
+        .into()
+}
+
+/// 目录面包屑：`全部 / A / B`，每段可点击导航；横向超出时可滚动。
+fn view_folder_breadcrumb(folder: &str) -> Element<'_, Message> {
+    /// 单个面包屑分段：浅色文字按钮，点击导航到该段目录。
+    fn crumb_segment(label: String, target: String, current: bool) -> Element<'static, Message> {
+        let color = if current {
+            theme::text_strong()
+        } else {
+            theme::text_weak()
+        };
+        let label_widget = container(text(label).color(color).size(10.5))
+            .align_y(Alignment::Center)
+            .height(Length::Fill);
+        button(label_widget)
+            .height(Length::Fixed(22.0))
+            .padding(Padding { top: 0.0, bottom: 0.0, left: 5.0, right: 5.0 })
+            .on_press(Message::FolderNav(target))
+            .style(move |_t, status| {
+                let mut s = iced::widget::button::Style::default();
+                s.border.radius = 5.0.into();
+                if !current && matches!(status, iced::widget::button::Status::Hovered) {
+                    s.background = Some(Color::from(theme::hover_bg()).into());
+                    s.text_color = theme::text_hover();
+                }
+                s
+            })
+            .into()
+    }
+
+    let mut crumbs: Vec<Element<'static, Message>> =
+        vec![crumb_segment("全部".to_string(), String::new(), false)];
+    let mut acc = String::new();
+    let segs: Vec<&str> = folder.split('/').collect();
+    let last = segs.len().saturating_sub(1);
+    for (i, seg) in segs.iter().enumerate() {
+        crumbs.push(
+            container(text("/").color(theme::text_weak()).size(10.0))
+                .height(Length::Fill)
+                .align_y(Alignment::Center)
+                .into(),
+        );
+        if i == 0 {
+            acc = seg.to_string();
+        } else {
+            acc.push('/');
+            acc.push_str(seg);
+        }
+        crumbs.push(crumb_segment(
+            seg.to_string(),
+            acc.clone(),
+            i == last,
+        ));
+    }
+
+    let row_content = row![].spacing(0).align_y(Alignment::Center);
+    let row_content = crumbs
+        .into_iter()
+        .fold(row_content, |r, c| r.push(c));
+
+    let scroller = scrollable(row_content)
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new()
+                .width(6.0)
+                .scroller_width(3.0)
+                .margin(1.0),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fixed(26.0))
+        .style(theme::cool_scrollbar_style());
+
+    container(scroller)
+        .width(Length::Fill)
+        .height(Length::Fixed(28.0))
+        .align_y(Alignment::Center)
+        .padding(Padding { top: 0.0, bottom: 0.0, left: 6.0, right: 6.0 })
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.color = Color::from(theme::divider());
+            s.border.width = 0.0;
+            s
+        })
+        .into()
+}
+
+/// 目录卡片：文件夹图标块 + 名称 + 内含建模数 + 重命名/删除操作，
+/// 点击卡片主体进入该目录。
+fn view_folder_card(f: &dag_store::ModelFolderMeta) -> Element<'_, Message> {
+    let icon_block = container(icons::view_icon(IconKind::Folder, theme::accent(), 16.0))
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(34.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 34.0 / 255.0, g: 211.0 / 255.0, b: 238.0 / 255.0, a: 15.0 / 255.0,
+            }.into());
+            s.border.radius = 9.0.into();
+            s
+        });
+
+    let subline = if f.model_count == 0 {
+        "空目录".to_string()
+    } else {
+        format!("{} 个建模", f.model_count)
+    };
+    let info_col = column![
+        text(f.name.clone()).color(theme::text_strong()).size(12.0),
+        text(subline).color(theme::text_weak()).size(9.5),
+    ]
+    .spacing(2)
+    .width(Length::Fill);
+
+    let rename_btn = card_icon_button_kind(
+        IconKind::Pencil,
+        Message::RenameFolderClick(f.id.clone()),
+        false,
+        None,
+    );
+    let delete_btn = card_icon_button_kind(
+        IconKind::Trash,
+        Message::DeleteFolderClick(f.id.clone(), f.name.clone()),
+        false,
+        Some(theme::danger()),
+    );
+    let actions = row![rename_btn, delete_btn].spacing(4);
+
+    button(
+        row![icon_block, info_col, actions]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .on_press(Message::OpenFolder(f.id.clone()))
+    .padding(Padding { top: 9.0, bottom: 9.0, left: 10.0, right: 8.0 })
+    .style(|_t, status| {
+        let mut s = iced::widget::button::Style::default();
+        s.border.radius = theme::CARD_ROUNDING.into();
+        s.border.width = 1.0;
+        s.background = Some(Color::from(theme::card_bg()).into());
+        s.border.color = theme::card_stroke();
+        s.text_color = theme::text_strong();
+        if matches!(status, iced::widget::button::Status::Hovered) {
+            s.background = Some(Color::from(theme::card_hover_bg()).into());
+            s.border.color = theme::accent_dim();
+        }
+        s
+    })
+    .into()
 }
 
 /// 建模卡片 v2：图标块 + 名称时间 + 操作按钮，卡片式设计。
@@ -1924,9 +2140,13 @@ fn view_new_model_dialog(state: &UiState) -> Element<'_, Message> {
             s.border.radius = 12.0.into();
             s
         });
+    let new_model_hint = match state.dag_editor.current_folder.rsplit('/').next() {
+        Some(last) if !last.is_empty() => format!("将创建在目录「{}」中", last),
+        _ => "为新的建模起一个名字".to_string(),
+    };
     let title_col = column![
         text("新建建模").color(theme::text_strong()).size(15.0),
-        text("为新的建模起一个名字").color(theme::text_weak()).size(10.5),
+        text(new_model_hint).color(theme::text_weak()).size(10.5),
     ].spacing(2);
 
     let input = text_input("建模名称…", &state.dag_editor.new_model_name_input)
@@ -2072,6 +2292,191 @@ fn view_delete_confirm_dialog(state: &UiState) -> Element<'_, Message> {
     .width(Length::Fixed(380.0));
 
     dialog_overlay(card.into(), Message::DeleteModelCancel)
+}
+
+/// 对话框头部 44×44 圆角图标块（内嵌矢量图标）。
+fn dialog_icon_block(icon: Element<'static, Message>) -> Element<'static, Message> {
+    container(icon)
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 34.0 / 255.0, g: 211.0 / 255.0, b: 238.0 / 255.0, a: 15.0 / 255.0,
+            }.into());
+            s.border.radius = 12.0.into();
+            s
+        })
+        .into()
+}
+
+/// 新建目录对话框：在当前浏览目录下创建一个分类子目录。
+fn view_new_folder_dialog(state: &UiState) -> Element<'_, Message> {
+    let icon = dialog_icon_block(icons::view_icon(IconKind::Folder, theme::accent(), 22.0));
+    let hint = match state.dag_editor.current_folder.rsplit('/').next() {
+        Some(last) if !last.is_empty() => format!("在目录「{}」中创建子目录", last),
+        _ => "创建一个目录来分类管理建模".to_string(),
+    };
+    let title_col = column![
+        text("新建目录").color(theme::text_strong()).size(15.0),
+        text(hint).color(theme::text_weak()).size(10.5),
+    ]
+    .spacing(2);
+
+    let input = text_input(
+        "目录名称…",
+        &state.dag_editor.new_folder_name_input,
+    )
+    .on_input(Message::NewFolderNameInput)
+    .on_submit(Message::NewFolderConfirm)
+    .size(12.0)
+    .padding(Padding { top: 8.0, bottom: 8.0, left: 10.0, right: 10.0 });
+    let input_wrap = container(input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
+        });
+
+    let confirm_btn = dialog_button("确认创建", Message::NewFolderConfirm, true);
+    let cancel_btn = dialog_button("取消", Message::NewFolderCancel, false);
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        input_wrap,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(360.0));
+
+    dialog_overlay(card.into(), Message::NewFolderCancel)
+}
+
+/// 重命名目录对话框（只改目录末段名，不影响层级）。
+fn view_rename_folder_dialog(state: &UiState) -> Element<'_, Message> {
+    let icon = dialog_icon_block(icons::view_icon(IconKind::Pencil, theme::accent_teal(), 20.0));
+    let title_col = column![
+        text("重命名目录").color(theme::text_strong()).size(15.0),
+        text("输入新的目录名称").color(theme::text_weak()).size(10.5),
+    ]
+    .spacing(2);
+
+    let input = text_input("新名称…", &state.dag_editor.rename_folder_input)
+        .on_input(Message::RenameFolderInput)
+        .on_submit(Message::RenameFolderConfirm)
+        .size(12.0)
+        .padding(Padding { top: 8.0, bottom: 8.0, left: 10.0, right: 10.0 });
+    let input_wrap = container(input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
+        });
+
+    let confirm_btn = dialog_button("确认", Message::RenameFolderConfirm, true);
+    let cancel_btn = dialog_button("取消", Message::RenameFolderCancel, false);
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        input_wrap,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(360.0));
+
+    dialog_overlay(card.into(), Message::RenameFolderCancel)
+}
+
+/// 删除目录确认对话框：目录整体软删除（改名 `.deleted`），内含建模一并隐藏。
+fn view_delete_folder_confirm_dialog(state: &UiState) -> Element<'_, Message> {
+    let name = state
+        .dag_editor
+        .delete_folder_target_name
+        .clone()
+        .unwrap_or_default();
+    let target_id = state
+        .dag_editor
+        .delete_folder_target_id
+        .clone()
+        .unwrap_or_default();
+    let model_count = state
+        .dag_editor
+        .folders
+        .iter()
+        .find(|f| f.id == target_id)
+        .map(|f| f.model_count)
+        .unwrap_or(0);
+
+    let icon = container(text("!").color(theme::danger()).size(22.0))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 15.0 / 255.0,
+            }.into());
+            s.border.radius = 12.0.into();
+            s
+        });
+    let detail = if model_count == 0 {
+        format!("确定删除空目录「{}」吗？可手动恢复（.deleted）。", name)
+    } else {
+        format!(
+            "确定删除目录「{}」吗？其中 {} 个建模将一并从列表移除（软删除 .deleted，可手动恢复）。",
+            name, model_count
+        )
+    };
+    let title_col = column![
+        text("删除目录").color(theme::danger()).size(15.0),
+        text(detail).color(theme::text_hover()).size(10.5),
+    ]
+    .spacing(2);
+
+    let confirm_btn = dialog_button("确认删除", Message::DeleteFolderConfirm, true);
+    let cancel_btn = dialog_button("取消", Message::DeleteFolderCancel, false);
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let card = Card::new(
+        row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
+        text(""),
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
+    .padding_body(Padding { top: 8.0, bottom: 8.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .width(Length::Fixed(380.0));
+
+    dialog_overlay(card.into(), Message::DeleteFolderCancel)
 }
 
 /// 通用对话框遮罩层 v2：靛蓝黑 + 居中卡片

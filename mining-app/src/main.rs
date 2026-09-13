@@ -411,6 +411,88 @@ impl MyApp {
                 state.dag_editor.show_delete_model_dialog = false;
             }
 
+            // ===== 建模目录（分类文件夹） =====
+
+            Message::OpenFolder(id) => {
+                state.dag_editor.navigate_to_folder(&id);
+            }
+            Message::FolderNav(path) => {
+                state.dag_editor.navigate_to_folder(&path);
+            }
+            Message::NewFolderClick => {
+                state.dag_editor.show_new_folder_dialog = true;
+                state.dag_editor.new_folder_name_input.clear();
+            }
+            Message::NewFolderNameInput(s) => {
+                state.dag_editor.new_folder_name_input = s;
+            }
+            Message::NewFolderConfirm => {
+                let name = state.dag_editor.new_folder_name_input.trim().to_string();
+                if !name.is_empty() {
+                    if let Err(e) = state.dag_editor.create_folder(&name) {
+                        if let Some(tab) = state.dag_editor.active_tab_mut() {
+                            tab.add_action_log(e, LogLevel::Error);
+                        }
+                    }
+                }
+                state.dag_editor.show_new_folder_dialog = false;
+                state.dag_editor.new_folder_name_input.clear();
+            }
+            Message::NewFolderCancel => {
+                state.dag_editor.show_new_folder_dialog = false;
+                state.dag_editor.new_folder_name_input.clear();
+            }
+            Message::RenameFolderClick(id) => {
+                let cur_name = state
+                    .dag_editor
+                    .folders
+                    .iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default();
+                state.dag_editor.rename_folder_target_id = Some(id);
+                state.dag_editor.rename_folder_input = cur_name;
+            }
+            Message::RenameFolderInput(s) => {
+                state.dag_editor.rename_folder_input = s;
+            }
+            Message::RenameFolderConfirm => {
+                if let Some(id) = state.dag_editor.rename_folder_target_id.take() {
+                    let new_name = state.dag_editor.rename_folder_input.trim().to_string();
+                    if !new_name.is_empty() {
+                        if let Err(e) = state.dag_editor.rename_folder(&id, &new_name) {
+                            if let Some(tab) = state.dag_editor.active_tab_mut() {
+                                tab.add_action_log(e, LogLevel::Error);
+                            }
+                        }
+                    }
+                }
+                state.dag_editor.rename_folder_input.clear();
+            }
+            Message::RenameFolderCancel => {
+                state.dag_editor.rename_folder_target_id = None;
+                state.dag_editor.rename_folder_input.clear();
+            }
+            Message::DeleteFolderClick(id, name) => {
+                state.dag_editor.request_delete_folder(&id, &name);
+            }
+            Message::DeleteFolderConfirm => {
+                if let Some(id) = state.dag_editor.delete_folder_target_id.take() {
+                    if let Err(e) = state.dag_editor.delete_folder(&id) {
+                        if let Some(tab) = state.dag_editor.active_tab_mut() {
+                            tab.add_action_log(e, LogLevel::Error);
+                        }
+                    }
+                }
+                state.dag_editor.delete_folder_target_name = None;
+                state.dag_editor.show_delete_folder_dialog = false;
+            }
+            Message::DeleteFolderCancel => {
+                state.dag_editor.delete_folder_target_id = None;
+                state.dag_editor.delete_folder_target_name = None;
+                state.dag_editor.show_delete_folder_dialog = false;
+            }
+
             // ===== Tab 栏 =====
 
             Message::SwitchTab(i) => {
