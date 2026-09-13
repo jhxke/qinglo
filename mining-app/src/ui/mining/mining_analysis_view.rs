@@ -2193,6 +2193,20 @@ pub fn try_spawn_pending_dag_exec(editor_state: &mut DagEditorState) {
             DagExecKind::RunAll
         };
 
+        // 重新执行前清除上一轮的成功/失败标识，让画布状态回到"未执行"，
+        // 否则上一轮的绿色对勾会让人误以为本轮也已成功。
+        match &kind {
+            DagExecKind::RunAll => {
+                tab.io_registry.reset_all();
+            }
+            DagExecKind::RunUpTo { target_node_id: tid } => {
+                // 与服务端实际执行的子图范围保持一致（目标节点 + 全部上游）
+                if let Ok(ids) = tab.graph.get_ancestors(tid) {
+                    tab.io_registry.reset_nodes(ids.iter().map(String::as_str));
+                }
+            }
+        }
+
         // Debug 模式：生成会话 ID 下发到服务端，保留各节点完整输出供分页查询
         let debug_session_id = if tab.debug_mode {
             Some(uuid::Uuid::new_v4().to_string())

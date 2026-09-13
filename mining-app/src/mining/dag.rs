@@ -1402,6 +1402,23 @@ impl NodeIORegistry {
         self.dirty_nodes.remove(node_id);
     }
 
+    /// 重新执行前清除指定节点的上一次执行记录。
+    ///
+    /// 被清除的节点状态回到 `NotExecuted`（画布上的成功对勾/失败红框消失），
+    /// 便于观察新一轮执行的实时结果；执行范围之外的节点记录保持不变。
+    pub fn reset_nodes<'a>(&mut self, node_ids: impl IntoIterator<Item = &'a str>) {
+        for id in node_ids {
+            self.results.remove(id);
+            self.dirty_nodes.remove(id);
+        }
+    }
+
+    /// 清除所有节点的执行记录（整图重新执行前调用）。
+    pub fn reset_all(&mut self) {
+        self.results.clear();
+        self.dirty_nodes.clear();
+    }
+
     /// 检查节点是否需要重新执行
     pub fn is_dirty(&self, node_id: &str) -> bool {
         self.dirty_nodes.contains(node_id)
