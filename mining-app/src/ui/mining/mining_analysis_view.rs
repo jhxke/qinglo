@@ -1479,11 +1479,11 @@ fn view_new_model_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         input_wrap,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(360.0));
 
     dialog_overlay(card.into(), Message::NewModelCancel)
@@ -1536,11 +1536,11 @@ fn view_rename_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         input_wrap,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(360.0));
 
     dialog_overlay(card.into(), Message::RenameCancel)
@@ -1585,11 +1585,11 @@ fn view_delete_confirm_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         text(""),
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 8.0, bottom: 8.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(380.0));
 
     dialog_overlay(card.into(), Message::DeleteModelCancel)
@@ -1656,11 +1656,11 @@ fn view_new_folder_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         input_wrap,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(360.0));
 
     dialog_overlay(card.into(), Message::NewFolderCancel)
@@ -1702,11 +1702,11 @@ fn view_rename_folder_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         input_wrap,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 16.0, bottom: 16.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(360.0));
 
     dialog_overlay(card.into(), Message::RenameFolderCancel)
@@ -1770,11 +1770,11 @@ fn view_delete_folder_confirm_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         text(""),
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 8.0, bottom: 8.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(380.0));
 
     dialog_overlay(card.into(), Message::DeleteFolderCancel)
@@ -1841,11 +1841,11 @@ fn view_move_model_dialog(state: &UiState) -> Element<'_, Message> {
         row![icon, title_col].spacing(12).align_y(Alignment::Center).width(Length::Fill),
         list_scroll,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding { top: 20.0, bottom: 0.0, left: 20.0, right: 20.0 })
     .padding_body(Padding { top: 16.0, bottom: 12.0, left: 20.0, right: 20.0 })
-    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 20.0, right: 20.0 })
+    .padding_foot(Padding { top: 0.0, bottom: 18.0, left: 0.0, right: 0.0 })
     .width(Length::Fixed(380.0));
 
     dialog_overlay(card.into(), Message::MoveModelCancel)
@@ -1963,7 +1963,7 @@ fn view_publish_dialog(state: &UiState) -> Element<'_, Message> {
             .width(Length::Fill),
         body_col,
     )
-    .foot(btns)
+    .foot(dialog_foot(btns))
     .style(theme::float_card_style())
     .padding_head(Padding {
         top: 20.0,
@@ -1980,8 +1980,8 @@ fn view_publish_dialog(state: &UiState) -> Element<'_, Message> {
     .padding_foot(Padding {
         top: 0.0,
         bottom: 18.0,
-        left: 20.0,
-        right: 20.0,
+        left: 0.0,
+        right: 0.0,
     })
     .width(Length::Fixed(400.0));
 
@@ -2003,6 +2003,25 @@ fn dialog_overlay(card: Element<'_, Message>, cancel: Message) -> Element<'_, Me
             s
         });
     mouse_area(centered).on_press(cancel).into()
+}
+
+/// 对话框底部按钮栏包装：只承担左右 20px 水平留白。
+///
+/// 规避 iced_aw 0.14.1 `Card` 的布局 bug：其 `foot_node` 把 foot 内容的
+/// Y 偏移误写成 `padding.right`（应为 `padding.top`），非零 right 会把按钮
+/// 整体顶出卡片底边。因此各对话框 `padding_foot` 的 left/right 必须传 0
+/// （Y 偏移即为 0），水平留白改由本容器承担；底部 18px 呼吸仍由
+/// `padding_foot.bottom` 提供。
+fn dialog_foot<'a>(btns: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(btns.into())
+        .width(Length::Fill)
+        .padding(Padding {
+            top: 0.0,
+            bottom: 0.0,
+            left: 20.0,
+            right: 20.0,
+        })
+        .into()
 }
 
 /// 对话框按钮 v2：主按钮靛蓝渐变，次按钮灰边胶囊
