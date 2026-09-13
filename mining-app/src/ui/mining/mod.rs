@@ -23,6 +23,8 @@ pub mod line_chart_view;
 pub mod log_panel;
 pub mod markdown_view;
 pub mod mining_analysis_view;
+pub mod models_panel;
+pub mod operator_panel;
 pub mod operator_params_editor;
 
 // 把 ui 顶层的 state / icons / theme / placeholder_view 引入本模块命名空间，
