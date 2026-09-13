@@ -537,6 +537,34 @@ pub fn format_timestamp(millis: u64) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss)
 }
 
+/// 仅格式化时分（HH:MM），用于紧凑列表项的副标题。
+pub fn format_time_hhmm(millis: u64) -> String {
+    let total = (millis / 1000) as i64 + 8 * 3600;
+    let secs_of_day = total.rem_euclid(86400);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day / 60) % 60;
+    format!("{:02}:{:02}", hh, mm)
+}
+
+/// 格式化日期（YYYY-MM-DD），用于列表卡片第二行时间。
+pub fn format_date_ymd(millis: u64) -> String {
+    let total = (millis / 1000) as i64 + 8 * 3600;
+    let days = total.div_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// 格式化日期 + 时分（YYYY-MM-DD HH:MM），用于列表卡片第二行时间。
+pub fn format_date_hhmm(millis: u64) -> String {
+    let total = (millis / 1000) as i64 + 8 * 3600;
+    let days = total.div_euclid(86400);
+    let secs_of_day = total.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day / 60) % 60;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hh, mm)
+}
+
 /// epoch 起算的第 `z` 天 → 公历 (年, 月, 日)。Howard Hinnant civil_from_days 算法。
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
