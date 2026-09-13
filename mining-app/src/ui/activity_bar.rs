@@ -17,21 +17,33 @@ const BAR_WIDTH: f32 = 62.0;
 const BUTTON_SIZE: f32 = 58.0;
 
 pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
-    let webview_btn = view_activity_button(IconKind::Sparkle, "网页", ViewType::WebViewMenu, state.current_view);
-    let settings_btn = view_activity_button(IconKind::Settings, "设置", ViewType::Settings, state.current_view);
+    let current = state.current_view.clone();
+    let settings_btn = view_activity_button(IconKind::Settings, "设置".to_string(), ViewType::Settings, &current);
 
     let spacer_top = container(text("").size(1.0))
         .width(Length::Fill)
         .height(Length::Fixed(14.0));
 
     // 按钮自上而下排列；当 `settings.hide_mining` 为 true 时，「挖掘」按钮不渲染，
-    // 让活动栏自动收起该入口。隐藏后仍保留网页与设置两个视图入口。
+    // 让活动栏自动收起该入口。隐藏后仍保留各插件与设置两个视图入口。
     let mut col = column![spacer_top];
     if !state.settings.hide_mining {
-        let mining_btn = view_activity_button(IconKind::Mining, "挖掘", ViewType::MiningAnalysis, state.current_view);
+        let mining_btn = view_activity_button(IconKind::Mining, "挖掘".to_string(), ViewType::MiningAnalysis, &current);
         col = col.push(mining_btn);
     }
-    col = col.push(webview_btn).push(settings_btn)
+
+    // 每个插件 = 一个独立菜单项（活动栏按钮）。点击后进入该插件的 WebView 视图，
+    // 内容仅为该插件自身的完整功能模块，不再与其他插件挤在同一页面。
+    #[cfg(windows)]
+    {
+        for meta in state.webview_menu.plugin_list() {
+            let vt = ViewType::Plugin(meta.id.clone());
+            let btn = view_activity_button(IconKind::Sparkle, meta.title.clone(), vt, &current);
+            col = col.push(btn);
+        }
+    }
+
+    col = col.push(settings_btn)
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(3);
@@ -49,11 +61,11 @@ pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
 
 fn view_activity_button(
     icon: IconKind,
-    label: &'static str,
+    label: String,
     vt: ViewType,
-    current: ViewType,
+    current: &ViewType,
 ) -> Element<'static, Message> {
-    let is_active = current == vt;
+    let is_active = current == &vt;
 
     // v3：激活态图标用双色渐变首末颜色之间的"中间色"模拟发光；
     // 非激活态：弱化 text_weak()

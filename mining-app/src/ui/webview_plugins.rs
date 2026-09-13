@@ -42,6 +42,16 @@ use super::webview_menu::diag;
 
 // ===== 插件元数据类型 =====
 
+/// 活动栏渲染菜单项所需的插件元数据（轻量快照，不含 body/script）。
+#[derive(Debug, Clone)]
+pub struct PluginMeta {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub section: MenuSection,
+    pub order: i32,
+}
+
 /// 插件挂载位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginSlot {
@@ -65,13 +75,6 @@ impl MenuSection {
         match self {
             MenuSection::System => "系统",
             MenuSection::Tool => "工具",
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            MenuSection::System => "system",
-            MenuSection::Tool => "tool",
         }
     }
 
@@ -192,7 +195,6 @@ impl PluginRegistry {
         registry.register(Box::new(EnvPlugin));
         registry.register(Box::new(SumPlugin));
         registry.register(Box::new(EchoPlugin));
-        registry.register(Box::new(LogPlugin));
         registry.scan_external();
         registry
     }
@@ -278,11 +280,37 @@ impl PluginRegistry {
         }
     }
 
-    /// 按当前注册表动态拼装完整菜单页 HTML。
-    ///
-    /// `brand` 用于替换模板中的 `{{APP_NAME}}` / `{{LOGO_INITIAL}}` 占位符，
-    /// 让设置页改名后下次进入 WebView 视图即生效（每次 build 都重新 render）。
-    pub fn render_page(&self, brand: &crate::config::BrandConfig) -> String {
+    /// 列出所有卡片插件的元数据（按 section → order → id 排序），
+    /// 供活动栏把每个插件渲染为一个独立菜单项。
+    pub fn card_plugin_list(&self) -> Vec<PluginMeta> {
+        let mut cards: Vec<&Box<dyn MenuPlugin>> = self
+            .plugins
+            .iter()
+            .filter(|p| p.slot() == PluginSlot::Card)
+            .collect();
+        cards.sort_by_key(|p| (section_rank(p.section()), p.order(), p.id().to_string()));
+        cards
+            .into_iter()
+            .map(|p| PluginMeta {
+                id: p.id().to_string(),
+                title: p.title().to_string(),
+                description: p.description().to_string(),
+                section: p.section(),
+                order: p.order(),
+            })
+            .collect()
+    }
+
+    /// 取指定插件的 body_html 与 script（供单插件页动态注入）。
+    pub fn plugin_content(&self, id: &str) -> Option<(String, Option<String>)> {
+        let p = self.plugins.iter().find(|p| p.id() == id)?;
+        Some((p.body_html(), p.script()))
+    }
+
+    /// 渲染单插件页外壳：顶栏（Logo + 返回主界面）+ 内容容器 + 公共运行时。
+    /// 具体插件内容由 `WebViewMenu::load_plugin` 通过 `window.loadPlugin` 注入，
+    /// 避免每次切换插件都重建 WebView2（运行时冷启动代价高）。
+    pub fn render_shell(&self, brand: &crate::config::BrandConfig) -> String {
         let header_html: String = self
             .plugins
             .iter()
@@ -290,80 +318,19 @@ impl PluginRegistry {
             .map(|p| p.body_html())
             .collect();
 
-        let sections = [MenuSection::System, MenuSection::Tool];
-        let mut cards_html = String::new();
-        for section in sections {
-            let mut cards: Vec<&Box<dyn MenuPlugin>> = self
-                .plugins
-                .iter()
-                .filter(|p| p.slot() == PluginSlot::Card && p.section() == section)
-                .collect();
-            if cards.is_empty() {
-                continue;
-            }
-            cards.sort_by_key(|p| (p.order(), p.id().to_string()));
-            cards_html.push_str(&format!(
-                r#"<div class="section-title" data-section="{}">{}插件</div>"#,
-                section.key(),
-                section.label(),
-            ));
-            for p in cards {
-                cards_html.push_str(&render_card(p.as_ref()));
-            }
-        }
-
-        // 插件脚本在外壳脚本之后注入，确保 window.qinglo 已就绪。
-        let scripts_html: String = self
-            .plugins
-            .iter()
-            .filter_map(|p| {
-                p.script().map(|s| {
-                    format!(
-                        "<script>\ntry {{\n{}\n}} catch (e) {{\n  console.error('插件 {} 脚本异常：', e);\n}}\n</script>\n",
-                        sanitize_script(&s),
-                        escape_js(p.id())
-                    )
-                })
-            })
-            .collect();
-
-        PAGE_TEMPLATE
+        SHELL_TEMPLATE
             .replace("__HEADER_SLOT__", &header_html)
-            .replace("__CARDS__", &cards_html)
-            .replace("__PLUGIN_SCRIPTS__", &scripts_html)
-            // 品牌占位符替换：app_name 空值回退 "青萝"；logo_initial 取首字符
             .replace("{{APP_NAME}}", brand.effective_app_name())
             .replace("{{LOGO_INITIAL}}", &brand.logo_initial_char().to_string())
     }
 }
 
-/// 渲染一张可折叠卡片。
-fn render_card(p: &dyn MenuPlugin) -> String {
-    let desc_html = if p.description().is_empty() {
-        String::new()
-    } else {
-        format!(
-            r#"<span class="card-desc">{}</span>"#,
-            escape_html(p.description())
-        )
-    };
-    let full = if p.full_width() { " full" } else { "" };
-    format!(
-        r#"<section class="card{full}" id="card-{id}">
-  <header class="card-head" onclick="window.qinglo.toggle('{id}')">
-    <div class="card-title"><h2>{title}</h2>{desc}</div>
-    <span class="chev" aria-hidden="true"></span>
-  </header>
-  <div class="card-body">
-{body}
-  </div>
-</section>"#,
-        full = full,
-        id = escape_attr(p.id()),
-        title = escape_html(p.title()),
-        desc = desc_html,
-        body = p.body_html(),
-    )
+/// section 排序权重（System 在 Tool 之前）。
+fn section_rank(s: MenuSection) -> u8 {
+    match s {
+        MenuSection::System => 0,
+        MenuSection::Tool => 1,
+    }
 }
 
 // ===== 外部插件 =====
@@ -678,32 +645,8 @@ window.qinglo.send('echo', 'say', '自动双向 IPC 自测');"#
     }
 }
 
-/// 双向通信日志卡片（整行展示，所有插件的收发消息统一落这里）。
-struct LogPlugin;
-
-impl MenuPlugin for LogPlugin {
-    fn id(&self) -> &str {
-        "log"
-    }
-    fn title(&self) -> &str {
-        "双向通信日志"
-    }
-    fn description(&self) -> &str {
-        "全部插件的 IPC 收发记录"
-    }
-    fn section(&self) -> MenuSection {
-        MenuSection::System
-    }
-    fn order(&self) -> i32 {
-        100
-    }
-    fn full_width(&self) -> bool {
-        true
-    }
-    fn body_html(&self) -> String {
-        r#"<div id="p-log-box" class="logbox"></div>"#.to_string()
-    }
-}
+/// 双向通信日志：外壳页（`SHELL_TEMPLATE`）底部的 `#p-log-box` 统一展示所有
+/// 插件的 IPC 收发记录，不再单独作为一个卡片插件，避免与外壳日志重复。
 
 // ===== 消息解析 =====
 
@@ -738,41 +681,18 @@ pub fn parse_message(body: &str) -> Option<IncomingMessage> {
     ))
 }
 
-// ===== HTML / JS 转义与脚本净化 =====
-
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn escape_attr(s: &str) -> String {
-    escape_html(s).replace('\'', "&#39;")
-}
-
-fn escape_js(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
-/// 防止外部脚本提前闭合内联 `<script>` 标签。
-fn sanitize_script(s: &str) -> String {
-    s.replace("</script", "<\\/script").replace("</SCRIPT", "<\\/SCRIPT")
-}
-
 // ===== 页面模板 =====
 
-/// 菜单外壳模板：CSS + 顶栏插槽 + 卡片容器 + 公共运行时（window.qinglo）。
-/// 占位符：
-/// - `__HEADER_SLOT__` / `__CARDS__` / `__PLUGIN_SCRIPTS__`：插件内容插槽；
-/// - `{{APP_NAME}}` / `{{LOGO_INITIAL}}`：品牌占位符，由 `render_page` 按当前
-///   `BrandConfig` 替换，让用户在设置页改名后下次进入 WebView 视图即生效。
-const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
+/// 单插件页外壳模板：顶栏 + 内容容器 + 公共运行时。
+/// 插件内容通过 `window.loadPlugin(bodyHtml, scriptText)` 动态注入，
+/// 切换插件无需重建 WebView2。占位符：`__HEADER_SLOT__`（顶栏返回按钮）、
+/// `{{APP_NAME}}` / `{{LOGO_INITIAL}}`（品牌）。
+const SHELL_TEMPLATE: &str = r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{APP_NAME}} · WebView 菜单</title>
+<title>{{APP_NAME}} · 插件</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -788,6 +708,7 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
     padding: 0 18px; height: 52px;
     background: linear-gradient(90deg, rgba(8,145,178,.22), rgba(34,211,238,.10));
     border-bottom: 1px solid rgba(148,163,184,.18);
+    flex: none;
   }
   .logo {
     width: 26px; height: 26px; border-radius: 8px;
@@ -804,38 +725,11 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   }
   .btn:hover { background: rgba(55,60,70,.9); border-color: rgba(148,163,184,.6); }
   .btn.primary { border-color: rgba(34,211,238,.55); color: #a5f3fc; }
-  main {
-    flex: 1; overflow: auto; padding: 18px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-    align-content: start;
+  /* 插件内容区：占满剩余空间，由插件自行决定内部滚动 */
+  #plugin-content {
+    flex: 1; min-height: 0; overflow: auto; padding: 18px;
   }
-  .section-title {
-    grid-column: 1 / -1;
-    font-size: 11px; letter-spacing: 2px; color: #64748b;
-    margin: 4px 2px -4px;
-  }
-  .card {
-    background: rgba(27,29,34,.7);
-    border: 1px solid rgba(148,163,184,.16);
-    border-radius: 12px; overflow: hidden;
-  }
-  .card.full { grid-column: 1 / -1; }
-  .card-head {
-    display: flex; align-items: center; gap: 8px;
-    padding: 12px 16px; cursor: pointer; user-select: none;
-    border-bottom: 1px solid rgba(148,163,184,.12);
-  }
-  .card-head:hover { background: rgba(148,163,184,.06); }
-  .card-title { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
-  .card-title h2 { font-size: 13px; color: #a5f3fc; font-weight: 600; }
-  .card-desc { font-size: 11px; color: #64748b; }
-  .chev { width: 8px; height: 8px; flex: none;
-    border-right: 1.6px solid #7dd3fc; border-bottom: 1.6px solid #7dd3fc;
-    transform: rotate(45deg) translate(-1px, -1px); transition: transform .18s; }
-  .card.collapsed .card-head { border-bottom-color: transparent; }
-  .card.collapsed .chev { transform: rotate(-135deg) translate(-1px, -1px); }
-  .card.collapsed .card-body { display: none; }
-  .card-body { padding: 16px; }
+  /* 插件内通用样式（与卡片页保持一致，便于插件复用） */
   .kv { font-size: 12px; color: #cbd5e1; line-height: 1.9; word-break: break-all; }
   .kv b { color: #94a3b8; font-weight: 400; margin-right: 6px; }
   .row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
@@ -854,14 +748,6 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
     padding: 8px 16px; font-size: 12px; cursor: pointer;
   }
   button.action:active { transform: translateY(1px); }
-  .logbox {
-    height: 150px; overflow: auto;
-    background: #0a0b0e; border: 1px solid rgba(148,163,184,.14);
-    border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.8;
-    font-family: Consolas, monospace;
-  }
-  .log-rust { color: #6ee7b7; }
-  .log-js { color: #7dd3fc; }
   .bar {
     height: 4px; border-radius: 2px; margin-top: 14px;
     background: linear-gradient(90deg, #0891b2, #22d3ee, #0891b2);
@@ -871,6 +757,15 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   @keyframes flow { from { background-position: 0 0; } to { background-position: -200% 0; } }
   .tag { display:inline-block; font-size:10px; padding:2px 8px; border-radius:99px;
          background:rgba(34,211,238,.15); color:#67e8f9; margin-left:8px; }
+  /* 底部 IPC 日志（调试用，所有插件共用） */
+  #p-log-box {
+    height: 90px; overflow: auto; flex: none;
+    background: #0a0b0e; border-top: 1px solid rgba(148,163,184,.14);
+    padding: 8px 14px; font-size: 11px; line-height: 1.7;
+    font-family: Consolas, monospace;
+  }
+  .log-rust { color: #6ee7b7; }
+  .log-js { color: #7dd3fc; }
 </style>
 </head>
 <body>
@@ -878,20 +773,19 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   <header class="topbar">
     <div class="logo">{{LOGO_INITIAL}}</div>
     <div>
-      <h1>{{APP_NAME}} · WebView 菜单 <span class="tag">插件化</span></h1>
-      <div class="sub">菜单项即插件 — 可组合 · 可收缩 · 可动态扩展</div>
+      <h1>{{APP_NAME}} · 插件 <span class="tag">插件即菜单项</span></h1>
+      <div class="sub">每个插件是一个独立的完整功能模块</div>
     </div>
     <div class="spacer"></div>
     __HEADER_SLOT__
   </header>
 
-  <main>
-__CARDS__
-  </main>
+  <div id="plugin-content"></div>
+  <div id="p-log-box" class="logbox"></div>
 </div>
 
 <script>
-// ===== 菜单插件公共运行时（所有插件脚本注入前就绪）=====
+// ===== 单插件页公共运行时 =====
 (function () {
   var replies = {};
 
@@ -906,43 +800,34 @@ __CARDS__
   }
 
   window.qinglo = {
-    // JS → Rust：cmd|<plugin>|<action>|<payload>
     send: function (plugin, action, payload) {
       payload = payload === undefined || payload === null ? '' : String(payload);
       log('log-js', 'JS → Rust', plugin + '/' + action + (payload ? '：' + payload : ''));
       window.ipc.postMessage('cmd|' + plugin + '|' + action + '|' + payload);
     },
-    // 插件订阅本插件的 Rust 回填
-    onReply: function (plugin, cb) { replies[plugin] = cb; },
-    // 卡片折叠 / 展开，状态持久化到 localStorage
-    toggle: function (id) {
-      var card = document.getElementById('card-' + id);
-      if (!card) return;
-      var collapsed = card.classList.toggle('collapsed');
-      try { localStorage.setItem('qinglo:collapse:' + id, collapsed ? '1' : '0'); } catch (e) {}
-    }
+    onReply: function (plugin, cb) { replies[plugin] = cb; }
   };
 
-  // Rust → JS 统一入口：先写全局日志，再分发给对应插件回调
   window.rustReply = function (plugin, kind, text) {
     log('log-rust', 'Rust → JS', plugin + '：' + kind + '：' + text);
     var cb = replies[plugin];
     if (cb) { try { cb(kind, text); } catch (e) { console.error(e); } }
   };
 
-  // 恢复折叠状态
-  document.querySelectorAll('.card').forEach(function (card) {
-    var id = card.id.replace(/^card-/, '');
-    try {
-      if (localStorage.getItem('qinglo:collapse:' + id) === '1') {
-        card.classList.add('collapsed');
-      }
-    } catch (e) {}
-  });
+  // 动态注入插件内容：先清掉旧回复回调，再替换 body 并执行脚本。
+  // 用间接 eval（(0,eval)）让脚本在全局作用域执行，IIFE 插件不受影响。
+  window.loadPlugin = function (bodyHtml, scriptText) {
+    var container = document.getElementById('plugin-content');
+    if (container) container.innerHTML = bodyHtml || '';
+    if (scriptText) {
+      try { (0, eval)(scriptText); }
+      catch (e) { console.error('插件脚本异常：', e); }
+    }
+  };
 
-  log('log-js', 'JS', '页面加载完成，window.ipc 可用：' + (!!window.ipc));
+  log('log-js', 'JS', '页面外壳加载完成，window.ipc 可用：' + (!!window.ipc));
 
-  // 诊断心跳：每秒上报可见性 / 焦点 / rAF 帧数 / 视口。
+  // 诊断心跳
   var rafCount = 0;
   function rafLoop() { rafCount++; requestAnimationFrame(rafLoop); }
   rafLoop();
@@ -953,7 +838,6 @@ __CARDS__
   }, 1000);
 })();
 </script>
-__PLUGIN_SCRIPTS__
 </body>
 </html>
 "##;

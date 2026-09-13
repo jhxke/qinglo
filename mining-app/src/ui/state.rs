@@ -123,12 +123,28 @@ pub struct JsonLogEntry {
     pub payload: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewType {
     MiningAnalysis,
     Settings,
-    /// wry WebView2 菜单测试页（整个视图由浏览器子窗口渲染）。
-    WebViewMenu,
+    /// 网页插件视图：每个插件独占一个菜单项，String 为插件 id。
+    /// 整个视图由 WebView2 子窗口渲染，内容为对应插件的完整功能模块。
+    Plugin(String),
+}
+
+impl ViewType {
+    /// 是否为 WebView 插件视图（任一插件）。
+    pub fn is_webview_plugin(&self) -> bool {
+        matches!(self, ViewType::Plugin(_))
+    }
+
+    /// 插件视图对应的插件 id。
+    pub fn plugin_id(&self) -> Option<&str> {
+        match self {
+            ViewType::Plugin(id) => Some(id),
+            _ => None,
+        }
+    }
 }
 
 /// Iced Elm 架构的全局消息。

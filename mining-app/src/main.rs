@@ -137,18 +137,17 @@ impl MyApp {
                         &mut state.dag_editor,
                     );
                 }
-                // 离开网页菜单视图时隐藏 WebView2 子窗口（airspace 遮挡）
+                // 离开插件视图时隐藏 WebView2 子窗口（airspace 遮挡）；
+                // 插件之间切换不隐藏，仅注入新插件内容。
                 #[cfg(windows)]
-                if state.current_view == ViewType::WebViewMenu
-                    && vt != ViewType::WebViewMenu
-                {
+                if state.current_view.is_webview_plugin() && !vt.is_webview_plugin() {
                     state.webview_menu.hide();
                 }
-                state.current_view = vt;
-                // 进入网页菜单视图：懒创建 / 显示 WebView2 子窗口
+                state.current_view = vt.clone();
+                // 进入插件视图：懒创建 / 显示 WebView2，并注入对应插件内容
                 #[cfg(windows)]
-                if vt == ViewType::WebViewMenu {
-                    return enter_webview_menu(state);
+                if vt.is_webview_plugin() {
+                    return enter_webview_plugin(state, vt.plugin_id().unwrap_or(""));
                 }
             }
             Message::Tick => {
@@ -177,7 +176,7 @@ impl MyApp {
                         .map_or(false, |tab| tab.io_registry.has_executing());
                     if !busy {
                         state.webview_menu.prewarm_on_tick(
-                            state.current_view == ViewType::WebViewMenu,
+                            state.current_view.is_webview_plugin(),
                             &state.brand_snapshot,
                         );
                     }
@@ -233,22 +232,28 @@ impl MyApp {
             Message::WebViewWindowSize(size) => {
                 #[cfg(windows)]
                 {
-                    let inside = state.current_view == ViewType::WebViewMenu;
+                    let inside = state.current_view.is_webview_plugin();
                     if state.webview_menu.is_ready() {
-                        // 已创建：校准矩形；仅在用户正查看网页视图时显示
+                        // 已创建：校准矩形；仅在用户正查看插件视图时显示并注入内容
                         state.webview_menu.set_size(size);
                         if inside {
                             state.webview_menu.show();
                             state.webview_error = None;
+                            if let Some(id) = state.current_view.plugin_id() {
+                                state.webview_menu.load_plugin(id);
+                            }
                         }
                     } else if inside {
-                        // 用户已进入视图：立即创建并显示
+                        // 用户已进入视图：立即创建并显示，再注入当前插件内容
                         if let Err(e) = state.webview_menu.build(size, &state.brand_snapshot) {
                             state.webview_error = Some(e);
                         } else {
                             state.webview_error = None;
                             // popup 创建时无 WS_VISIBLE，build 成功后立即显示
                             state.webview_menu.show();
+                            if let Some(id) = state.current_view.plugin_id() {
+                                state.webview_menu.load_plugin(id);
+                            }
                         }
                     } else {
                         // 启动预热链路：只缓存尺寸，静默创建交给 Tick 倒计时
@@ -259,9 +264,9 @@ impl MyApp {
                 let _ = size;
             }
             Message::WindowResized(size) => {
-                // 仅网页菜单可见时需要跟随（其他视图 wgpu 自行处理）
+                // 仅插件视图可见时需要跟随（其他视图 wgpu 自行处理）
                 #[cfg(windows)]
-                if state.current_view == ViewType::WebViewMenu {
+                if state.current_view.is_webview_plugin() {
                     state.webview_menu.set_size(size);
                 }
                 #[cfg(not(windows))]
@@ -270,7 +275,7 @@ impl MyApp {
             Message::WindowMoved(_point) => {
                 // 主窗口移动后 popup 重新定位（relocate 内部自行取屏幕坐标）
                 #[cfg(windows)]
-                if state.current_view == ViewType::WebViewMenu {
+                if state.current_view.is_webview_plugin() {
                     state.webview_menu.relocate();
                 }
                 #[cfg(not(windows))]
@@ -716,13 +721,13 @@ impl MyApp {
         let title_bar = view_title_bar(state);
 
         let activity_bar = view_activity_bar(state);
-        let main_content = match state.current_view {
+        let main_content = match &state.current_view {
             ViewType::MiningAnalysis => view_mining_analysis(state),
             ViewType::Settings => view_settings(state),
             // 实际界面由 WebView2 子窗口覆盖渲染；这里只作为加载前/失败时的底层占位
-            ViewType::WebViewMenu => match &state.webview_error {
+            ViewType::Plugin(_) => match &state.webview_error {
                 Some(e) => mining_app::ui::placeholder_view(
-                    "WebView 菜单加载失败",
+                    "插件加载失败",
                     e,
                 ),
                 // WebView2 透明控制器首帧到达前会透出这层加载视图
@@ -800,7 +805,7 @@ impl MyApp {
         // 网页层冷加载中也订阅高频 Tick，驱动加载页 spinner 旋转
         // （WebView2 就绪后即停止，避免常驻开销）。
         #[cfg(windows)]
-        let webview_loading = state.current_view == ViewType::WebViewMenu
+        let webview_loading = state.current_view.is_webview_plugin()
             && state.webview_error.is_none()
             && !state.webview_menu.is_ready();
         #[cfg(not(windows))]
@@ -813,8 +818,8 @@ impl MyApp {
                 iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick),
             );
         }
-        // 网页菜单可见时追加 120ms IPC 轮询 Tick，其余时间不发出以节省开销
-        if state.current_view == ViewType::WebViewMenu {
+        // 插件视图可见时追加 120ms IPC 轮询 Tick，其余时间不发出以节省开销
+        if state.current_view.is_webview_plugin() {
             subs.push(
                 iced::time::every(Duration::from_millis(120)).map(|_| Message::WebViewTick),
             );
@@ -868,17 +873,18 @@ fn open_logo_file_dialog() -> Task<Message> {
     )
 }
 
-/// 进入网页菜单视图：已创建则显示，否则启动「取 HWND → 取尺寸 → 创建」链路。
+/// 进入插件视图：已创建则显示并注入插件内容，否则启动「取 HWND → 取尺寸 → 创建」链路。
 ///
 /// 启动预热通常已把 HWND / 尺寸 / WebView2 全部备好，这里按就绪程度走
-/// 最快路径：ready → 只 show；HWND+尺寸就绪 → 同步 build+show（零 Task
-/// 往返）；只有 HWND → 补查尺寸；都没有 → 从头取句柄。
+/// 最快路径：ready → show + load_plugin；HWND+尺寸就绪 → 同步 build+show+load_plugin
+/// （零 Task 往返）；只有 HWND → 补查尺寸；都没有 → 从头取句柄。
 #[cfg(windows)]
-fn enter_webview_menu(state: &mut UiState) -> Task<Message> {
+fn enter_webview_plugin(state: &mut UiState, plugin_id: &str) -> Task<Message> {
     use mining_app::ui::webview_menu::WebViewMenu;
 
     if state.webview_menu.is_ready() {
         state.webview_menu.show();
+        state.webview_menu.load_plugin(plugin_id);
         return match state.main_window_id {
             Some(id) => iced::window::size(id).map(Message::WebViewWindowSize),
             None => Task::none(),
@@ -892,13 +898,14 @@ fn enter_webview_menu(state: &mut UiState) -> Task<Message> {
                 Ok(()) => {
                     state.webview_error = None;
                     state.webview_menu.show();
+                    state.webview_menu.load_plugin(plugin_id);
                 }
                 Err(e) => state.webview_error = Some(e),
             }
             return Task::none();
         }
         // HWND 已取到、尺寸查询还在途：补一次尺寸查询，回填消息会
-        // 识别到用户已在视图内并立即 build + show。
+        // 识别到用户已在视图内并立即 build + show + load_plugin。
         if let Some(id) = state.main_window_id {
             return iced::window::size(id).map(Message::WebViewWindowSize);
         }

@@ -49,7 +49,7 @@ use wry::raw_window_handle::{
 use wry::{Rect, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 use super::webview_plugins::{
-    IncomingMessage, PluginOutcome, PluginRegistry, parse_message,
+    IncomingMessage, PluginMeta, PluginOutcome, PluginRegistry, parse_message,
 };
 
 // ===== 内容区边距（相对 iced 主窗口客户区，逻辑像素）=====
@@ -247,9 +247,9 @@ impl WebViewMenu {
             WindowHandle::borrow_raw(RawWindowHandle::Win32(win32))
         };
 
-        // 页面 HTML 由插件注册表动态拼装（内置插件 + 外部插件）。
+        // 页面 HTML 由插件注册表动态拼装（外壳 + 运行时，插件内容由 load_plugin 注入）。
         // brand 注入模板占位符 {{APP_NAME}} / {{LOGO_INITIAL}}。
-        let page_html = self.registry.render_page(brand);
+        let page_html = self.registry.render_shell(brand);
 
         // 2) WebView2 作为 popup 的子窗口铺满整个 popup 客户区。
         let webview = WebViewBuilder::new()
@@ -616,6 +616,35 @@ impl WebViewMenu {
                 Err(e) => diag(&format!("evaluate_script 失败：{e}")),
             }
         }
+    }
+
+    /// 向已创建的 WebView 注入指定插件的内容（body + script）。
+    /// 切换插件时调用，无需重建 WebView2。插件不存在时静默忽略。
+    pub fn load_plugin(&self, plugin_id: &str) {
+        let Some(webview) = &self.webview else {
+            return;
+        };
+        let Some((body, script)) = self.registry.plugin_content(plugin_id) else {
+            diag(&format!("load_plugin：未找到插件 {plugin_id}"));
+            return;
+        };
+        let body_json = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".into());
+        let script_json = match &script {
+            Some(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()),
+            None => "null".to_string(),
+        };
+        let js = format!(
+            "window.loadPlugin && window.loadPlugin({body_json}, {script_json});"
+        );
+        match webview.evaluate_script(&js) {
+            Ok(()) => diag(&format!("load_plugin 成功：{plugin_id}")),
+            Err(e) => diag(&format!("load_plugin 失败：{plugin_id}：{e}")),
+        }
+    }
+
+    /// 活动栏渲染菜单项所需的插件元数据列表。
+    pub fn plugin_list(&self) -> Vec<PluginMeta> {
+        self.registry.card_plugin_list()
     }
 }
 

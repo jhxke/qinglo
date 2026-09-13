@@ -15,10 +15,10 @@ use super::state::{LogLevel, Message, UiState, ViewType};
 use super::theme;
 
 pub fn view_status_bar(state: &UiState) -> Element<'_, Message> {
-    let view_name = match state.current_view {
+    let view_name = match &state.current_view {
         ViewType::MiningAnalysis => "挖掘分析",
         ViewType::Settings => "系统设置",
-        ViewType::WebViewMenu => "WebView 菜单",
+        ViewType::Plugin(_) => "插件",
     };
     let (level, msg) = current_status(state);
 
@@ -161,7 +161,7 @@ fn current_status(state: &UiState) -> (LogLevel, String) {
     if state.dag_editor.dag_exec_task.is_some() {
         return (LogLevel::Info, "正在执行 DAG 流程…".into());
     }
-    match state.current_view {
+    match &state.current_view {
         ViewType::MiningAnalysis => {
             if let Some(tab) = state.dag_editor.active_tab() {
                 if let Some(err) = &tab.error_message {
@@ -178,7 +178,7 @@ fn current_status(state: &UiState) -> (LogLevel, String) {
                 return (level, msg.clone());
             }
         }
-        ViewType::WebViewMenu => {
+        ViewType::Plugin(_) => {
             // 网页层覆盖整个窗口时状态栏不可见，无需特殊状态
         }
     }
