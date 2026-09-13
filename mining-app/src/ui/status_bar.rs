@@ -17,6 +17,7 @@ use super::theme;
 pub fn view_status_bar(state: &UiState) -> Element<'_, Message> {
     let view_name = match &state.current_view {
         ViewType::MiningAnalysis => "挖掘分析",
+        ViewType::Services => "模型服务",
         ViewType::Settings => "系统设置",
         ViewType::Plugin(_) => "插件",
     };
@@ -170,6 +171,16 @@ fn current_status(state: &UiState) -> (LogLevel, String) {
                 if let Some(last) = tab.action_logs.last() {
                     return (last.level.clone(), last.message.clone());
                 }
+            }
+        }
+        ViewType::Services => {
+            if let Some(msg) = &state.services.last_result {
+                let level = if msg.starts_with("失败") || msg.starts_with("错误") || msg.starts_with("调用失败") || msg.starts_with("刷新失败") {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Success
+                };
+                return (level, msg.clone());
             }
         }
         ViewType::Settings => {

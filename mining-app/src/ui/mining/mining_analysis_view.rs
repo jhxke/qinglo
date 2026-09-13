@@ -94,6 +94,8 @@ pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
         Some(view_delete_folder_confirm_dialog(state))
     } else if state.dag_editor.show_move_model_dialog {
         Some(view_move_model_dialog(state))
+    } else if state.publish_dialog.is_some() {
+        Some(view_publish_dialog(state))
     } else {
         None
     };
@@ -730,6 +732,8 @@ fn view_floating_toolbar(state: &UiState) -> Element<'_, Message> {
         icon_only_tool_button(IconKind::Save, Message::SaveTab, false),
         icon_only_tool_button(IconKind::Run, Message::RunAllClick, true),
         icon_only_tool_button(IconKind::Debug, Message::ToggleDebug, debug_on),
+        toolbar_divider(),
+        icon_only_tool_button(IconKind::Publish, Message::PublishServiceClick, false),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
@@ -1870,6 +1874,118 @@ fn folder_pick_item(label: String, folder_id: String, depth: usize) -> Element<'
             s
         });
     btn.into()
+}
+
+/// 发布对话框：将当前 DAG 模型发布为命名服务。
+fn view_publish_dialog(state: &UiState) -> Element<'_, Message> {
+    let dialog = state.publish_dialog.as_ref().unwrap();
+
+    let icon = container(icons::view_icon(IconKind::Publish, theme::accent_teal(), 22.0))
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(44.0))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color {
+                r: 34.0 / 255.0,
+                g: 211.0 / 255.0,
+                b: 238.0 / 255.0,
+                a: 15.0 / 255.0,
+            }
+            .into());
+            s.border.radius = 12.0.into();
+            s
+        });
+
+    let title_col = column![
+        text("发布模型服务").color(theme::text_strong()).size(15.0),
+        text("将当前 DAG 发布为命名服务，发布后可通过 HTTP API 调用")
+            .color(theme::text_weak())
+            .size(10.5),
+    ]
+    .spacing(2);
+
+    let name_input = text_input("服务名称…", &dialog.name_input)
+        .on_input(Message::PublishServiceNameInput)
+        .on_submit(Message::PublishServiceConfirm)
+        .size(12.0)
+        .padding(Padding {
+            top: 8.0,
+            bottom: 8.0,
+            left: 10.0,
+            right: 10.0,
+        });
+    let name_wrap = container(name_input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
+        });
+
+    let desc_input = text_input("描述（可选）…", &dialog.desc_input)
+        .on_input(Message::PublishServiceDescInput)
+        .size(12.0)
+        .padding(Padding {
+            top: 8.0,
+            bottom: 8.0,
+            left: 10.0,
+            right: 10.0,
+        });
+    let desc_wrap = container(desc_input)
+        .width(Length::Fill)
+        .style(|_t| {
+            let mut s = iced::widget::container::Style::default();
+            s.background = Some(Color::from(theme::card_bg()).into());
+            s.border.radius = theme::WIDGET_ROUNDING.into();
+            s.border.width = 1.0;
+            s.border.color = theme::card_stroke();
+            s
+        });
+
+    let body_col = column![name_wrap, desc_wrap].spacing(10).width(Length::Fill);
+
+    let confirm_btn = dialog_button("发布", Message::PublishServiceConfirm, true);
+    let cancel_btn = dialog_button("取消", Message::PublishServiceCancel, false);
+    let btns = row![row![].width(Length::Fill), cancel_btn, confirm_btn]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let card = Card::new(
+        row![icon, title_col]
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        body_col,
+    )
+    .foot(btns)
+    .style(theme::float_card_style())
+    .padding_head(Padding {
+        top: 20.0,
+        bottom: 0.0,
+        left: 20.0,
+        right: 20.0,
+    })
+    .padding_body(Padding {
+        top: 16.0,
+        bottom: 16.0,
+        left: 20.0,
+        right: 20.0,
+    })
+    .padding_foot(Padding {
+        top: 0.0,
+        bottom: 18.0,
+        left: 20.0,
+        right: 20.0,
+    })
+    .width(Length::Fixed(400.0));
+
+    dialog_overlay(card.into(), Message::PublishServiceCancel)
 }
 
 /// 通用对话框遮罩层 v2：靛蓝黑 + 居中卡片

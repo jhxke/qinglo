@@ -1,0 +1,52 @@
+{
+  "name": "c0d42d94-0504-4c0b-8884-83a9535bc6e3",
+  "description": "用于统计行业数据",
+  "dag": {
+    "name": "c0d42d94-0504-4c0b-8884-83a9535bc6e3",
+    "nodes": [
+      {
+        "id": "a036e13a-4111-426d-9eb0-f4138cf89c5f",
+        "operator_name": "列转字符串流",
+        "dll_path": null,
+        "input_count": 1,
+        "output_count": 1,
+        "params_json": "{\"source_column\":\"cal_date\"}",
+        "stream": true
+      },
+      {
+        "id": "aed8338e-feb5-457c-bbf0-eac96def9412",
+        "operator_name": "数组取帧算子",
+        "dll_path": null,
+        "input_count": 1,
+        "output_count": 1,
+        "params_json": "{\"frame_index\":0}",
+        "stream": false
+      },
+      {
+        "id": "f553255d-e854-4686-a5f4-c33b2344fa83",
+        "operator_name": "PostgreSQL 数据源读取器",
+        "dll_path": null,
+        "input_count": 0,
+        "output_count": 1,
+        "params_json": "{\"database\":\"whatigo\",\"group_by_column\":\"\",\"host\":\"localhost\",\"password\":\"difyai123456\",\"port\":5432,\"query\":\"select cal_date from tushare_trade_cal where exchange='SSE' and is_open='t'\",\"sort_column\":\"cal_date\",\"sort_descending\":false,\"username\":\"postgres\"}",
+        "stream": false
+      }
+    ],
+    "edges": [
+      {
+        "source_node_id": "aed8338e-feb5-457c-bbf0-eac96def9412",
+        "source_port": 0,
+        "target_node_id": "a036e13a-4111-426d-9eb0-f4138cf89c5f",
+        "target_port": 0
+      },
+      {
+        "source_node_id": "f553255d-e854-4686-a5f4-c33b2344fa83",
+        "source_port": 0,
+        "target_node_id": "aed8338e-feb5-457c-bbf0-eac96def9412",
+        "target_port": 0
+      }
+    ]
+  },
+  "created_at": 1789291022449,
+  "source_model_id": "c0d42d94-0504-4c0b-8884-83a9535bc6e3"
+}

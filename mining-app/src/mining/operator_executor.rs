@@ -13,6 +13,7 @@ use operator_executor_client::{
 use operator_executor_client::protocol::{
     OperatorExecutionStatus,
     DagDefinition, DagNodeDef, DagEdgeDef, DagExecutionResult, DagNodeResult,
+    PublishedServiceInfo,
 };
 use operator_executor_client::PortData;
 
@@ -905,6 +906,39 @@ pub fn execute_native_operator(
 ) -> Result<Vec<PortData>, String> {
     execute_native_operator_with_result(dll_path, inputs, max_outputs, params_json)
         .map(|r| r.outputs)
+}
+
+/// 发布当前 DAG 为命名服务。
+///
+/// 将画布上的 `graph` 构造为 [`DagDefinition`] 后发送到服务端注册。
+/// `source_model_id` 可选，用于追溯服务来源的建模 id。
+pub fn publish_service(
+    graph: &DagGraph,
+    name: &str,
+    description: &str,
+    source_model_id: Option<&str>,
+) -> Result<(), String> {
+    let dag = build_dag_definition(graph, name);
+    with_runtime_client(|client| {
+        client.publish_service(name, description, &dag, source_model_id)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// 列出所有已发布的服务（元信息列表）。
+pub fn list_services() -> Result<Vec<PublishedServiceInfo>, String> {
+    with_runtime_client(|client| client.list_services()).map_err(|e| e.to_string())
+}
+
+/// 取消发布（删除）一个命名服务。不存在时也返回 Ok。
+pub fn unpublish_service(name: &str) -> Result<(), String> {
+    with_runtime_client(|client| client.unpublish_service(name)).map_err(|e| e.to_string())
+}
+
+/// 调用一个已发布的服务：执行其底层 DAG 并返回执行结果。
+pub fn invoke_service(name: &str) -> Result<DagExecutionResult, String> {
+    let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    with_runtime_client(|client| client.invoke_service(name, &empty)).map_err(|e| e.to_string())
 }
 
 /// 关闭 runtime 服务（可选）

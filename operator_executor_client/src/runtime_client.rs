@@ -9,7 +9,7 @@ use serde_json::{from_str, to_string};
 use operator_runtime::protocol::{
     RuntimeRequest, RuntimeResponse, OperatorCategory,
     OperatorExecutionStatus, ExecutionLogEntry, OperatorExecutionResult,
-    DagDefinition, DagExecutionResult, DagNodeResult,
+    DagDefinition, DagExecutionResult, DagNodeResult, PublishedServiceInfo,
 };
 use operator_runtime::PortData;
 
@@ -727,6 +727,82 @@ impl RuntimeClient {
             session_id: session_id.to_string(),
         })? {
             RuntimeResponse::DebugSessionEnded { .. } => Ok(()),
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    // ===== 模型服务发布 / 调用 =====
+
+    /// 发布（或覆盖）一个命名服务。
+    ///
+    /// 将 DAG 定义发送到服务端，服务端持久化到磁盘并在内存注册表中登记。
+    /// 同名服务会被覆盖。发布后可通过 [`Self::invoke_service`] 或 HTTP API 调用。
+    pub fn publish_service(
+        &self,
+        name: &str,
+        description: &str,
+        dag: &DagDefinition,
+        source_model_id: Option<&str>,
+    ) -> Result<(), RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::PublishService {
+            name: name.to_string(),
+            description: description.to_string(),
+            dag: dag.clone(),
+            source_model_id: source_model_id.map(|s| s.to_string()),
+        })? {
+            RuntimeResponse::ServicePublished { .. } => Ok(()),
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 取消发布（删除）一个命名服务。不存在时也返回 Ok。
+    pub fn unpublish_service(&self, name: &str) -> Result<(), RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::UnpublishService {
+            name: name.to_string(),
+        })? {
+            RuntimeResponse::ServiceUnpublished { .. } => Ok(()),
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 列出所有已发布的服务（元信息列表）。
+    pub fn list_services(&self) -> Result<Vec<PublishedServiceInfo>, RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::ListServices)? {
+            RuntimeResponse::ServicesList { services, .. } => Ok(services),
+            RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
+            other => Err(RuntimeClientError::InvalidResponse(format!(
+                "Unexpected response: {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        }
+    }
+
+    /// 调用一个已发布的服务：执行其底层 DAG 并返回执行结果。
+    ///
+    /// `params_overrides` 是可选的参数覆盖映射（key = 节点 id，value = 参数 JSON），
+    /// 用于在调用时动态修改某些节点的参数。为空时按发布时的原始参数执行。
+    pub fn invoke_service(
+        &self,
+        name: &str,
+        params_overrides: &std::collections::HashMap<String, String>,
+    ) -> Result<DagExecutionResult, RuntimeClientError> {
+        match self.send_request(&RuntimeRequest::InvokeService {
+            name: name.to_string(),
+            params_overrides: params_overrides.clone(),
+        })? {
+            RuntimeResponse::ServiceInvoked { result, .. } => Ok(result),
             RuntimeResponse::Error { message, .. } => Err(RuntimeClientError::RuntimeError(message)),
             other => Err(RuntimeClientError::InvalidResponse(format!(
                 "Unexpected response: {:?}",

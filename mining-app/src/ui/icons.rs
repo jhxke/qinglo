@@ -70,6 +70,10 @@ pub enum IconKind {
     FitView,
     /// 建模卡片「移动到目录」按钮：左侧竖线 + 右指箭头，表"移动/发送到"
     Move,
+    /// 模型服务（活动栏 + 工具栏发布）：三层堆叠横条，象征服务/服务器
+    Service,
+    /// 发布按钮（工具栏）：纸飞机 / 火箭升空语义，表"发布/上线"
+    Publish,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -213,6 +217,8 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::AlignLeft => draw_align_left(frame, color, sw),
         IconKind::FitView => draw_fit_view(frame, color, sw),
         IconKind::Move => draw_move(frame, color, sw),
+        IconKind::Service => draw_service(frame, color, sw),
+        IconKind::Publish => draw_publish(frame, color, sw),
     }
 }
 
@@ -712,6 +718,43 @@ fn draw_move(frame: &mut canvas::Frame, color: Color, sw: f32) {
         b.line_to(Point::new(13.0, 16.0));
     });
     frame.stroke(&head, stroke);
+}
+
+/// 服务图标：三层堆叠的横条（服务器机架语义），每层左侧一个小圆点（状态灯）。
+fn draw_service(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 三层横条：y 间距 6px，每层 16px 宽、4.5px 高的矩形
+    for i in 0..3 {
+        let y = 4.0 + i as f32 * 6.0;
+        let rect = Path::rectangle(
+            Point::new(4.0, y),
+            Size::new(16.0, 4.5),
+        );
+        frame.stroke(&rect, stroke);
+        // 左侧状态灯小圆点
+        let dot = Path::circle(Point::new(7.0, y + 2.25), 0.8);
+        frame.fill(&dot, color);
+    }
+}
+
+/// 发布图标：纸飞机（上升右指三角形 + 折叠线），表"发布 / 上线 / 发送"。
+fn draw_publish(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // 纸飞机外轮廓：左下 → 右上尖 → 左下，形成三角形主体
+    let plane = Path::new(|b| {
+        b.move_to(Point::new(4.0, 20.0));
+        b.line_to(Point::new(20.0, 4.0));
+        b.line_to(Point::new(20.0, 20.0));
+        b.line_to(Point::new(4.0, 20.0));
+    });
+    frame.stroke(&plane, stroke);
+    // 内部折叠线：从尖端到底边中点
+    let fold = Path::new(|b| {
+        b.move_to(Point::new(20.0, 4.0));
+        b.line_to(Point::new(12.0, 14.0));
+        b.line_to(Point::new(20.0, 20.0));
+    });
+    frame.stroke(&fold, stroke);
 }
 
 // 静态断言：保证模块在编译期捕获未使用的导入（避免误删 import 后无声漂移）

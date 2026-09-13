@@ -27,7 +27,7 @@ use iced::{
 
 use mining_app::ui::{
     DagTab, Message, UiState, ViewType, LogLevel,
-    view_activity_bar, view_mining_analysis, view_settings,
+    view_activity_bar, view_mining_analysis, view_services, view_settings,
     view_status_bar, view_title_bar,
 };
 use mining_app::ui::mining::dag_canvas::{hit_test_node, hit_test_port, screen_to_world};
@@ -148,6 +148,10 @@ impl MyApp {
                 #[cfg(windows)]
                 if vt.is_webview_plugin() {
                     return enter_webview_plugin(state, vt.plugin_id().unwrap_or(""));
+                }
+                // 进入服务视图：自动刷新服务列表
+                if vt == ViewType::Services {
+                    return refresh_services_task();
                 }
             }
             Message::Tick => {
@@ -731,9 +735,12 @@ impl MyApp {
                     Err(e) => format!("保存失败：{e}"),
                 };
                 state.settings.last_result = Some((true, save_msg));
-                // 若当前正在 MiningAnalysis 视图且切到隐藏，自动跳到 Settings，
+                // 若当前正在 MiningAnalysis 或 Services 视图且切到隐藏，自动跳到 Settings，
                 // 避免用户停留在已裁掉的视图里无入口返回。
-                if now_hidden && state.current_view == ViewType::MiningAnalysis {
+                if now_hidden
+                    && (state.current_view == ViewType::MiningAnalysis
+                        || state.current_view == ViewType::Services)
+                {
                     // 释放挖掘视图占用的调试会话再切走
                     mining_app::ui::mining::mining_analysis_view::release_all_debug_sessions(
                         &mut state.dag_editor,
@@ -817,6 +824,174 @@ impl MyApp {
                 state.brand_snapshot = state.settings.brand.clone();
                 state.settings.last_result = Some((true, "已恢复默认品牌设置".to_string()));
             }
+
+            // ===== 模型服务发布 / 管理 =====
+
+            Message::PublishServiceClick => {
+                // 打开发布对话框：用当前激活 tab 的模型名作为默认服务名
+                let default_name = state
+                    .dag_editor
+                    .active_tab()
+                    .map(|t| {
+                        // 从 model_id 提取末段作为默认名（model_id 可能含目录前缀）
+                        t.model_id
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&t.model_id)
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                state.publish_dialog = Some(
+                    mining_app::ui::state::PublishDialogState {
+                        name_input: default_name,
+                        desc_input: String::new(),
+                    },
+                );
+            }
+            Message::PublishServiceNameInput(s) => {
+                if let Some(d) = state.publish_dialog.as_mut() {
+                    d.name_input = s;
+                }
+            }
+            Message::PublishServiceDescInput(s) => {
+                if let Some(d) = state.publish_dialog.as_mut() {
+                    d.desc_input = s;
+                }
+            }
+            Message::PublishServiceConfirm => {
+                // 从对话框取出草稿，从激活 tab 取出 graph + model_id
+                let dialog = state.publish_dialog.take();
+                if let Some(d) = dialog {
+                    let name = d.name_input.trim().to_string();
+                    if name.is_empty() {
+                        state.services.last_result =
+                            Some("失败：服务名称不能为空".to_string());
+                    } else if let Some(tab) = state.dag_editor.active_tab() {
+                        let graph = tab.graph.clone();
+                        let model_id = tab.model_id.clone();
+                        let desc = d.desc_input.clone();
+                        // 后台线程执行发布
+                        return iced::Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    mining_app::mining::operator_executor::publish_service(
+                                        &graph,
+                                        &name,
+                                        &desc,
+                                        Some(&model_id),
+                                    )
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(format!("发布线程异常: {}", e)))
+                            },
+                            move |result| {
+                                Message::ServicesRefreshed(match result {
+                                    Ok(()) => {
+                                        // 发布成功后刷新列表
+                                        mining_app::mining::operator_executor::list_services()
+                                    }
+                                    Err(e) => Err(e),
+                                })
+                            },
+                        );
+                    } else {
+                        state.services.last_result =
+                            Some("失败：没有打开的建模可用于发布".to_string());
+                    }
+                }
+            }
+            Message::PublishServiceCancel => {
+                state.publish_dialog = None;
+            }
+
+            Message::RefreshServices => {
+                return refresh_services_task();
+            }
+            Message::ServicesRefreshed(result) => {
+                state.services.refreshing = false;
+                match result {
+                    Ok(services) => {
+                        state.services.services = services;
+                        // 如果有 last_result 为发布/删除操作的提示，保留它
+                    }
+                    Err(e) => {
+                        state.services.last_result = Some(format!("刷新失败：{}", e));
+                    }
+                }
+            }
+
+            Message::InvokeServiceClick(name) => {
+                let svc_name = name.clone();
+                state.services.last_result =
+                    Some(format!("正在调用服务「{}」…", svc_name));
+                return iced::Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            mining_app::mining::operator_executor::invoke_service(&svc_name)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("调用线程异常: {}", e)))
+                    },
+                    move |result| Message::ServiceInvoked(name.clone(), result),
+                );
+            }
+            Message::ServiceInvoked(name, result) => {
+                match result {
+                    Ok(exec_result) => {
+                        let ok_count = exec_result
+                            .node_results
+                            .iter()
+                            .filter(|nr| {
+                                matches!(
+                                    nr.execution_result.status,
+                                    operator_executor_client::protocol::OperatorExecutionStatus::Completed
+                                )
+                            })
+                            .count();
+                        let total = exec_result.node_results.len();
+                        let status = if matches!(
+                            exec_result.status,
+                            operator_executor_client::protocol::OperatorExecutionStatus::Completed
+                        ) {
+                            format!(
+                                "服务「{}」调用完成（{}/{} 节点成功）",
+                                name, ok_count, total
+                            )
+                        } else {
+                            format!(
+                                "服务「{}」调用失败：{}",
+                                name,
+                                exec_result.error_message.as_deref().unwrap_or("未知错误")
+                            )
+                        };
+                        state.services.last_result = Some(status);
+                    }
+                    Err(e) => {
+                        state.services.last_result =
+                            Some(format!("调用服务「{}」失败：{}", name, e));
+                    }
+                }
+            }
+
+            Message::UnpublishServiceClick(name) => {
+                let svc_name = name.clone();
+                return iced::Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            mining_app::mining::operator_executor::unpublish_service(&svc_name)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("删除线程异常: {}", e)))
+                    },
+                    move |result| Message::ServicesRefreshed(match result {
+                        Ok(()) => {
+                            // 删除成功后刷新列表
+                            mining_app::mining::operator_executor::list_services()
+                        }
+                        Err(e) => Err(e),
+                    }),
+                );
+            }
         }
         Task::none()
     }
@@ -828,6 +1003,7 @@ impl MyApp {
         let main_content = match &state.current_view {
             ViewType::MiningAnalysis => view_mining_analysis(state),
             ViewType::Settings => view_settings(state),
+            ViewType::Services => view_services(state),
             // 实际界面由 WebView2 子窗口覆盖渲染；这里只作为加载前/失败时的底层占位
             ViewType::Plugin(_) => match &state.webview_error {
                 Some(e) => mining_app::ui::placeholder_view(
@@ -952,6 +1128,20 @@ impl MyApp {
 //     → WebViewMenu::build(size)             // build_as_child 子 HWND
 //
 // 再次进入时 webview 已存在，直接 set_visible(true) 并校准 bounds。
+
+/// 刷新服务列表的 Task：后台调用 list_services，结果通过 ServicesRefreshed 回传。
+fn refresh_services_task() -> Task<Message> {
+    iced::Task::perform(
+        async {
+            tokio::task::spawn_blocking(|| {
+                mining_app::mining::operator_executor::list_services()
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("刷新线程异常: {}", e)))
+        },
+        |result| Message::ServicesRefreshed(result),
+    )
+}
 
 /// 「选择 Logo 文件」按钮触发的文件对话框。
 ///

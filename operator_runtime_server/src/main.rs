@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use operator_runtime::protocol::{
     RuntimeRequest, RuntimeResponse, RequestId, OperatorCategory, OperatorInfo,
     OperatorConfig, OperatorExecutionResult, OperatorExecutionStatus, ExecutionLogEntry,
-    DagDefinition, DagNodeDef, DagNodeResult, DagExecutionResult,
+    DagDefinition, DagNodeDef, DagNodeResult, DagExecutionResult, PublishedServiceInfo,
 };
 use operator_runtime::PortData;
 use operator_runtime::PREVIEW_ROW_LIMIT;
@@ -26,8 +26,19 @@ type SharedPortData = Rc<RefCell<PortData>>;
 const VERSION: &str = "0.1.0";
 /// 默认监听地址
 const DEFAULT_ADDR: &str = "127.0.0.1:17890";
+/// HTTP API 默认监听地址（供外部程序通过 HTTP 调用已发布的服务）
+const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:17891";
 /// 最大帧大小 (16 MB)
 const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
+
+/// 当前 UTC 毫秒时间戳。
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 已加载的算子注册表
 struct OperatorEntry {
@@ -56,6 +67,17 @@ struct DebugSession {
 /// 客户端 ID 类型
 type ClientId = u64;
 
+/// 已发布的模型服务条目：持有完整 DAG 定义，供调用时执行。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ServiceEntry {
+    name: String,
+    description: String,
+    dag: DagDefinition,
+    created_at: u64,
+    #[serde(default)]
+    source_model_id: Option<String>,
+}
+
 /// Runtime 状态
 struct RuntimeState {
     /// 下一个请求 ID
@@ -76,10 +98,18 @@ struct RuntimeState {
     client_debug_sessions: RwLock<std::collections::HashMap<ClientId, Vec<String>>>,
     /// 客户端 -> 该客户端创建的执行记录 ID 列表（用于断开时批量清理）
     client_execution_records: RwLock<std::collections::HashMap<ClientId, Vec<String>>>,
+    /// 已发布的模型服务注册表：key = 服务名
+    services: RwLock<std::collections::HashMap<String, ServiceEntry>>,
+    /// 服务持久化目录（`services/<name>.json`）
+    services_dir: PathBuf,
 }
 
 impl RuntimeState {
     fn new(compile_dir: PathBuf, lib_dir: PathBuf) -> Self {
+        let services_dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("services");
+        let _ = std::fs::create_dir_all(&services_dir);
         Self {
             next_request_id: AtomicU64::new(1),
             next_client_id: AtomicU64::new(1),
@@ -90,6 +120,8 @@ impl RuntimeState {
             debug_sessions: RwLock::new(std::collections::HashMap::new()),
             client_debug_sessions: RwLock::new(std::collections::HashMap::new()),
             client_execution_records: RwLock::new(std::collections::HashMap::new()),
+            services: RwLock::new(std::collections::HashMap::new()),
+            services_dir,
         }
     }
 
@@ -431,6 +463,107 @@ impl RuntimeState {
             return None;
         }
         find_dll_by_name_recursive(&self.lib_dir, operator_name)
+    }
+
+    // ===== 模型服务管理 =====
+
+    /// 发布（或覆盖）一个模型服务：写入内存注册表 + 落盘 `services/<name>.json`。
+    fn publish_service(
+        &self,
+        name: &str,
+        description: &str,
+        dag: DagDefinition,
+        source_model_id: Option<String>,
+    ) {
+        let entry = ServiceEntry {
+            name: name.to_string(),
+            description: description.to_string(),
+            created_at: now_millis(),
+            source_model_id,
+            dag,
+        };
+        // 落盘（用于服务重启后恢复）
+        let _ = self.save_service_to_disk(&entry);
+        // 写入内存
+        self.services.write().insert(name.to_string(), entry);
+    }
+
+    /// 取消发布：从内存和磁盘删除。不存在时静默成功。
+    fn unpublish_service(&self, name: &str) {
+        self.services.write().remove(name);
+        let path = self.service_file_path(name);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// 列出所有已发布服务的元信息（按创建时间倒序）。
+    fn list_services(&self) -> Vec<PublishedServiceInfo> {
+        let services = self.services.read();
+        let mut infos: Vec<PublishedServiceInfo> = services
+            .values()
+            .map(|e| PublishedServiceInfo {
+                name: e.name.clone(),
+                description: e.description.clone(),
+                created_at: e.created_at,
+                node_count: e.dag.nodes.len(),
+                edge_count: e.dag.edges.len(),
+                source_model_id: e.source_model_id.clone(),
+            })
+            .collect();
+        infos.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        infos
+    }
+
+    /// 获取一个已发布服务的 DAG 定义克隆（用于调用执行）。
+    fn get_service_dag(&self, name: &str) -> Option<DagDefinition> {
+        self.services.read().get(name).map(|e| e.dag.clone())
+    }
+
+    /// 服务文件路径：`services_dir/<name>.json`（name 中的 `/` 转为 `_` 防逃逸）。
+    fn service_file_path(&self, name: &str) -> PathBuf {
+        let safe = name.replace('/', "_").replace('\\', "_");
+        self.services_dir.join(format!("{}.json", safe))
+    }
+
+    /// 将服务条目序列化到磁盘。
+    fn save_service_to_disk(&self, entry: &ServiceEntry) -> Result<(), String> {
+        let path = self.service_file_path(&entry.name);
+        let json = serde_json::to_string_pretty(entry)
+            .map_err(|e| format!("序列化服务失败: {}", e))?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, json)
+            .map_err(|e| format!("写入服务文件失败: {}", e))
+    }
+
+    /// 启动时从磁盘恢复所有已发布的服务到内存注册表。
+    fn restore_services_from_disk(&self) {
+        if !self.services_dir.exists() {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.services_dir) else {
+            return;
+        };
+        let mut loaded = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(svc) = serde_json::from_str::<ServiceEntry>(&content) {
+                    self.services
+                        .write()
+                        .insert(svc.name.clone(), svc);
+                    loaded += 1;
+                }
+            }
+        }
+        if loaded > 0 {
+            println!("[runtime] 从磁盘恢复 {} 个已发布服务", loaded);
+        }
     }
 }
 
@@ -935,6 +1068,78 @@ fn handle_request(state: Arc<RuntimeState>, request: RuntimeRequest, client_id: 
                 logs,
                 total_count,
                 start_index: start,
+            }
+        }
+
+        // ===== 模型服务发布 / 调用 =====
+
+        RuntimeRequest::PublishService {
+            name,
+            description,
+            dag,
+            source_model_id,
+        } => {
+            let request_id = state.alloc_request_id();
+            // 校验服务名：非空 + 不含路径分隔符（防逃逸磁盘路径）
+            if name.is_empty() || name.contains('/') || name.contains('\\') {
+                return RuntimeResponse::Error {
+                    request_id,
+                    message: "服务名称不能为空且不能包含 / 或 \\".to_string(),
+                };
+            }
+            state.publish_service(&name, &description, dag, source_model_id);
+            println!("[runtime] 已发布服务: {}", name);
+            RuntimeResponse::ServicePublished {
+                request_id,
+                name,
+            }
+        }
+        RuntimeRequest::UnpublishService { name } => {
+            let request_id = state.alloc_request_id();
+            state.unpublish_service(&name);
+            println!("[runtime] 已取消发布服务: {}", name);
+            RuntimeResponse::ServiceUnpublished {
+                request_id,
+                name,
+            }
+        }
+        RuntimeRequest::ListServices => {
+            let request_id = state.alloc_request_id();
+            let services = state.list_services();
+            RuntimeResponse::ServicesList {
+                request_id,
+                services,
+            }
+        }
+        RuntimeRequest::InvokeService {
+            name,
+            params_overrides,
+        } => {
+            let request_id = state.alloc_request_id();
+            // 获取已发布服务的 DAG 定义
+            let mut dag = match state.get_service_dag(&name) {
+                Some(d) => d,
+                None => {
+                    return RuntimeResponse::Error {
+                        request_id,
+                        message: format!("服务不存在: {}", name),
+                    };
+                }
+            };
+            // 应用参数覆盖
+            if !params_overrides.is_empty() {
+                for node in &mut dag.nodes {
+                    if let Some(override_json) = params_overrides.get(&node.id) {
+                        node.params_json = override_json.clone();
+                    }
+                }
+            }
+            // 执行 DAG（不携带 debug_session_id，不流式推送——单响应路径）
+            let result = execute_dag(&state, &dag, None, client_id, |_| {});
+            RuntimeResponse::ServiceInvoked {
+                request_id,
+                name,
+                result,
             }
         }
     }
@@ -2319,6 +2524,220 @@ fn print_usage() {
     println!("环境变量:");
     println!("  RUNTIME_ADDR     监听地址");
     println!("  RUNTIME_PORT     监听端口 (覆盖地址中的端口)");
+    println!("  RUNTIME_HTTP_ADDR  HTTP API 监听地址，默认 {}", DEFAULT_HTTP_ADDR);
+}
+
+/// HTTP 响应辅助：拼接状态行 + 头 + 体。
+fn http_response(status: &str, body: &str) -> String {
+    let header = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+        status,
+        body.len()
+    );
+    format!("{}{}", header, body)
+}
+
+/// 从 URL 路径中解析服务名。
+/// `/services/my_service` → `my_service`；`/services` → None。
+fn parse_service_name_from_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    // 期望格式：["", "services", "<name>"] 或 ["", "services"]
+    if parts.len() >= 3 && parts[1] == "services" {
+        // 对 name 做 URL 解码（简化：只处理 %20 等常见编码）
+        let raw = parts[2..].join("/");
+        Some(raw.replace("%20", " "))
+    } else {
+        None
+    }
+}
+
+/// 处理单个 HTTP 连接：最小化 HTTP/1.1 解析。
+///
+/// 支持的端点：
+/// - `GET /services` → 已发布服务列表（JSON）
+/// - `GET /services/{name}` → 单个服务详情（JSON）
+/// - `POST /services/{name}` → 调用服务，body 可选 `{"params_overrides": {...}}`
+/// - `OPTIONS *` → CORS 预检
+async fn handle_http_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
+    // 读取原始字节（HTTP 请求头 + 部分或全部 body）
+    let mut buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+
+    // 循环读取直到读到 \r\n\r\n（请求头结束标记）
+    loop {
+        match stream.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if buf.len() > 1024 * 1024 {
+                    // 头部过大，可能是恶意请求
+                    let _ = stream.write_all(http_response("413 Payload Too Large", "{}").as_bytes()).await;
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+
+    // 将已读字节转为字符串（头部分）
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(buf.len());
+    let header_str = match std::str::from_utf8(&buf[..header_end]) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = stream.write_all(http_response("400 Bad Request", r#"{"error":"invalid utf-8"}"#).as_bytes()).await;
+            return;
+        }
+    };
+
+    // 解析请求行
+    let mut lines = header_str.lines();
+    let request_line = match lines.next() {
+        Some(l) => l,
+        None => return,
+    };
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 3 {
+        return;
+    }
+    let method = parts[0];
+    let path = parts[1];
+
+    // CORS 预检
+    if method == "OPTIONS" {
+        let _ = stream.write_all(http_response("204 No Content", "").as_bytes()).await;
+        return;
+    }
+
+    // 解析 Content-Length（如有 body）
+    let content_length: usize = lines
+        .filter_map(|l| {
+            let lower = l.to_lowercase();
+            if lower.starts_with("content-length:") {
+                l.split(':').nth(1).and_then(|v| v.trim().parse().ok())
+            } else {
+                None
+            }
+        })
+        .next()
+        .unwrap_or(0);
+
+    // 收集 body：buf 中 header_end+4 之后的部分 + 可能还需要继续读取
+    let header_total = header_end + 4;
+    let mut body: Vec<u8> = if buf.len() > header_total {
+        buf[header_total..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // 如果 body 不足 content_length，继续从 stream 读取
+    while body.len() < content_length {
+        let n = match stream.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        body.extend_from_slice(&tmp[..n]);
+    }
+    let body_str = String::from_utf8_lossy(&body);
+
+    // 路由分发
+    let is_services_root = path == "/services" || path == "/services/";
+
+    if method == "GET" && is_services_root {
+        // 列出所有服务
+        let services = state.list_services();
+        let json = serde_json::to_string(&services).unwrap_or_else(|_| "[]".to_string());
+        let _ = stream.write_all(http_response("200 OK", &json).as_bytes()).await;
+        return;
+    }
+
+    if let Some(service_name) = parse_service_name_from_path(path) {
+        if method == "GET" {
+            // 单个服务详情
+            let dag = state.get_service_dag(&service_name);
+            match dag {
+                Some(d) => {
+                    let json = serde_json::to_string(&d).unwrap_or_else(|_| "{}".to_string());
+                    let _ = stream.write_all(http_response("200 OK", &json).as_bytes()).await;
+                }
+                None => {
+                    let _ = stream.write_all(
+                        http_response("404 Not Found", &format!(r#"{{"error":"service '{}' not found"}}"#, service_name)).as_bytes()
+                    ).await;
+                }
+            }
+            return;
+        }
+
+        if method == "POST" {
+            // 调用服务
+            let dag = match state.get_service_dag(&service_name) {
+                Some(d) => d,
+                None => {
+                    let _ = stream.write_all(
+                        http_response("404 Not Found", &format!(r#"{{"error":"service '{}' not found"}}"#, service_name)).as_bytes()
+                    ).await;
+                    return;
+                }
+            };
+
+            // 解析可选的 params_overrides
+            let mut params_overrides: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if !body_str.is_empty() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_str) {
+                    if let Some(po) = v.get("params_overrides").and_then(|v| v.as_object()) {
+                        for (k, val) in po {
+                            if let Some(s) = val.as_str() {
+                                params_overrides.insert(k.clone(), s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 应用参数覆盖
+            let mut dag = dag;
+            if !params_overrides.is_empty() {
+                for node in &mut dag.nodes {
+                    if let Some(override_json) = params_overrides.get(&node.id) {
+                        node.params_json = override_json.clone();
+                    }
+                }
+            }
+
+            // 执行（使用 client_id=0 表示无主调用——HTTP 请求不参与客户端资源清理）
+            let result = tokio::task::spawn_blocking(move || {
+                execute_dag(&state, &dag, None, 0, |_| {})
+            })
+            .await;
+
+            match result {
+                Ok(r) => {
+                    let json = serde_json::to_string(&r).unwrap_or_else(|_| "{}".to_string());
+                    let _ = stream.write_all(http_response("200 OK", &json).as_bytes()).await;
+                }
+                Err(e) => {
+                    let _ = stream.write_all(
+                        http_response("500 Internal Server Error", &format!(r#"{{"error":"execution failed: {}"}}"#, e)).as_bytes()
+                    ).await;
+                }
+            }
+            return;
+        }
+    }
+
+    // 未匹配任何路由
+    let _ = stream.write_all(
+        http_response("404 Not Found", r#"{"error":"unknown endpoint"}"#).as_bytes()
+    ).await;
 }
 
 #[tokio::main]
@@ -2344,6 +2763,10 @@ async fn main() {
     } else {
         addr
     };
+
+    let http_addr = std::env::var("RUNTIME_HTTP_ADDR")
+        .ok()
+        .unwrap_or_else(|| DEFAULT_HTTP_ADDR.to_string());
 
     let compile_dir = std::env::var("RUNTIME_COMPILE_DIR")
         .ok()
@@ -2378,10 +2801,15 @@ async fn main() {
 
     let state = Arc::new(RuntimeState::new(compile_dir, lib_dir.clone()));
 
+    // 启动时从磁盘恢复已发布的服务
+    state.restore_services_from_disk();
+
     println!("[runtime] operator_runtime_server v{}", VERSION);
     println!("[runtime] 监听地址: {}", listen_addr);
+    println!("[runtime] HTTP API 地址: {}", http_addr);
     println!("[runtime] 编译目录: {}", state.compile_dir.display());
     println!("[runtime] 算子库目录: {}", state.lib_dir.display());
+    println!("[runtime] 服务持久化目录: {}", state.services_dir.display());
 
     // 服务启动时一次性预加载算子库目录下所有算子 DLL。
     //
@@ -2394,6 +2822,38 @@ async fn main() {
         "[runtime] 预加载算子完成: {} 个成功, {} 个失败",
         loaded, failed
     );
+
+    // 启动 HTTP API 服务器（供外部程序通过 HTTP 调用已发布的服务）
+    let http_state = state.clone();
+    tokio::spawn(async move {
+        let http_listener = match TcpListener::bind(&http_addr).await {
+            Ok(l) => {
+                println!("[runtime] HTTP API 已启动，监听: {}", http_addr);
+                println!("[runtime] HTTP 端点:");
+                println!("[runtime]   GET  /services          列出所有已发布服务");
+                println!("[runtime]   GET  /services/{{name}}  查看服务 DAG 详情");
+                println!("[runtime]   POST /services/{{name}}  调用服务 (body: {{\"params_overrides\": {{node_id: params_json}}}})");
+                l
+            }
+            Err(e) => {
+                eprintln!("[runtime] HTTP API 绑定端口失败: {}", e);
+                return;
+            }
+        };
+        loop {
+            match http_listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let state = http_state.clone();
+                    tokio::spawn(async move {
+                        handle_http_client(state, stream).await;
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[runtime] HTTP API 接受连接失败: {}", e);
+                }
+            }
+        }
+    });
 
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,

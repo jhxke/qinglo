@@ -30,6 +30,9 @@ pub fn view_activity_bar(state: &UiState) -> Element<'_, Message> {
     if !state.settings.hide_mining {
         let mining_btn = view_activity_button(IconKind::Mining, "挖掘".to_string(), ViewType::MiningAnalysis, &current);
         col = col.push(mining_btn);
+        // 模型服务入口：展示已发布的 DAG 模型服务列表
+        let services_btn = view_activity_button(IconKind::Service, "服务".to_string(), ViewType::Services, &current);
+        col = col.push(services_btn);
     }
 
     // 每个插件 = 一个独立菜单项（活动栏按钮）。点击后进入该插件的 WebView 视图，

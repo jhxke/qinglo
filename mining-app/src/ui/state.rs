@@ -8,6 +8,7 @@ use crate::mining::geom::Vec2;
 use operator_executor_client::protocol::{DagExecutionResult, DagNodeResult};
 use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
+use operator_executor_client::protocol::PublishedServiceInfo;
 use crate::mining::dag::{DagGraph, OperatorType, NodeIORegistry};
 use crate::mining::dag_store::{self, DagModelMeta, DagModelRecord, ModelEntry, ModelFolderMeta};
 pub use crate::config::{BrandConfig, LogoSource, TitleLogo};
@@ -127,6 +128,8 @@ pub struct JsonLogEntry {
 pub enum ViewType {
     MiningAnalysis,
     Settings,
+    /// 模型服务视图：展示所有已发布的 DAG 模型服务，可查看详情 / 调用 / 删除。
+    Services,
     /// 网页插件视图：每个插件独占一个菜单项，String 为插件 id。
     /// 整个视图由 WebView2 子窗口渲染，内容为对应插件的完整功能模块。
     Plugin(String),
@@ -408,6 +411,29 @@ pub enum Message {
     BrandApply,
     /// 品牌设置：「恢复默认」按钮 → 重置为 BrandConfig::default()。
     BrandReset,
+
+    // ===== 模型服务发布 / 管理 =====
+
+    /// 点击悬浮工具栏「发布」按钮：弹出发布对话框（当前激活 tab 的 DAG）。
+    PublishServiceClick,
+    /// 发布对话框：服务名输入框内容变化。
+    PublishServiceNameInput(String),
+    /// 发布对话框：描述输入框内容变化。
+    PublishServiceDescInput(String),
+    /// 发布对话框：确认发布。
+    PublishServiceConfirm,
+    /// 发布对话框：取消。
+    PublishServiceCancel,
+    /// 进入服务视图时刷新服务列表。
+    RefreshServices,
+    /// 服务列表刷新完成（携带结果）。
+    ServicesRefreshed(Result<Vec<PublishedServiceInfo>, String>),
+    /// 点击服务卡片「调用」按钮：在后台执行该服务的 DAG。
+    InvokeServiceClick(String),
+    /// 服务调用完成（携带结果）。
+    ServiceInvoked(String, Result<DagExecutionResult, String>),
+    /// 点击服务卡片「删除」按钮：取消发布该服务。
+    UnpublishServiceClick(String),
 }
 
 /// 自定义算子编辑器的 Debug 面板状态。
@@ -460,6 +486,10 @@ pub struct UiState {
     pub webview_menu: super::webview_menu::WebViewMenu,
     /// WebView2 创建/运行错误（None = 无错误），用于在占位页直接展示。
     pub webview_error: Option<String>,
+    /// 模型服务视图状态：已发布服务列表 + 刷新中标记。
+    pub services: ServicesState,
+    /// 发布对话框状态：`Some` = 对话框打开（暂存输入框草稿），`None` = 关闭。
+    pub publish_dialog: Option<PublishDialogState>,
 }
 
 impl Default for UiState {
@@ -479,8 +509,34 @@ impl Default for UiState {
             #[cfg(windows)]
             webview_menu: Default::default(),
             webview_error: None,
+            services: ServicesState::default(),
+            publish_dialog: None,
         }
     }
+}
+
+/// 模型服务视图状态。
+///
+/// `services` 是最近一次刷新拉取的已发布服务列表（按创建时间倒序）。
+/// `refreshing` 标记后台刷新中（进入视图 / 手动刷新时置 true，完成后置 false）。
+/// `last_result` 记录最近一次「发布 / 调用 / 删除」操作的提示文本。
+#[derive(Clone, Default)]
+pub struct ServicesState {
+    /// 已发布服务列表（元信息）
+    pub services: Vec<PublishedServiceInfo>,
+    /// 是否正在后台刷新列表
+    pub refreshing: bool,
+    /// 最近一次操作结果提示（成功/失败消息，None = 无）
+    pub last_result: Option<String>,
+}
+
+/// 发布对话框草稿状态：暂存用户输入的服务名与描述。
+#[derive(Clone, Default)]
+pub struct PublishDialogState {
+    /// 服务名输入框草稿
+    pub name_input: String,
+    /// 描述输入框草稿
+    pub desc_input: String,
 }
 
 /// 系统设置视图的本地状态。

@@ -300,6 +300,27 @@ pub struct DagDefinition {
     pub edges: Vec<DagEdgeDef>,
 }
 
+/// 已发布的服务元信息（`ListServices` 响应中返回，不含完整 DAG 定义）。
+///
+/// 客户端据此渲染服务菜单列表；调用时按 `name` 索引服务端内存中的完整 DAG。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishedServiceInfo {
+    /// 服务名称（唯一标识，调用时以此索引）
+    pub name: String,
+    /// 服务描述（发布时由用户提供，可空）
+    #[serde(default)]
+    pub description: String,
+    /// 创建时间（UTC 毫秒时间戳）
+    pub created_at: u64,
+    /// DAG 节点数量
+    pub node_count: usize,
+    /// DAG 边数量
+    pub edge_count: usize,
+    /// 源建模 id（可选，用于追溯来源）
+    #[serde(default)]
+    pub source_model_id: Option<String>,
+}
+
 /// 单个节点的执行结果（服务端回传）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DagNodeResult {
@@ -444,6 +465,43 @@ pub enum RuntimeRequest {
         start_index: Option<usize>,
         /// 可选：最大返回日志条数，不传则不限制
         max_count: Option<usize>,
+    },
+
+    // ===== 模型服务发布 / 调用 =====
+
+    /// 发布一个 DAG 为命名服务。
+    ///
+    /// 服务端将 DAG 定义持久化到 `services/<name>.json`，并在内存注册表中登记。
+    /// 同名服务会被覆盖更新。发布后可通过 [`RuntimeRequest::InvokeService`] 或
+    /// HTTP API 调用。
+    PublishService {
+        /// 服务名称（唯一标识）
+        name: String,
+        /// 服务描述（可空）
+        #[serde(default)]
+        description: String,
+        /// 完整的 DAG 定义
+        dag: DagDefinition,
+        /// 源建模 id（可选，用于追溯来源）
+        #[serde(default)]
+        source_model_id: Option<String>,
+    },
+    /// 取消发布（删除）一个命名服务。
+    UnpublishService {
+        name: String,
+    },
+    /// 列出所有已发布的服务（元信息列表，不含完整 DAG）。
+    ListServices,
+    /// 调用一个已发布的服务：执行其底层 DAG 并返回执行结果。
+    ///
+    /// `params_overrides` 是可选的参数覆盖映射（key = 节点 id，value = 参数 JSON），
+    /// 用于在调用时动态修改某些节点的参数（如数据源路径）。为空时按发布时的原始参数执行。
+    InvokeService {
+        /// 服务名称
+        name: String,
+        /// 可选：按节点 id 覆盖参数 JSON
+        #[serde(default)]
+        params_overrides: std::collections::HashMap<String, String>,
     },
 }
 
@@ -603,5 +661,30 @@ pub enum RuntimeResponse {
     DebugSessionEnded {
         request_id: RequestId,
         session_id: String,
+    },
+
+    // ===== 模型服务发布 / 调用 响应 =====
+
+    /// [`RuntimeRequest::PublishService`] 的响应：服务已发布（同名覆盖）。
+    ServicePublished {
+        request_id: RequestId,
+        name: String,
+    },
+    /// [`RuntimeRequest::UnpublishService`] 的响应：服务已删除（不存在时也返回 Ok）。
+    ServiceUnpublished {
+        request_id: RequestId,
+        name: String,
+    },
+    /// [`RuntimeRequest::ListServices`] 的响应：已发布服务列表（元信息）。
+    ServicesList {
+        request_id: RequestId,
+        services: Vec<PublishedServiceInfo>,
+    },
+    /// [`RuntimeRequest::InvokeService`] 的响应：服务执行结果。
+    ServiceInvoked {
+        request_id: RequestId,
+        name: String,
+        /// DAG 整体执行结果（各节点预览输出 + 状态 + 耗时）
+        result: DagExecutionResult,
     },
 }

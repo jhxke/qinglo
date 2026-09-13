@@ -1,6 +1,7 @@
 pub mod activity_bar;
 pub mod icons;
 pub mod mining;
+pub mod services_view;
 pub mod settings_view;
 pub mod state;
 pub mod status_bar;
@@ -23,6 +24,7 @@ pub use mining::poll_dag_exec_task;
 pub use mining::release_all_debug_sessions;
 pub use mining::try_spawn_pending_dag_exec;
 pub use settings_view::view_settings;
+pub use services_view::view_services;
 pub use status_bar::view_status_bar;
 pub use title_bar::view_title_bar;
 
