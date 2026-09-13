@@ -384,6 +384,42 @@ pub fn accent_border() -> Border {
     }
 }
 
+/// 卡片内文本输入框样式工厂，返回 `text_input.style(...)` 用的闭包。
+///
+/// 视觉约定（石墨 v3 配色）：
+/// - 背景：稍亮于 card_bg 的输入域（#1F2127），与卡片底色拉开层次
+/// - 边框：默认 card_stroke，聚焦时切到 accent_teal 并加 1.5px 描边
+/// - 圆角：WIDGET_ROUNDING，与按钮、徽章统一
+/// - 文字色：text_strong；占位符：text_weak
+pub fn cool_text_input_style(
+) -> impl Fn(&iced::Theme, iced::widget::text_input::Status) -> iced::widget::text_input::Style + 'static {
+    move |_t, status| {
+        let mut s = iced::widget::text_input::Style {
+            background: Color::from_rgb8(31, 33, 39).into(), // #1F2127
+            border: Border {
+                radius: WIDGET_ROUNDING.into(),
+                width: 1.0,
+                color: card_stroke(),
+            },
+            icon: text_weak(),
+            placeholder: text_weak(),
+            value: text_strong(),
+            selection: accent_teal(),
+        };
+        match status {
+            iced::widget::text_input::Status::Focused { .. } => {
+                s.border.color = accent_teal();
+                s.border.width = 1.5;
+            }
+            iced::widget::text_input::Status::Hovered => {
+                s.border.color = accent_dim();
+            }
+            _ => {}
+        }
+        s
+    }
+}
+
 // ===== 科技风滚动条 =====
 //
 // 视觉层次（石墨 v3 配色）：

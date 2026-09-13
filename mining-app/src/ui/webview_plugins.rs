@@ -279,7 +279,10 @@ impl PluginRegistry {
     }
 
     /// 按当前注册表动态拼装完整菜单页 HTML。
-    pub fn render_page(&self) -> String {
+    ///
+    /// `brand` 用于替换模板中的 `{{APP_NAME}}` / `{{LOGO_INITIAL}}` 占位符，
+    /// 让设置页改名后下次进入 WebView 视图即生效（每次 build 都重新 render）。
+    pub fn render_page(&self, brand: &crate::config::BrandConfig) -> String {
         let header_html: String = self
             .plugins
             .iter()
@@ -328,6 +331,9 @@ impl PluginRegistry {
             .replace("__HEADER_SLOT__", &header_html)
             .replace("__CARDS__", &cards_html)
             .replace("__PLUGIN_SCRIPTS__", &scripts_html)
+            // 品牌占位符替换：app_name 空值回退 "青萝"；logo_initial 取首字符
+            .replace("{{APP_NAME}}", brand.effective_app_name())
+            .replace("{{LOGO_INITIAL}}", &brand.logo_initial_char().to_string())
     }
 }
 
@@ -757,13 +763,16 @@ fn sanitize_script(s: &str) -> String {
 // ===== 页面模板 =====
 
 /// 菜单外壳模板：CSS + 顶栏插槽 + 卡片容器 + 公共运行时（window.qinglo）。
-/// 占位符：`__HEADER_SLOT__` / `__CARDS__` / `__PLUGIN_SCRIPTS__`。
+/// 占位符：
+/// - `__HEADER_SLOT__` / `__CARDS__` / `__PLUGIN_SCRIPTS__`：插件内容插槽；
+/// - `{{APP_NAME}}` / `{{LOGO_INITIAL}}`：品牌占位符，由 `render_page` 按当前
+///   `BrandConfig` 替换，让用户在设置页改名后下次进入 WebView 视图即生效。
 const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>青萝 · WebView 菜单</title>
+<title>{{APP_NAME}} · WebView 菜单</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -867,9 +876,9 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
 <body>
 <div class="app">
   <header class="topbar">
-    <div class="logo">萝</div>
+    <div class="logo">{{LOGO_INITIAL}}</div>
     <div>
-      <h1>青萝 · WebView 菜单 <span class="tag">插件化</span></h1>
+      <h1>{{APP_NAME}} · WebView 菜单 <span class="tag">插件化</span></h1>
       <div class="sub">菜单项即插件 — 可组合 · 可收缩 · 可动态扩展</div>
     </div>
     <div class="spacer"></div>

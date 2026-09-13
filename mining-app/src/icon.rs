@@ -1,4 +1,4 @@
-//! 应用图标：纯代码绘制，零外部资源依赖
+//! 应用图标：纯代码绘制 + 可选文件加载
 //!
 //! 设计说明：
 //! - 128×128 RGBA 位图，运行时由代码直接栅格化，启动即用。
@@ -7,17 +7,103 @@
 //!   呈"数据挖掘/分析"的上升趋势意象，契合"挖掘分析"主题。
 //! - 配色沿用蓝→绿渐变（#007AFF → #34C759），与标题栏 logo 视觉一致。
 //! - 设计稿基于 24×24 坐标系，按比例缩放到 128×128 画布；图标为静态帧（无动画）。
-//! - 对外接口 `create_app_icon()` 保持不变，调用方无需改动。
+//! - 对外入口 `create_app_icon_from(&LogoSource)`：
+//!     * `LogoSource::Default` → 走纯代码折线图；
+//!     * `LogoSource::File(path)` → 用 `image` crate 解码 png/jpg 到 RGBA，
+//!       按需 resize 到 128×128（image crate 自带 lanczos 滤波，质量足够）。
+//!   旧入口 `create_app_icon()` 保留为 `create_app_icon_from(&Default)` 别名，
+//!   兼容既有调用方。
+
+use crate::config::{BrandConfig, LogoSource};
 
 /// 图标边长（像素）
 const ICON_SIZE: u32 = 128;
 
-/// 创建应用图标（128×128 RGBA）。
+/// 创建应用图标，按品牌配置的 Logo 来源分派。
 ///
-/// 从 egui 迁移到 Iced 后，返回类型由 `egui::IconData` 改为
-/// `Option<iced::window::Icon>`：内部仍按 24×24 设计坐标系栅格化 RGBA，
-/// 再交给 `iced::window::icon::from_rgba` 构造窗口图标。
+/// - `LogoSource::Default` → 纯代码折线图（默认）；
+/// - `LogoSource::File` + `brand.effective_logo_path()` → 解码 png/jpg →
+///   居中裁剪/缩放到 128×128 → RGBA。
+///
+/// 文件不存在 / 解码失败时回退到默认折线图，并 `eprintln!` 一行错误日志，
+/// 不阻断启动。路径解析：绝对路径直接用；相对路径按 exe 同级目录解析。
+pub fn create_app_icon_from(brand: &BrandConfig) -> Option<iced::window::Icon> {
+    match brand.logo {
+        LogoSource::Default => create_default_icon(),
+        LogoSource::File => {
+            let path = match brand.effective_logo_path() {
+                Some(p) => p,
+                None => {
+                    eprintln!("[icon] LogoSource::File 但路径为空, 回退默认图标");
+                    return create_default_icon();
+                }
+            };
+            create_icon_from_file(path).or_else(|| {
+                eprintln!("[icon] 从文件加载 Logo 失败 ({}), 回退默认图标", path);
+                create_default_icon()
+            })
+        }
+    }
+}
+
+/// 旧入口别名：等价于 `create_app_icon_from(&BrandConfig::default())`。
+/// 保留以兼容既有调用方。
+#[allow(dead_code)]
 pub fn create_app_icon() -> Option<iced::window::Icon> {
+    create_default_icon()
+}
+
+/// 从图片文件解码并构造 128×128 窗口图标。
+///
+/// 仅支持 png/jpeg（Cargo.toml 中 `image` 只启用这两个 features，避免拉入
+/// 一堆 codec）。.ico 大多数实为 png 内嵌，能被 png decoder 正确读取；
+/// 非 png 的真 ico 会失败回退默认图标。
+fn create_icon_from_file(path: &str) -> Option<iced::window::Icon> {
+    use std::io::BufReader;
+    use std::path::PathBuf;
+
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 相对路径按 exe 同级目录解析
+    let resolved = if std::path::Path::new(trimmed).is_absolute() {
+        PathBuf::from(trimmed)
+    } else if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        exe_dir.join(trimmed)
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    let file = std::fs::File::open(&resolved).ok()?;
+    let reader = BufReader::new(file);
+
+    // 用 image crate 的 Reader：按扩展名 / 内容自动选择 png/jpeg decoder
+    let img = image::io::Reader::new(reader)
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+
+    // 转 RGBA8 + resize 到 128×128（image resize 自带 lanczos 滤波）
+    let resized = image::imageops::resize(
+        &img.to_rgba8(),
+        ICON_SIZE,
+        ICON_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let rgba_bytes = resized.into_raw();
+    debug_assert_eq!(rgba_bytes.len() as u32, ICON_SIZE * ICON_SIZE * 4);
+
+    iced::window::icon::from_rgba(rgba_bytes, ICON_SIZE, ICON_SIZE).ok()
+}
+
+/// 纯代码折线图图标（默认 Logo）。
+fn create_default_icon() -> Option<iced::window::Icon> {
     // 与 main.rs::render_logo 保持一致的 24×24 设计坐标系
     const LOGO_DESIGN_SIZE: f32 = 24.0;
     let canvas = ICON_SIZE as f32;

@@ -16,7 +16,7 @@
 //! 不使用匿名闭包（闭包的 lifetime 注解经常导致 "implementation of FnOnce is not
 //! general enough"）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use iced::window;
@@ -50,7 +50,10 @@ fn main() -> iced::Result {
         min_size: Some(Size::new(980.0, 640.0)),
         resizable: true,
         decorations: false,
-        icon: mining_app::icon::create_app_icon(),
+        // 窗口图标按磁盘配置加载：默认走纯代码折线图，用户在设置页
+        // 选了「从文件加载」则解码 png/jpg → RGBA。仅启动时生效，
+        // 运行时改 LogoSource 需重启进程。
+        icon: mining_app::icon::create_app_icon_from(&mining_app::config::load_brand()),
         ..Default::default()
     };
 
@@ -92,16 +95,36 @@ impl MyApp {
         let task = iced::window::oldest()
             .map(Message::SetMainWindowId);
         let mut state = UiState::default();
-        // 启动时从磁盘配置读取 hide_mining，写入 SettingsState，
-        // 让活动栏首帧即按用户上次选择渲染（不闪一下挖掘按钮）。
+        // 启动时从磁盘配置一次性读入 hide_mining 与品牌配置：
+        // - hide_mining 写入 SettingsState，让活动栏首帧即按用户上次选择渲染
+        //   （不闪一下挖掘按钮）；
+        // - brand 同时写入 settings.brand（草稿，供设置页输入框回填）与
+        //   brand_snapshot（只读快照，供 title / view_title_bar 即时引用，
+        //   避免每次 view 都读盘）。设置页「应用并保存」后会刷新这两处。
         if let Ok(cfg) = mining_app::config::load_config() {
             state.settings.hide_mining = cfg.hide_mining;
+            state.settings.brand = cfg.brand.clone();
+            state.brand_snapshot = cfg.brand;
+        } else {
+            // 配置读取失败也兜底：从 load_brand 走默认值链路
+            let brand = mining_app::config::load_brand();
+            state.settings.brand = brand.clone();
+            state.brand_snapshot = brand;
         }
+        // 同步初始化设置页输入框草稿值（用 effective_* 的回退结果回填，
+        // 让用户看到「当前生效的值」而非 Option 的原始字符串）
+        let b = &state.settings.brand;
+        state.settings.brand_name_input = b.app_name.clone().unwrap_or_default();
+        state.settings.brand_subtitle_input = b.subtitle.clone().unwrap_or_default();
+        state.settings.brand_logo_path_input = b.logo_path.clone().unwrap_or_default();
         (state, task)
     }
 
-    fn title(_state: &UiState) -> String {
-        "青萝".to_string()
+    fn title(state: &UiState) -> String {
+        // 引用 brand_snapshot 即时返回当前生效的应用名；BrandApply 后
+        // 立刻刷新 snapshot，下一帧 title 即变。空值由 effective_app_name
+        // 兜底为 "青萝"。
+        state.brand_snapshot.effective_app_name().to_string()
     }
 
     fn update(state: &mut UiState, message: Message) -> Task<Message> {
@@ -143,7 +166,22 @@ impl MyApp {
                 state.logo_time += 0.5;
                 // 轮询网页菜单 JS → Rust IPC
                 #[cfg(windows)]
-                handle_webview_ipc(state);
+                {
+                    handle_webview_ipc(state);
+                    // 网页层后台预热：启动约 2.5s 后的空闲期静默创建
+                    // WebView2，把冷启动开销移出首次点击路径。DAG 执行中
+                    // 跳过本拍，避免与运行动画争抢主线程。
+                    let busy = state
+                        .dag_editor
+                        .active_tab()
+                        .map_or(false, |tab| tab.io_registry.has_executing());
+                    if !busy {
+                        state.webview_menu.prewarm_on_tick(
+                            state.current_view == ViewType::WebViewMenu,
+                            &state.brand_snapshot,
+                        );
+                    }
+                }
             }
             Message::AnimTick => {
                 // 高频轮询执行任务，及时回填节点状态（与主 Tick 合并 poll 无副作用）
@@ -195,17 +233,26 @@ impl MyApp {
             Message::WebViewWindowSize(size) => {
                 #[cfg(windows)]
                 {
+                    let inside = state.current_view == ViewType::WebViewMenu;
                     if state.webview_menu.is_ready() {
-                        // 再次进入：仅校准矩形并确保可见
+                        // 已创建：校准矩形；仅在用户正查看网页视图时显示
                         state.webview_menu.set_size(size);
-                        state.webview_menu.show();
-                        state.webview_error = None;
-                    } else if let Err(e) = state.webview_menu.build(size) {
-                        state.webview_error = Some(e);
+                        if inside {
+                            state.webview_menu.show();
+                            state.webview_error = None;
+                        }
+                    } else if inside {
+                        // 用户已进入视图：立即创建并显示
+                        if let Err(e) = state.webview_menu.build(size, &state.brand_snapshot) {
+                            state.webview_error = Some(e);
+                        } else {
+                            state.webview_error = None;
+                            // popup 创建时无 WS_VISIBLE，build 成功后立即显示
+                            state.webview_menu.show();
+                        }
                     } else {
-                        state.webview_error = None;
-                        // 首次创建：popup 创建时无 WS_VISIBLE，build 成功后立即显示
-                        state.webview_menu.show();
+                        // 启动预热链路：只缓存尺寸，静默创建交给 Tick 倒计时
+                        state.webview_menu.cache_size(size);
                     }
                 }
                 #[cfg(not(windows))]
@@ -231,6 +278,16 @@ impl MyApp {
             }
             Message::SetMainWindowId(id) => {
                 state.main_window_id = id;
+                // 启动即预热网页层：先取 HWND（回填后顺带查尺寸），
+                // 使用户首次点击「网页」前句柄链路已走完。
+                #[cfg(windows)]
+                if let Some(win_id) = id {
+                    return iced::window::run(
+                        win_id,
+                        mining_app::ui::webview_menu::WebViewMenu::extract_hwnd,
+                    )
+                    .map(Message::WebViewHwnd);
+                }
             }
             Message::WindowClose => {
                 if let Some(id) = state.main_window_id {
@@ -575,6 +632,82 @@ impl MyApp {
                     state.current_view = ViewType::Settings;
                 }
             }
+
+            // ===== 品牌与外观：输入框草稿（不立即落盘，只改 SettingsState 内存值） =====
+
+            Message::BrandNameInput(s) => {
+                state.settings.brand_name_input = s;
+            }
+            Message::BrandSubtitleInput(s) => {
+                state.settings.brand_subtitle_input = s;
+            }
+            Message::BrandLogoPathInput(s) => {
+                state.settings.brand_logo_path_input = s;
+                // 路径同步刷新 brand.logo_path（File 模式下生效）
+                let trimmed = state.settings.brand_logo_path_input.trim().to_string();
+                state.settings.brand.logo_path = if trimmed.is_empty() { None } else { Some(trimmed) };
+            }
+            Message::BrandLogoDefault => {
+                // 切换到默认折线图：清掉 File 路径字段
+                state.settings.brand.logo = mining_app::config::LogoSource::Default;
+                state.settings.brand_logo_path_input.clear();
+                state.settings.brand.logo_path = None;
+                state.settings.last_result = Some((true, "已切到默认图标，重启后生效".to_string()));
+            }
+            Message::BrandLogoFilePick => {
+                // 切换到 File 模式 + 打开文件选择对话框
+                state.settings.brand.logo = mining_app::config::LogoSource::File;
+                // rfd 异步打开文件对话框，返回 Task<PathBuf>，
+                // resolve 后由 BrandLogoFilePicked 回填
+                return open_logo_file_dialog();
+            }
+            Message::BrandLogoFilePicked(path) => {
+                // 文件对话框回调：把选中路径写入输入框 + brand.logo_path
+                let p = path.to_string_lossy().to_string();
+                state.settings.brand_logo_path_input = p.clone();
+                state.settings.brand.logo = mining_app::config::LogoSource::File;
+                state.settings.brand.logo_path = if p.is_empty() { None } else { Some(p) };
+                state.settings.last_result = Some((true, "已选择 Logo 文件，点击应用并保存生效".to_string()));
+            }
+            Message::BrandTitleLogoChange(mode) => {
+                // 切换标题栏 Logo 样式：草稿立即生效（不落盘，需用户点应用才固化）
+                state.settings.brand.title_logo = mode;
+                // 但 brand_snapshot 也立即同步，让标题栏即时刷新
+                state.brand_snapshot.title_logo = mode;
+                state.settings.last_result = Some((true, "标题栏 Logo 样式已即时切换".to_string()));
+            }
+            Message::BrandApply => {
+                // 把所有输入框草稿合并到 brand，落盘 + 刷新 snapshot
+                let name = state.settings.brand_name_input.trim().to_string();
+                let sub = state.settings.brand_subtitle_input.trim().to_string();
+                state.settings.brand.app_name = if name.is_empty() { None } else { Some(name) };
+                state.settings.brand.subtitle = if sub.is_empty() { None } else { Some(sub) };
+                // logo_path 与 logo 在各自消息中已更新到 brand
+                // logo_path 草稿兜底：从 brand_logo_path_input 同步
+                let path_trim = state.settings.brand_logo_path_input.trim().to_string();
+                state.settings.brand.logo_path = if path_trim.is_empty() { None } else { Some(path_trim) };
+
+                let brand_clone = state.settings.brand.clone();
+                let apply_msg = match mining_app::config::save_brand(&brand_clone) {
+                    Ok(()) => {
+                        // 落盘成功：刷新 snapshot 让 title / 标题栏 / WebView 即时生效
+                        state.brand_snapshot = brand_clone;
+                        "品牌设置已应用：标题栏与窗口标题即时生效".to_string()
+                    }
+                    Err(e) => format!("品牌保存失败：{e}"),
+                };
+                let ok = !apply_msg.starts_with("品牌保存失败");
+                state.settings.last_result = Some((ok, apply_msg));
+            }
+            Message::BrandReset => {
+                // 恢复默认：清空所有输入框 + 重置 brand + 重置 brand_snapshot
+                state.settings.brand = mining_app::config::BrandConfig::default();
+                state.settings.brand_name_input.clear();
+                state.settings.brand_subtitle_input.clear();
+                state.settings.brand_logo_path_input.clear();
+                state.brand_snapshot = state.settings.brand.clone();
+                state.settings.last_result = Some((true, "已恢复默认品牌设置".to_string()));
+            }
         }
         Task::none()
     }
@@ -592,10 +725,8 @@ impl MyApp {
                     "WebView 菜单加载失败",
                     e,
                 ),
-                None => mining_app::ui::placeholder_view(
-                    "WebView 菜单（插件化）",
-                    "网页层加载中……菜单功能正由插件注册表动态组装；若长时间未显示，请查看 %TEMP%\\qinglo_webview_menu.log",
-                ),
+                // WebView2 透明控制器首帧到达前会透出这层加载视图
+                None => mining_app::ui::webview_loading_view(state.anim_time),
             },
         };
 
@@ -666,9 +797,18 @@ impl MyApp {
             _ => None,
         });
 
+        // 网页层冷加载中也订阅高频 Tick，驱动加载页 spinner 旋转
+        // （WebView2 就绪后即停止，避免常驻开销）。
+        #[cfg(windows)]
+        let webview_loading = state.current_view == ViewType::WebViewMenu
+            && state.webview_error.is_none()
+            && !state.webview_menu.is_ready();
+        #[cfg(not(windows))]
+        let webview_loading = false;
+
         let mut subs = vec![base, keyboard, resize, moved];
-        if needs_anim {
-            // DAG 执行中追加高频动画 Tick（80ms）
+        if needs_anim || webview_loading {
+            // DAG 执行中 / 网页加载中追加高频动画 Tick（80ms）
             subs.push(
                 iced::time::every(Duration::from_millis(80)).map(|_| Message::AnimTick),
             );
@@ -704,21 +844,71 @@ impl MyApp {
 //
 // 再次进入时 webview 已存在，直接 set_visible(true) 并校准 bounds。
 
+/// 「选择 Logo 文件」按钮触发的文件对话框。
+///
+/// 用 rfd 异步打开（与编译目录选择等一致），过滤 png/jpg/ico 三种扩展名。
+/// 选中的路径通过 `BrandLogoFilePicked(PathBuf)` 回填到 update。
+fn open_logo_file_dialog() -> Task<Message> {
+    use rfd::AsyncFileDialog;
+
+    let dialog = AsyncFileDialog::new()
+        .set_title("选择 Logo 图片")
+        .add_filter("图片文件", &["png", "jpg", "jpeg", "ico"])
+        .add_filter("所有文件", &["*"]);
+
+    // rfd::AsyncFileDialog.pick_file() 返回 Future<Output = Option<FileHandle>>；
+    // iced Task::perform 把它包成 Task，resolve 后通过 map 转成 Message。
+    // 这里用 iced::Task::perform 而非裸闭包，让 iced 调度器驱动 future。
+    iced::Task::perform(
+        async move { dialog.pick_file().await },
+        |maybe_handle| match maybe_handle {
+            Some(handle) => Message::BrandLogoFilePicked(PathBuf::from(handle.path())),
+            None => Message::BrandLogoFilePicked(PathBuf::new()),
+        },
+    )
+}
+
 /// 进入网页菜单视图：已创建则显示，否则启动「取 HWND → 取尺寸 → 创建」链路。
+///
+/// 启动预热通常已把 HWND / 尺寸 / WebView2 全部备好，这里按就绪程度走
+/// 最快路径：ready → 只 show；HWND+尺寸就绪 → 同步 build+show（零 Task
+/// 往返）；只有 HWND → 补查尺寸；都没有 → 从头取句柄。
 #[cfg(windows)]
 fn enter_webview_menu(state: &mut UiState) -> Task<Message> {
     use mining_app::ui::webview_menu::WebViewMenu;
 
-    let ready = state.webview_menu.is_ready();
-    if ready {
+    if state.webview_menu.is_ready() {
         state.webview_menu.show();
+        return match state.main_window_id {
+            Some(id) => iced::window::size(id).map(Message::WebViewWindowSize),
+            None => Task::none(),
+        };
     }
+
+    if state.webview_menu.has_hwnd() {
+        if let Some(size) = state.webview_menu.cached_size() {
+            // 预热已缓存句柄与尺寸：当前帧直接创建，省掉两次异步往返
+            match state.webview_menu.build(size, &state.brand_snapshot) {
+                Ok(()) => {
+                    state.webview_error = None;
+                    state.webview_menu.show();
+                }
+                Err(e) => state.webview_error = Some(e),
+            }
+            return Task::none();
+        }
+        // HWND 已取到、尺寸查询还在途：补一次尺寸查询，回填消息会
+        // 识别到用户已在视图内并立即 build + show。
+        if let Some(id) = state.main_window_id {
+            return iced::window::size(id).map(Message::WebViewWindowSize);
+        }
+    }
+
     match state.main_window_id {
-        Some(id) if !ready => {
+        Some(id) => {
             // 回调返回 Send 的 Option<isize>，不跨线程传递任何 !Send 资源
             iced::window::run(id, WebViewMenu::extract_hwnd).map(Message::WebViewHwnd)
         }
-        Some(id) => iced::window::size(id).map(Message::WebViewWindowSize),
         None => Task::none(),
     }
 }

@@ -5,6 +5,14 @@
 //! - Logo 尺寸增大，末点用青蓝 (Cyan) 替代纯绿，更贴合 v2 配色
 //! - 控制按钮圆角胶囊样式，关闭按钮 hover 渐变色
 //! - 分隔线改为渐变弱化条
+//!
+//! 品牌化改造（2026-09）：
+//! - 应用名 / 副标题徽标 / Logo 样式均按 `state.brand_snapshot` 即时渲染；
+//! - `TitleLogo::Sparkline` → 现有折线 canvas 动画；
+//! - `TitleLogo::Initial` → 单字文字（取 app_name 首字，居中放置）；
+//! - `TitleLogo::ImageFile` → 与 `LogoSource::File` 共用图片路径，
+//!   用 `image::Handle::from_path` 直接交给 iced image widget（GPU 上传一次缓存）。
+//!   图片解码失败时静默回退到 Sparkline，避免标题栏空白。
 
 use iced::widget::canvas;
 use iced::widget::canvas::stroke::{self, Stroke};
@@ -17,7 +25,7 @@ use iced::{
 // iced_aw Badge 替换手搓徽章容器，提升视觉质感。
 use iced_aw::widget::badge::Badge;
 
-use super::state::{Message, UiState};
+use super::state::{Message, TitleLogo, UiState};
 use super::theme;
 
 const TITLE_BAR_HEIGHT: f32 = 40.0;
@@ -26,27 +34,76 @@ const CTRL_BTN_WIDTH: f32 = 46.0;
 const DIVIDER_HEIGHT: f32 = 1.0;
 
 pub fn view_title_bar(state: &UiState) -> Element<'_, Message> {
-    let logo = canvas(LogoProgram {
-        time: state.logo_time,
-    })
-    .width(Length::Fixed(LOGO_SIZE))
-    .height(Length::Fixed(LOGO_SIZE));
+    // Logo 渲染按 brand_snapshot.title_logo 分支：
+    // - Sparkline: 折线 canvas 动画（默认，带呼吸效果）
+    // - Initial: 单字文字（取 app_name 首字符，无动画）
+    // - ImageFile: 用 iced Image widget 加载 LogoSource::File 指定的图片；
+    //   无路径 / 文件不可用时回退 Sparkline。
+    let logo: Element<'_, Message> = match &state.brand_snapshot.title_logo {
+        TitleLogo::Sparkline => canvas(LogoProgram {
+            time: state.logo_time,
+        })
+        .width(Length::Fixed(LOGO_SIZE))
+        .height(Length::Fixed(LOGO_SIZE))
+        .into(),
+        TitleLogo::Initial => {
+            let ch = state.brand_snapshot.logo_initial_char();
+            container(
+                text(ch.to_string())
+                    .color(theme::accent_teal())
+                    .font(Font::with_name("Microsoft YaHei"))
+                    .size(18.0),
+            )
+            .width(Length::Fixed(LOGO_SIZE))
+            .height(Length::Fixed(LOGO_SIZE))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
+        }
+        TitleLogo::ImageFile => {
+            use iced::widget::image;
+            match state.brand_snapshot.effective_logo_path() {
+                Some(path) => {
+                    // 用 from_path 让 iced 内部缓存解码结果，路径变更时
+                    // 自动重新解码（Handle::Path 在 widget 比较 时按路径判等）。
+                    image(image::Handle::from_path(path))
+                        .width(Length::Fixed(LOGO_SIZE))
+                        .height(Length::Fixed(LOGO_SIZE))
+                        .into()
+                }
+                // ImageFile 模式但无有效路径：回退 Sparkline
+                None => canvas(LogoProgram {
+                    time: state.logo_time,
+                })
+                .width(Length::Fixed(LOGO_SIZE))
+                .height(Length::Fixed(LOGO_SIZE))
+                .into(),
+            }
+        }
+    };
 
-    let app_name = text("青萝")
+    // 应用名：空值回退 "青萝"
+    let app_name = text(state.brand_snapshot.effective_app_name().to_string())
         .color(theme::text_strong())
         .font(Font::with_name("Microsoft YaHei"))
         .size(14.0);
 
-    // iced_aw::Badge 替换手搓容器：青蓝弱化底 + 同色边框 + 胶囊圆角。
-    let badge = Badge::<Message>::new(
-        text("Quant IDE")
-            .color(theme::accent_teal())
-            .size(9.0),
-    )
-    .padding(6)
-    .style(theme::title_badge_style());
+    // 副标题徽标：空字符串 → 隐藏 Badge（不渲染占位）
+    let left_row = match state.brand_snapshot.effective_subtitle() {
+        Some(subtitle) => {
+            let badge = Badge::<Message>::new(
+                text(subtitle.to_string())
+                    .color(theme::accent_teal())
+                    .size(9.0),
+            )
+            .padding(6)
+            .style(theme::title_badge_style());
+            row![logo, app_name, badge]
+        }
+        None => row![logo, app_name],
+    };
 
-    let left = row![logo, app_name, badge]
+    let left = left_row
         .spacing(10)
         .align_y(Alignment::Center)
         .padding(Padding {

@@ -30,6 +30,13 @@ pub struct AppConfig {
     /// 修改并落盘，无需重新编译。
     #[serde(default)]
     pub hide_mining: bool,
+    /// 品牌与外观配置（应用名称 / 副标题 / Logo）。
+    ///
+    /// 用于在不同交付场景下重命名应用、更换 Logo，无需重新编译。
+    /// 启动时由 `boot` 一次性读入 `UiState.brand_snapshot` 供 view 即时引用；
+    /// 设置页「应用」按钮触发 `save_brand` 落盘并刷新 snapshot。
+    #[serde(default)]
+    pub brand: BrandConfig,
 }
 
 impl Default for AppConfig {
@@ -38,7 +45,113 @@ impl Default for AppConfig {
             rust_toolchain_path: None,
             compile_directory: None,
             hide_mining: false,
+            brand: BrandConfig::default(),
         }
+    }
+}
+
+/// 品牌与外观配置：应用名称、副标题徽标、Logo 来源。
+///
+/// 所有字段都带 `#[serde(default)]`，旧版 config.json 升级时缺失字段自动补默认，
+/// 零迁移成本。`effective_*` 方法统一处理「空值 = 用默认」语义。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrandConfig {
+    /// 应用显示名称。None 或空字符串 → 回退默认 "青萝"。
+    /// 生效位置：窗口标题、标题栏应用名、WebView 菜单 HTML。
+    #[serde(default)]
+    pub app_name: Option<String>,
+    /// 副标题徽标文字（标题栏应用名右侧的 Badge）。None 或空 → 隐藏徽标。
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    /// 任务栏 / 窗口图标来源。仅启动时生效（iced 0.14 不支持运行时改 window icon）。
+    #[serde(default)]
+    pub logo: LogoSource,
+    /// Logo 文件路径。仅 `LogoSource::File` 模式下生效，支持绝对路径或 exe 同级相对路径。
+    /// 单独存放是为了让 `LogoSource` 可 `Copy`（适配 iced radio 的 `V: Copy + Eq` 约束）。
+    #[serde(default)]
+    pub logo_path: Option<String>,
+    /// 标题栏左侧 Logo 渲染模式（即时生效）。
+    #[serde(default)]
+    pub title_logo: TitleLogo,
+}
+
+impl Default for BrandConfig {
+    fn default() -> Self {
+        Self {
+            app_name: None,
+            subtitle: Some("Quant IDE".to_string()),
+            logo: LogoSource::Default,
+            logo_path: None,
+            title_logo: TitleLogo::Sparkline,
+        }
+    }
+}
+
+impl BrandConfig {
+    /// 返回当前生效的应用名（空值回退 "青萝"）。
+    pub fn effective_app_name(&self) -> &str {
+        self.app_name
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("青萝")
+    }
+
+    /// 返回当前生效的副标题（空值返回 None，调用方据此决定是否渲染 Badge）。
+    pub fn effective_subtitle(&self) -> Option<&str> {
+        self.subtitle
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// 返回 Logo 首字（用于 `TitleLogo::Initial` 模式，取 app_name 首字符）。
+    /// 空字符串兜底返回 '青'。
+    pub fn logo_initial_char(&self) -> char {
+        self.effective_app_name().chars().next().unwrap_or('青')
+    }
+
+    /// 返回 Logo 文件路径（trim 后空字符串视为 None）。
+    /// 仅在 `LogoSource::File` 模式下使用。
+    pub fn effective_logo_path(&self) -> Option<&str> {
+        self.logo_path
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    }
+}
+
+/// 任务栏 / 窗口图标来源。无 payload 设计让类型可 `Copy`，
+/// 适配 iced `radio` 的 `V: Copy + Eq` 约束；具体文件路径存放在
+/// `BrandConfig::logo_path`。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogoSource {
+    /// 内置代码绘制的折线图图标（默认）。
+    Default,
+    /// 从图片文件加载（png / jpg）。路径取自 `BrandConfig::logo_path`。
+    File,
+}
+
+impl Default for LogoSource {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+/// 标题栏左侧 Logo 渲染模式（即时生效，无需重启）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TitleLogo {
+    /// 默认上升趋势折线图（带呼吸动画）。
+    Sparkline,
+    /// 单字文字 logo（取 app_name 首字，无动画）。
+    Initial,
+    /// 从图片文件加载（与 `LogoSource::File` 共用路径）。
+    ImageFile,
+}
+
+impl Default for TitleLogo {
+    fn default() -> Self {
+        Self::Sparkline
     }
 }
 
@@ -305,5 +418,27 @@ pub fn save_compile_directory(path: Option<String>) -> Result<(), ConfigError> {
 pub fn save_hide_mining(hide: bool) -> Result<(), ConfigError> {
     let mut config = load_config().unwrap_or_default();
     config.hide_mining = hide;
+    save_config(&config)
+}
+
+/// 仅读取配置中的品牌字段。文件缺失或读取失败返回默认值。
+///
+/// 由 `MyApp::boot` 启动时调用一次，写入 `UiState.brand_snapshot` 供
+/// `title` / `view_title_bar` 即时引用，避免每次 view 都读盘。
+pub fn load_brand() -> BrandConfig {
+    load_config()
+        .map(|c| c.brand)
+        .unwrap_or_default()
+}
+
+/// 仅更新配置中的 brand 字段，保留其它字段。
+///
+/// 由设置页「应用并保存」按钮触发：先落盘，再由调用方把传入的
+/// `brand` 克隆一份刷新 `UiState.brand_snapshot`（让 title / 标题栏
+/// 即时生效）。任务栏图标字段 `LogoSource` 因 iced 0.14 不支持
+/// 运行时改 window icon，需重启进程才生效。
+pub fn save_brand(brand: &BrandConfig) -> Result<(), ConfigError> {
+    let mut config = load_config().unwrap_or_default();
+    config.brand = brand.clone();
     save_config(&config)
 }

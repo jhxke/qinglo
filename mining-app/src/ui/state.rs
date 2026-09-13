@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 use iced::Rectangle;
@@ -9,6 +10,7 @@ use operator_executor_client::PortData;
 use operator_executor_client::runtime_client::DebugNodeMeta;
 use crate::mining::dag::{DagGraph, OperatorType, NodeIORegistry};
 use crate::mining::dag_store::{self, DagModelMeta, DagModelRecord};
+pub use crate::config::{BrandConfig, LogoSource, TitleLogo};
 
 use crate::mining::debug_executor::DebugDiagnostics;
 
@@ -331,6 +333,27 @@ pub enum Message {
     /// 3) 若开关从 false→true 且当前正在 MiningAnalysis 视图，
     ///    自动切换到 Settings 视图，避免用户停留在已裁掉的视图里。
     ToggleHideMining,
+
+    // ===== 设置页：品牌与外观 =====
+
+    /// 品牌设置：应用名输入框内容变化。
+    BrandNameInput(String),
+    /// 品牌设置：副标题徽标输入框内容变化。
+    BrandSubtitleInput(String),
+    /// 品牌设置：Logo 图片文件路径输入框内容变化。
+    BrandLogoPathInput(String),
+    /// 品牌设置：Logo 来源切到「默认折线图」（内置）。
+    BrandLogoDefault,
+    /// 品牌设置：Logo 来源切到「从文件加载」，并打开文件选择对话框。
+    BrandLogoFilePick,
+    /// 品牌设置：文件对话框回调，携带选中的 png/jpg 路径。
+    BrandLogoFilePicked(PathBuf),
+    /// 品牌设置：标题栏 Logo 样式切换（折线动画/文字首字/图片文件）。
+    BrandTitleLogoChange(TitleLogo),
+    /// 品牌设置：「应用并保存」按钮 → 落盘 + 刷新 brand_snapshot（即时生效）。
+    BrandApply,
+    /// 品牌设置：「恢复默认」按钮 → 重置为 BrandConfig::default()。
+    BrandReset,
 }
 
 /// 自定义算子编辑器的 Debug 面板状态。
@@ -347,6 +370,13 @@ pub struct UiState {
     pub current_view: ViewType,
     pub dag_editor: DagEditorState,
     pub settings: SettingsState,
+    /// 当前生效的品牌配置快照。由 `MyApp::boot` 启动时从 `config::load_brand()`
+    /// 一次性读入；设置页「应用并保存」后由 `BrandApply` 消息刷新。
+    ///
+    /// `title` 函数与 `view_title_bar` 直接引用此快照，避免每帧读盘。
+    /// 应用名 / 副标题 / 标题栏 Logo 样式即时生效；任务栏图标需重启进程
+    /// （iced 0.14 不支持运行时改 `window::Settings::icon`）。
+    pub brand_snapshot: BrandConfig,
     /// Logo 动画的累积时间（秒）。每 Tick (500ms) 推进 0.5。
     /// 标题栏 Canvas Program 据此计算折线最末点的呼吸 / 上升动画偏移。
     pub logo_time: f32,
@@ -384,6 +414,7 @@ impl Default for UiState {
             current_view: ViewType::MiningAnalysis,
             dag_editor: DagEditorState::default(),
             settings: SettingsState::default(),
+            brand_snapshot: BrandConfig::default(),
             logo_time: 0.0,
             anim_time: 0.0,
             main_window_id: None,
@@ -404,7 +435,10 @@ impl Default for UiState {
 /// `compile_dir_input` 是编译目录文本框中的内容（可能尚未保存）；
 /// `initialized` 用于首次进入设置页时从磁盘配置懒加载输入框内容；
 /// `hide_mining` 控制「挖掘」入口在活动栏是否可见，开关切换即时生效并落盘；
-/// `last_result` 记录最近一次「测试 / 保存 / 自动检测 / 切换挖掘入口」操作的结果。
+/// `last_result` 记录最近一次「测试 / 保存 / 自动检测 / 切换挖掘入口 / 品牌应用」操作的结果。
+///
+/// 品牌相关字段（`brand_*`）暂存设置页输入框草稿值，用户点击「应用并保存」
+/// 后由 `BrandApply` 把草稿合并写入 `brand` + `brand_snapshot` + 落盘。
 #[derive(Clone)]
 pub struct SettingsState {
     pub rust_path_input: String,
@@ -412,6 +446,18 @@ pub struct SettingsState {
     pub initialized: bool,
     pub hide_mining: bool,
     pub last_result: Option<(bool, String)>,
+
+    // ===== 品牌与外观 =====
+    /// 当前编辑中的品牌配置（草稿，尚未落盘）。
+    /// 由 `boot` 初始化为 `load_brand()` 的返回值；设置页输入框只改 `brand_*_input`
+    /// 字段，点「应用并保存」才合并到 `brand` 并刷新 `UiState.brand_snapshot`。
+    pub brand: BrandConfig,
+    /// 应用名输入框草稿值。空字符串视为「用默认 "青萝"」。
+    pub brand_name_input: String,
+    /// 副标题徽标输入框草稿值。空字符串视为「隐藏徽标」。
+    pub brand_subtitle_input: String,
+    /// Logo 图片文件路径输入框草稿值。仅 `LogoSource::File` 模式下生效。
+    pub brand_logo_path_input: String,
 }
 
 impl Default for SettingsState {
@@ -422,6 +468,10 @@ impl Default for SettingsState {
             initialized: false,
             hide_mining: false,
             last_result: None,
+            brand: BrandConfig::default(),
+            brand_name_input: String::new(),
+            brand_subtitle_input: String::new(),
+            brand_logo_path_input: String::new(),
         }
     }
 }

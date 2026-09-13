@@ -78,7 +78,17 @@ pub struct WebViewMenu {
     ipc_rx: Option<Receiver<String>>,
     /// 菜单插件注册表：内置插件 + 外部 `webview_plugins/` 扫描结果。
     registry: PluginRegistry,
+    /// 后台静默预热的剩余 Tick 数（由 500ms 低频 Tick 驱动）。
+    /// 归零且 HWND / 尺寸就绪时在后台创建 WebView2（不 show），把运行时
+    /// 冷启动的开销移出用户首次点击「网页」的交互路径。
+    prewarm_ticks_left: u8,
+    /// 是否已执行过预热尝试（成败都不再自动重试，避免反复拉起失败的运行时）。
+    prewarm_attempted: bool,
 }
+
+/// 启动后延迟多少个 500ms Tick 再静默创建 WebView2（≈2.5s）。
+/// 等主窗口 / 挖掘页首屏渲染稳定后再付出创建开销，用户基本无感。
+const PREWARM_DELAY_TICKS: u8 = 5;
 
 impl Default for WebViewMenu {
     fn default() -> Self {
@@ -91,6 +101,8 @@ impl Default for WebViewMenu {
             visible: false,
             ipc_rx: None,
             registry: PluginRegistry::load(),
+            prewarm_ticks_left: PREWARM_DELAY_TICKS,
+            prewarm_attempted: false,
         }
     }
 }
@@ -113,6 +125,73 @@ impl WebViewMenu {
         self.webview.is_some()
     }
 
+    /// 主窗口 HWND 是否已经取到（启动预热链路可能在用户点击前完成）。
+    pub fn has_hwnd(&self) -> bool {
+        self.hwnd != 0
+    }
+
+    /// 已缓存的主窗口逻辑尺寸（启动预热的 `window::size` 回填）。
+    /// HWND 已取到但尺寸尚未回填时返回 None。
+    pub fn cached_size(&self) -> Option<Size> {
+        if self.hwnd != 0 && self.width >= 1.0 && self.height >= 1.0 {
+            Some(Size::new(self.width, self.height))
+        } else {
+            None
+        }
+    }
+
+    /// 预热阶段只缓存窗口尺寸，不触发 relocate（popup 尚未创建，
+    /// `relocate` 内部也会直接返回）；等 `build` 时用它定位。
+    pub fn cache_size(&mut self, size: Size) {
+        self.width = size.width.max(1.0);
+        self.height = size.height.max(1.0);
+    }
+
+    /// 由 500ms 低频 Tick 驱动的后台预热。
+    ///
+    /// - `user_inside`：用户当前是否正停留在网页视图（是则跳过——交互
+    ///   进入链路自行负责创建，避免两条路径重复）；
+    /// - 倒计时期间只递减；HWND / 尺寸未就绪则原地等待；
+    /// - 归零后在当前 Tick 同步 `build`（popup 保持隐藏）。WebView2
+    ///   创建会阻塞主线程数百 ms，发生在启动 2.5s 后的空闲期，体感远
+    ///   好于点击后才加载；预热失败只记日志，用户真正进入时仍会重试。
+    pub fn prewarm_on_tick(
+        &mut self,
+        user_inside: bool,
+        brand: &crate::config::BrandConfig,
+    ) {
+        if user_inside
+            || self.prewarm_attempted
+            || self.webview.is_some()
+            || self.hwnd == 0
+        {
+            return;
+        }
+        if self.width < 1.0 || self.height < 1.0 {
+            // 尺寸查询尚未回填，保持倒计时不动，等下个 Tick 再看。
+            return;
+        }
+        if self.prewarm_ticks_left > 0 {
+            self.prewarm_ticks_left -= 1;
+            if self.prewarm_ticks_left > 0 {
+                return;
+            }
+        }
+        self.prewarm_attempted = true;
+        let size = Size::new(self.width, self.height);
+        let started = std::time::Instant::now();
+        diag("后台预热：开始静默创建 WebView2（popup 保持隐藏）……");
+        match self.build(size, brand) {
+            Ok(()) => diag(&format!(
+                "后台预热：WebView2 已就绪，耗时 {:.0}ms，首次进入将直接显示",
+                started.elapsed().as_millis()
+            )),
+            Err(e) => diag(&format!(
+                "后台预热失败（不打扰用户，手动进入时会重试）：{e}"
+            )),
+        }
+    }
+
     pub fn set_hwnd(&mut self, hwnd: isize) {
         self.hwnd = hwnd;
         diag(&format!("主窗口 HWND 已获取：{hwnd:#x}"));
@@ -129,7 +208,11 @@ impl WebViewMenu {
     }
 
     /// 首次创建 popup 宿主窗口 + 嵌入 WebView2（必须在主线程调用）。
-    pub fn build(&mut self, size: Size) -> Result<(), String> {
+    ///
+    /// `brand` 用于把当前生效的应用名 / Logo 首字注入到 WebView 菜单 HTML 模板
+    /// 占位符中。设置页改品牌后只需重新进入 WebView 视图（重新 build）即可刷新，
+    /// 不需要重启进程。
+    pub fn build(&mut self, size: Size, brand: &crate::config::BrandConfig) -> Result<(), String> {
         if self.webview.is_some() {
             return Ok(());
         }
@@ -150,8 +233,12 @@ impl WebViewMenu {
         ));
 
         // 1) 自建 WS_POPUP | WS_EX_NOREDIRECTIONBITMAP 顶级宿主窗口。
-        let popup_hwnd = self.create_popup()?;
-        self.popup_hwnd = popup_hwnd;
+        //    若上次 build 在创建 WebView2 前失败，popup 已存在则直接复用，
+        //    避免重复 CreateWindowEx 导致不可见宿主窗口泄漏。
+        if self.popup_hwnd == 0 {
+            self.popup_hwnd = self.create_popup()?;
+        }
+        let popup_hwnd = self.popup_hwnd;
 
         // SAFETY: popup 为本进程刚创建的有效窗口，webview 生命周期不超过它。
         let window_handle = unsafe {
@@ -161,7 +248,8 @@ impl WebViewMenu {
         };
 
         // 页面 HTML 由插件注册表动态拼装（内置插件 + 外部插件）。
-        let page_html = self.registry.render_page();
+        // brand 注入模板占位符 {{APP_NAME}} / {{LOGO_INITIAL}}。
+        let page_html = self.registry.render_page(brand);
 
         // 2) WebView2 作为 popup 的子窗口铺满整个 popup 客户区。
         let webview = WebViewBuilder::new()
@@ -448,7 +536,6 @@ impl WebViewMenu {
         let scale = if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 };
         let left = (LEFT_INSET * scale).round() as i32;
         let top = (TOP_INSET * scale).round() as i32;
-        let bottom = (BOTTOM_INSET * scale).round() as i32;
         let mut origin = POINT { x: left, y: top };
         unsafe {
             ClientToScreen(self.hwnd, &mut origin);

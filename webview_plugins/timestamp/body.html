@@ -1,0 +1,123 @@
+<style>
+  .p-ts-wrap { display: flex; flex-direction: column; gap: 14px; }
+
+  /* ===== 当前时间戳横幅 ===== */
+  .p-ts-now {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+    background: linear-gradient(135deg, rgba(14,116,144,.18), rgba(34,211,238,.07));
+    border: 1px solid #2E3138; border-radius: 10px; padding: 12px 16px;
+  }
+  .p-ts-now-label { font-size: 11px; color: #8C909B; display: block; margin-bottom: 2px; }
+  .p-ts-now-sec {
+    font-size: 24px; font-weight: 700; letter-spacing: 1px;
+    font-family: Consolas, "Courier New", monospace;
+    background: linear-gradient(90deg, #22D3EE, #67E8F9);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .p-ts-now-ms {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 14px; color: #8C909B; margin-left: 2px;
+  }
+  .p-ts-now-date { font-size: 12px; color: #D3D6DC; margin-top: 4px; }
+
+  /* ===== 双栏面板 ===== */
+  .p-ts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .p-ts-grid { grid-template-columns: 1fr; } }
+  .p-ts-panel {
+    background: #121316; border: 1px solid #2E3138;
+    border-radius: 10px; padding: 14px;
+  }
+  .p-ts-panel h3 {
+    font-size: 12px; font-weight: 600; color: #67E8F9;
+    margin: 0 0 10px; padding-left: 8px;
+    border-left: 3px solid #0891B2; line-height: 1.2;
+  }
+  .p-ts-panel select,
+  .p-ts-panel input[type="datetime-local"] {
+    background: #141519; border: 1px solid rgba(148,163,184,.3);
+    border-radius: 7px; color: #E9EBEF; color-scheme: dark;
+    padding: 7px 10px; font-size: 12px; outline: none;
+  }
+  .p-ts-panel input[type="datetime-local"] { width: 100%; }
+  .p-ts-panel select:focus,
+  .p-ts-panel input[type="datetime-local"]:focus {
+    border-color: rgba(34,211,238,.7);
+  }
+
+  /* ===== 结果行 ===== */
+  .p-ts-out { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; min-height: 20px; }
+  .p-ts-line { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .p-ts-line b { color: #8C909B; font-weight: 400; width: 78px; flex: none; }
+  .p-ts-line span { flex: 1; min-width: 0; color: #E9EBEF; word-break: break-all; }
+  .p-ts-mono {
+    font-family: Consolas, "Courier New", monospace;
+    color: #67E8F9 !important;
+  }
+  .p-ts-copy {
+    flex: none; border: 1px solid rgba(148,163,184,.25); background: transparent;
+    color: #8C909B; font-size: 11px; padding: 2px 8px;
+    border-radius: 5px; cursor: pointer; transition: all .15s;
+  }
+  .p-ts-copy:hover {
+    color: #67E8F9; border-color: rgba(34,211,238,.5);
+    background: rgba(34,211,238,.08);
+  }
+  .p-ts-hint { font-size: 12px; color: #8C909B; }
+  .p-ts-err { font-size: 12px; color: #F87171; }
+  .p-ts-meta { font-size: 11px; color: #8C909B; margin-top: 2px; }
+</style>
+
+<div class="p-ts-wrap" id="p-ts-wrap">
+
+  <!-- 当前时间戳（实时刷新） -->
+  <div class="p-ts-now">
+    <div>
+      <span class="p-ts-now-label">当前 Unix 时间戳（实时）</span>
+      <div>
+        <span id="p-ts-now-sec" class="p-ts-now-sec">0</span><span id="p-ts-now-ms" class="p-ts-now-ms">.000</span>
+        <button class="p-ts-copy" type="button" data-copy-id="p-ts-now-sec">复制秒</button>
+        <button class="p-ts-copy" type="button" data-copy-id="p-ts-now-msfull">复制毫秒</button>
+        <span id="p-ts-now-msfull" style="display:none"></span>
+      </div>
+      <div class="p-ts-now-date" id="p-ts-now-date">-</div>
+    </div>
+  </div>
+
+  <div class="p-ts-grid">
+
+    <!-- 时间戳 → 日期 -->
+    <section class="p-ts-panel">
+      <h3>时间戳 → 日期字符串</h3>
+      <div class="row">
+        <input class="txt" id="p-ts-ts-input" inputmode="numeric"
+               placeholder="粘贴时间戳，如 1789344000 或 1789344000000">
+        <select id="p-ts-ts-unit" title="时间戳单位">
+          <option value="auto">自动识别</option>
+          <option value="s">秒（10 位）</option>
+          <option value="ms">毫秒（13 位）</option>
+        </select>
+        <button class="action" id="p-ts-ts-now" type="button">此刻</button>
+      </div>
+      <div class="p-ts-out" id="p-ts-ts-out">
+        <div class="p-ts-hint">输入时间戳后自动转换，支持负时间戳（1970 年以前）</div>
+      </div>
+    </section>
+
+    <!-- 日期 → 时间戳 -->
+    <section class="p-ts-panel">
+      <h3>日期字符串 → 时间戳</h3>
+      <input type="datetime-local" id="p-ts-dt-picker" step="1">
+      <div class="row">
+        <input class="txt" id="p-ts-dt-text"
+               placeholder="也可直接输入：2026-09-13 12:00:00 或 2026-09-13T12:00:00+08:00">
+      </div>
+      <div class="row">
+        <button class="action" id="p-ts-dt-now" type="button">填入此刻并转换</button>
+      </div>
+      <div class="p-ts-out" id="p-ts-dt-out"></div>
+    </section>
+
+  </div>
+</div>
