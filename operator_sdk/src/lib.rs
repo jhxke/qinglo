@@ -236,7 +236,12 @@ pub fn find_runtime_dll() -> Option<PathBuf> {
 
     let possible_dirs: Vec<Option<PathBuf>> = vec![
         exe_dir.clone(),
+        // 发布包布局：operator_runtime.dll 统一放在 <exe 目录>/lib/public/
+        exe_dir.as_ref().map(|p| p.join("lib").join("public")),
         exe_dir.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf())),
+        exe_dir
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.join("lib").join("public"))),
         exe_dir
             .as_ref()
             .and_then(|p| p.parent().and_then(|p| p.parent().map(|p| p.to_path_buf()))),
@@ -244,6 +249,8 @@ pub fn find_runtime_dll() -> Option<PathBuf> {
         cwd.as_ref().map(|c| c.join("target").join("debug").join("deps")),
         cwd.as_ref().map(|c| c.join("target").join("release")),
         cwd.as_ref().map(|c| c.join("target").join("release").join("deps")),
+        // 开发布局（run_srv.ps1）：lib/public/ 下只放共享依赖
+        cwd.as_ref().map(|c| c.join("lib").join("public")),
         cwd.as_ref().map(|c| c.join("operator_runtime")),
     ];
 

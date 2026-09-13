@@ -8,19 +8,21 @@
 # Package layout:
 #   mining-app.exe                    GUI (statically linked, own target dir)
 #   operator_runtime_server.exe       TCP runtime server (prefer-dynamic)
-#   operator_runtime.dll              shared native runtime, must sit next
-#                                     to the server exe (DLL search priority)
-#   lib\<group>\<operator>\           operator dll + operator.json +
-#                                     operator_runtime.dll (same layout as
-#                                     run_srv.ps1)
+#   lib\public\operator_runtime.dll   shared native runtime, single copy;
+#                                     the app prepends lib\public to PATH when
+#                                     spawning the server, and the server also
+#                                     registers it as a DLL search directory
+#   lib\operator\<group>\<operator>\  operator dll + operator.json (same layout
+#                                     as run_srv.ps1)
 #   webview_plugins\                  external webview plugins (clock, ...)
 #   operator_runtime\                 runtime crate SOURCE, required by the
 #                                     in-app "compile custom operator" path
 #                                     (generated project uses a path dep)
 #   start.bat                         double-click launcher that pins CWD to
-#                                     the package root so the server resolves
-#                                     .\lib and find_runtime_path() finds
-#                                     .\operator_runtime
+#                                     the package root and prepends
+#                                     lib\public to PATH so the server resolves
+#                                     .\lib\operator and find_runtime_path()
+#                                     finds .\operator_runtime
 #
 # Independent CARGO_TARGET_DIRs (target_app / target_srv) mirror run_app.ps1
 # and run_srv.ps1, preventing operator_runtime.dll artifact conflicts.
@@ -172,10 +174,10 @@ Write-Host "`n===== Staging package -> $stage =====" -ForegroundColor Green
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-# 5a. Binaries + shared runtime DLL.
+# 5a. Binaries. operator_runtime.dll goes to lib\public\ below (single shared
+#     copy), NOT next to the exes.
 Copy-Item $appExe $stage
 Copy-Item $srvExe $stage
-Copy-Item $runtimeDll $stage
 
 # Ship wry/WebView2 native helper if cargo emitted one next to the app exe.
 $appNative = Join-Path $appTarget "WebView2Loader.dll"
@@ -220,8 +222,17 @@ if ($vcr -and (Test-Path $vcr.Source)) {
     Write-Host "NOTE: vcruntime140.dll not found on PATH; target machine needs VC++ Redistributable x64." -ForegroundColor DarkYellow
 }
 
-# 5b. Operator library tree: lib\<group>\<dir>\{<name>.dll, operator.json,
-#     operator_runtime.dll}. Mirrors run_srv.ps1 exactly.
+# 5b. Shared native runtime: single copy under lib\public\. The GUI prepends
+#     this directory to PATH when spawning the server (so the server's own
+#     import of operator_runtime.dll resolves), and the server additionally
+#     registers it via SetDllDirectory for operator DLL dependencies.
+$publicDir = Join-Path $stage "lib\public"
+New-Item -ItemType Directory -Path $publicDir -Force | Out-Null
+Copy-Item $runtimeDll $publicDir
+Write-Host "  lib\public\operator_runtime.dll" -ForegroundColor DarkGray
+
+# 5c. Operator library tree: lib\operator\<group>\<dir>\{<name>.dll,
+#     operator.json}. Mirrors run_srv.ps1 exactly.
 $missing = 0
 $grouped = [ordered]@{}
 foreach ($op in $operators) {
@@ -229,9 +240,10 @@ foreach ($op in $operators) {
     $grouped[$op.Group] += $op
 }
 
+$operatorTree = Join-Path $stage "lib\operator"
 foreach ($groupEntry in $grouped.GetEnumerator()) {
     foreach ($op in $groupEntry.Value) {
-        $destDir = Join-Path $stage ("lib\" + $groupEntry.Key + "\" + $op.Dir)
+        $destDir = Join-Path $operatorTree ($groupEntry.Key + "\" + $op.Dir)
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
 
         $opDll  = Join-Path $srvDeps ($op.Name + ".dll")
@@ -241,19 +253,18 @@ foreach ($groupEntry in $grouped.GetEnumerator()) {
 
         Copy-Item $opDll $destDir
         Copy-Item $opJson $destDir
-        Copy-Item $runtimeDll $destDir
-        Write-Host ("  lib\{0}\{1}" -f $groupEntry.Key, $op.Dir) -ForegroundColor DarkGray
+        Write-Host ("  lib\operator\{0}\{1}" -f $groupEntry.Key, $op.Dir) -ForegroundColor DarkGray
     }
 }
 if ($missing -gt 0) { Write-Host "$missing operator(s) missing, abort." -ForegroundColor Red; exit 1 }
 
-# 5c. External webview plugins (loaded from exe-dir\webview_plugins).
+# 5d. External webview plugins (loaded from exe-dir\webview_plugins).
 $pluginsSrc = Join-Path $root "webview_plugins"
 if (Test-Path $pluginsSrc) {
     Copy-Item $pluginsSrc (Join-Path $stage "webview_plugins") -Recurse
 }
 
-# 5d. operator_runtime crate source: the in-app "compile and execute"
+# 5e. operator_runtime crate source: the in-app "compile and execute"
 #     feature generates a cargo project with a path dependency on it.
 #     Ship Cargo.toml + src only (no target/).
 $rtSrc = Join-Path $root "operator_runtime"
@@ -262,12 +273,15 @@ New-Item -ItemType Directory -Path (Join-Path $rtDst "src") -Force | Out-Null
 Copy-Item (Join-Path $rtSrc "Cargo.toml") $rtDst
 Copy-Item (Join-Path $rtSrc "src\*.rs") (Join-Path $rtDst "src")
 
-# 5e. Launcher: pin CWD to the package root so the auto-spawned server
-#     resolves .\lib (RUNTIME_LIB_DIR default) and .\operator_runtime.
+# 5f. Launcher: pin CWD to the package root and prepend lib\public to PATH so
+#     the auto-spawned server resolves its operator_runtime.dll import (and
+#     .\lib\operator via the RUNTIME_LIB_DIR default), and find_runtime_path()
+#     finds .\operator_runtime.
 $bat = @(
     '@echo off',
     'rem mining-app release launcher - pin working directory to package root',
     'cd /d "%~dp0"',
+    'set "PATH=%~dp0lib\public;%PATH%"',
     'start "mining-app" "%~dp0mining-app.exe"'
 )
 Set-Content -Path (Join-Path $stage "start.bat") -Value $bat -Encoding ASCII

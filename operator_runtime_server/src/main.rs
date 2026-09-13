@@ -2740,6 +2740,50 @@ async fn handle_http_client(state: Arc<RuntimeState>, mut stream: TcpStream) {
     ).await;
 }
 
+/// 把共享 DLL 目录（`lib/public`）注册为进程级 DLL 搜索目录。
+///
+/// Windows 上算子 DLL 被 libloading 以绝对路径 `LoadLibrary` 时，其对
+/// `operator_runtime.dll` 的导入默认只搜索「exe 目录 / 系统目录 / CWD / PATH」，
+/// 并不搜索算子 DLL 自身所在目录。调用 `SetDllDirectoryW` 后，给定目录会被插入
+/// 后续所有 LoadLibrary 的依赖搜索序列（同时 CWD 被移出搜索），使全部算子共用
+/// `lib/public` 中的单份 `operator_runtime.dll`，无需每个算子目录各放一份副本。
+///
+/// 目录存在且注册成功时返回（规范化的）绝对路径，仅用于日志；其余情况返回 `None`。
+#[cfg(windows)]
+fn register_public_dll_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let abs = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetDllDirectoryW(lp_path_name: *const u16) -> i32;
+    }
+
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = abs
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let ok = unsafe { SetDllDirectoryW(wide.as_mut_ptr()) };
+    if ok == 0 {
+        eprintln!(
+            "[runtime] SetDllDirectoryW({}) 失败，算子可能找不到 operator_runtime.dll",
+            abs.display()
+        );
+        return None;
+    }
+    Some(abs)
+}
+
+/// 非 Windows 平台无 DLL 搜索目录概念：目录存在即原样返回（仅用于日志）。
+#[cfg(not(windows))]
+fn register_public_dll_dir(dir: &Path) -> Option<PathBuf> {
+    dir.is_dir().then(|| dir.to_path_buf())
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -2782,7 +2826,12 @@ async fn main() {
         return;
     }
 
-    // 算子库目录
+    // 算子库目录（算子 DLL + operator.json）。
+    //
+    // 目录约定（与 run_srv.ps1 / build_release.ps1 一致）：
+    //   <root>/lib/public/    共享依赖（operator_runtime.dll，全库唯一一份）
+    //   <root>/lib/operator/  算子树 <group>/<operator>/{*.dll, operator.json}
+    // 默认扫描 <cwd>/lib/operator；可用 RUNTIME_LIB_DIR 覆盖整个算子树根。
     let lib_dir = std::env::var("RUNTIME_LIB_DIR")
         .ok()
         .map(PathBuf::from)
@@ -2790,7 +2839,22 @@ async fn main() {
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("lib")
+                .join("operator")
         });
+
+    // 共享 DLL 目录：lib_dir 的同级 public/。算子 DLL 通过 prefer-dynamic 依赖
+    // operator_runtime.dll；这里把 public 注册为进程级 DLL 搜索目录，使算子 DLL
+    // 被 libloading 加载时能从 public 找到该依赖，无需在每个算子目录各放一份副本。
+    //
+    // 注意：SetDllDirectory 只影响注册之后的 LoadLibrary 依赖解析，不能解决本服务
+    // exe 自身启动时的导入表解析（那一路径由父进程 PATH / start.bat 保证）。
+    let public_dll_dir = lib_dir
+        .parent()
+        .map(|p| p.join("public"))
+        .unwrap_or_else(|| PathBuf::from("public"));
+    if let Some(abs_public) = register_public_dll_dir(&public_dll_dir) {
+        println!("[runtime] 共享 DLL 目录: {}", abs_public.display());
+    }
 
     // 初始化 runtime (确保 operator_runtime DLL 已加载)
     if let Err(e) = executor::ensure_runtime_loaded() {

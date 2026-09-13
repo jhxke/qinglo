@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -814,13 +814,32 @@ impl RuntimeClient {
 
 /// 启动 runtime 子进程（可选）
 /// 如果 runtime 服务未运行，可以调用此函数启动
+///
+/// 发布包布局下 `operator_runtime.dll` 位于 `<server_exe 目录>/lib/public/`。
+/// server exe 通过导入表直接依赖该 DLL，其启动期解析发生在进程 `main` 之前
+/// （早于服务端自身的 `SetDllDirectory` 注册），因此必须由父进程把 `lib/public`
+/// 前置到子进程 PATH，保证在干净环境（仅 System32）下双击 exe 也能启动。
 pub fn spawn_runtime_server(
     exe_path: &Path,
     addr: &str,
     compile_dir: &Path,
 ) -> Result<std::process::Child, std::io::Error> {
-    std::process::Command::new(exe_path)
-        .arg(addr)
-        .env("RUNTIME_COMPILE_DIR", compile_dir)
-        .spawn()
+    let mut cmd = std::process::Command::new(exe_path);
+    cmd.arg(addr)
+        .env("RUNTIME_COMPILE_DIR", compile_dir);
+
+    if let Some(exe_dir) = exe_path.parent() {
+        let public_dir = exe_dir.join("lib").join("public");
+        if public_dir.is_dir() {
+            let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect())
+                .unwrap_or_default();
+            paths.insert(0, public_dir);
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
+
+    cmd.spawn()
 }
