@@ -230,6 +230,7 @@ pub fn inject_params_into_code(code: &str, params: &[&OperatorPortParamDef]) -> 
                 crate::mining::dag::ParamType::Int => executor_lib::ParamType::Int,
                 crate::mining::dag::ParamType::Bool => executor_lib::ParamType::Bool,
                 crate::mining::dag::ParamType::String => executor_lib::ParamType::String,
+                crate::mining::dag::ParamType::Text => executor_lib::ParamType::Text,
                 crate::mining::dag::ParamType::DataFrame => executor_lib::ParamType::DataFrame,
                 crate::mining::dag::ParamType::DataFrameArray => executor_lib::ParamType::DataFrameArray,
             },
@@ -303,7 +304,7 @@ fn build_params_json(def: &CustomOperatorDef) -> String {
                 .parse::<bool>()
                 .map(serde_json::Value::from)
                 .unwrap_or(serde_json::Value::Null),
-            ParamType::String | ParamType::DataFrame | ParamType::DataFrameArray => {
+            ParamType::String | ParamType::Text | ParamType::DataFrame | ParamType::DataFrameArray => {
                 serde_json::Value::from(raw.to_string())
             }
         };

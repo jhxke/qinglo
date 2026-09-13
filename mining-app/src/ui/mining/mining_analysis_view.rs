@@ -19,10 +19,10 @@
 //! 流式 chunk（chat DSL）的实时预览留待 chat_preview 窗口接入。
 
 use iced::widget::Stack;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_editor, text_input};
 use iced::widget::mouse_area;
 use iced::{
-    Alignment, Color, Element, Length, Padding,
+    Alignment, Background, Color, Element, Length, Padding,
 };
 
 // ===== iced_aw 组件导入 =====
@@ -38,6 +38,7 @@ use super::state::{
 };
 use super::theme;
 use crate::mining::dag_store;
+use crate::mining::dag::{OperatorPortParamDef, ParamType, PortDirection};
 use crate::mining::operator_executor::{
     apply_dag_execution_result, apply_dag_node_result,
     execute_dag_on_server_streaming_debug,
@@ -90,15 +91,11 @@ pub fn view_mining_analysis(state: &UiState) -> Element<'_, Message> {
         None
     };
 
-    // 画布/节点右键菜单（顶层最上，点击遮罩关闭）
-    let ctx_layer = view_context_menu_if_any(state);
-
+    // 注：画布/节点右键菜单的叠加层位于 view_middle 的画布 Stack 内，
+    // 使其坐标原点与画布一致（菜单位置 = 右键点击位置，无外壳栏偏移）。
     let mut layers = vec![base_layer];
     if let Some(dlg) = dialog_layer {
         layers.push(dlg);
-    }
-    if let Some(ctx) = ctx_layer {
-        layers.push(ctx);
     }
     let stacked = Stack::with_children(layers)
         .width(Length::Fill)
@@ -346,8 +343,10 @@ fn view_models_panel(state: &UiState) -> Element<'_, Message> {
     });
 
     let body_scroll = scrollable(list_col)
+        .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
         .width(Length::Fill)
-        .height(Length::Fill);
+        .height(Length::Fill)
+        .style(theme::cool_scrollbar_style());
 
     let body = column![
         header,
@@ -849,6 +848,10 @@ fn view_middle(state: &UiState) -> Element<'_, Message> {
         if let Some(drawer) = view_params_drawer(state) {
             layers.push(drawer);
         }
+        // 右键菜单最顶层（坐标原点即画布原点，点击遮罩关闭）
+        if let Some(ctx) = view_context_menu_if_any(state) {
+            layers.push(ctx);
+        }
         let stacked = iced::widget::Stack::with_children(layers)
             .width(Length::Fill)
             .height(Length::Fill);
@@ -907,11 +910,14 @@ fn view_params_drawer<'a>(state: &'a UiState) -> Option<Element<'a, Message>> {
             s
         });
 
+    // 标题区占满剩余宽度（左对齐），把关闭按钮顶到行尾最右侧
     let header = row![
-        text(title).color(theme::text_strong()).size(12.0),
+        container(text(title).color(theme::text_strong()).size(12.0))
+            .width(Length::Fill)
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Center),
         close_btn,
     ]
-    .spacing(6)
     .align_y(Alignment::Center)
     .padding(Padding {
         top: 8.0,
@@ -1206,8 +1212,10 @@ fn view_operator_panel(state: &UiState) -> Element<'_, Message> {
     });
     render_operator_categories(&categories, &filter, 0, &mut op_col);
     let op_scroll = scrollable(op_col)
+        .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
         .width(Length::Fill)
-        .height(Length::Fill);
+        .height(Length::Fill)
+        .style(theme::cool_scrollbar_style());
 
     let op_col_top = column![search_container, op_scroll]
         .width(Length::Fill)
@@ -1359,7 +1367,15 @@ fn render_operator_categories(
     }
 }
 
-/// 参数面板 body：未选中节点 → 占位；选中节点 → 参数名+类型+text_input 列表。
+/// 参数面板 body：未选中节点 → 占位；选中节点 → 端口列表（输入/输出）+ 参数表单。
+///
+/// 算子名只在抽屉标题栏显示，body 不再重复。布局自上而下：
+///   1. 输入端口区（仅当存在时）— 每行：端口名 + 类型徽标
+///   2. 输出端口区（仅当存在时）— 每行：端口名 + 类型徽标
+///   3. 参数区（仅当存在时）— 每条：参数名+类型行 + 控件
+///      - `Bool` 用 `checkbox` 渲染（与设置页一致的小开关风格）
+///      - `Text` 用 `text_editor` 渲染（多行编辑器，便于 SQL/提示词等长文本）
+///      - 其余 `Float/Int/String` 用 `text_input` 渲染
 fn view_params_body<'a>(tab: &'a DagTab) -> Element<'a, Message> {
     let Some(node_id) = &tab.selected_node_id else {
         return container(
@@ -1385,200 +1401,511 @@ fn view_params_body<'a>(tab: &'a DagTab) -> Element<'a, Message> {
         .align_y(Alignment::Center)
         .into();
     };
+    let input_defs = node.operator_type.input_defs();
+    let output_defs = node.operator_type.output_defs();
     let param_defs = node.operator_type.param_defs();
-    if param_defs.is_empty() {
+    if input_defs.is_empty() && output_defs.is_empty() && param_defs.is_empty() {
         return container(
-            column![
-                text(node.operator_type.name())
-                    .color(theme::text_strong())
-                    .size(11.0),
-                text("(该算子无参数)")
-                    .color(theme::text_weak())
-                    .size(10.0),
-            ]
-            .spacing(4)
-            .width(Length::Fill)
-            .height(Length::Fill),
+            text("(该算子无输入/输出/参数)")
+                .color(theme::text_weak())
+                .size(10.0),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(Alignment::Start)
         .align_y(Alignment::Start)
         .padding(Padding {
-            top: 4.0,
-            bottom: 4.0,
-            left: 0.0,
-            right: 0.0,
+            top: 10.0,
+            bottom: 12.0,
+            left: 12.0,
+            right: 10.0,
         })
         .into();
     }
 
-    let mut col = column![
-        text(node.operator_type.name())
-            .color(theme::text_strong())
-            .size(11.0)
-    ]
-    .spacing(4)
+    let mut col = column![].spacing(6)
+    // 左右留白避免内容贴抽屉边框（右侧略窄，给滚动条留位）；
+    // 顶部与标题分隔线、底部与抽屉边缘留出呼吸空间
     .padding(Padding {
-        top: 2.0,
-        bottom: 2.0,
-        left: 0.0,
-        right: 0.0,
+        top: 10.0,
+        bottom: 12.0,
+        left: 12.0,
+        right: 10.0,
     });
 
-    for def in param_defs {
-        let current = node
-            .operator_type
-            .get_param_value(&def.name)
-            .unwrap_or_default();
-        let nid = node_id.clone();
-        let pname = def.name.clone();
-        let type_label = text(def.param_type.to_str())
-            .color(theme::text_weak())
-            .size(9.0);
-        let input = text_input(&def.name, &current)
-            .on_input(move |v| Message::ParamInput(nid.clone(), pname.clone(), v))
-            .width(Length::Fill)
-            .size(11.0)
-            .padding(Padding {
-                top: 3.0,
-                bottom: 3.0,
-                left: 5.0,
-                right: 5.0,
-            });
-        col = col.push(column![
-            row![text(def.name.as_str()).color(theme::text_strong()).size(11.0), type_label]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            input,
-        ].spacing(1));
+    // ===== 端口区（输入/输出）=====
+    if !input_defs.is_empty() {
+        col = col.push(view_port_section("输入", &input_defs, PortDirection::Input));
+    }
+    if !output_defs.is_empty() {
+        col = col.push(view_port_section("输出", &output_defs, PortDirection::Output));
+    }
+
+    // ===== 参数区 =====
+    if !param_defs.is_empty() {
+        col = col.push(view_section_header("参数"));
+        let mut params_col = column![].spacing(6);
+        for def in param_defs {
+            params_col = params_col.push(view_param_row(tab, node_id, node, def));
+        }
+        col = col.push(params_col);
     }
 
     scrollable(col)
+        .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
         .width(Length::Fill)
         .height(Length::Fill)
+        .style(theme::cool_scrollbar_style())
         .into()
 }
 
-// ===== 画布 / 节点右键菜单叠加（view_mining_analysis 的 dialog_layer 之后加入） =====
-
-/// 渲染画布/节点右键菜单（Stack 最上层卡片）。
+/// 渲染端口区域块：小标题 + 端口列表。
 ///
-/// 若 `context_menu_node_id` 为 Some → 节点菜单（运行到此节点/删除节点/关闭）；
-/// 否则 → 画布空白菜单（重置视图/关闭菜单）。
+/// 输入端口类型徽标用 `accent_teal`（电光青）突出「上游数据进入」；
+/// 输出端口用 `accent_blue`（天蓝）突出「下游数据产出」。
+fn view_port_section<'a>(
+    title: &str,
+    defs: &[&'a OperatorPortParamDef],
+    direction: PortDirection,
+) -> Element<'a, Message> {
+    let badge_color = match direction {
+        PortDirection::Input => theme::accent_teal(),
+        PortDirection::Output => theme::accent_blue(),
+        PortDirection::Param => theme::text_weak(),
+    };
+    let mut list = column![].spacing(2);
+    for def in defs {
+        list = list.push(row![
+            text(def.name.as_str())
+                .color(theme::text_strong())
+                .size(10.5),
+            view_type_badge(def.param_type.to_str(), badge_color),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Length::Fill));
+    }
+    column![
+        view_section_header(title),
+        container(list)
+            .width(Length::Fill)
+            .padding(Padding {
+                top: 2.0,
+                bottom: 2.0,
+                left: 8.0,
+                right: 0.0,
+            }),
+    ]
+    .spacing(3)
+    .into()
+}
+
+/// 渲染参数行：参数名 + 类型徽标 + 控件（Bool→checkbox / Text→text_editor / 其余→text_input）。
+fn view_param_row<'a>(
+    tab: &'a DagTab,
+    node_id: &str,
+    node: &'a crate::mining::dag::Node,
+    def: &'a OperatorPortParamDef,
+) -> Element<'a, Message> {
+    let current = node
+        .operator_type
+        .get_param_value(&def.name)
+        .unwrap_or_default();
+    let header = row![
+        text(def.name.as_str())
+            .color(theme::text_strong())
+            .size(11.0),
+        view_type_badge(def.param_type.to_str(), theme::text_weak()),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+
+    let body: Element<'a, Message> = match def.param_type {
+        ParamType::Bool => {
+            // 复选框开关：把 ParamInput 消息以 "true"/"false" 字符串派发，
+            // 复用现有 set_param_value 落盘路径；同时与设置页开关风格保持一致。
+            let checked = current.parse::<bool>().unwrap_or(false);
+            let nid = node_id.to_string();
+            let pname = def.name.clone();
+            let label_text = if checked { "true" } else { "false" };
+            let toggle = checkbox(checked)
+                .label(label_text.to_string())
+                .on_toggle(move |v| Message::ParamInput(nid.clone(), pname.clone(), v.to_string()))
+                .size(13.0)
+                .spacing(6);
+            container(toggle)
+                .width(Length::Fill)
+                .padding(Padding {
+                    top: 2.0,
+                    bottom: 2.0,
+                    left: 0.0,
+                    right: 0.0,
+                })
+                .into()
+        }
+        ParamType::Text => {
+            // 长文本：多行 text_editor（SQL/提示词等）。预热由 AnimTick 兜底，
+            // 若缓存缺失（极少数情况下预热未及时触发）则降级为单行 text_input。
+            let key = format!("{}::{}", node_id, def.name);
+            if let Some(content) = tab.text_editors.get(&key) {
+                let nid = node_id.to_string();
+                let pname = def.name.clone();
+                text_editor(content)
+                    .on_action(move |a| Message::ParamTextEdit(nid.clone(), pname.clone(), a))
+                    .height(Length::Fixed(140.0))
+                    .padding(Padding {
+                        top: 5.0,
+                        bottom: 5.0,
+                        left: 6.0,
+                        right: 6.0,
+                    })
+                    .style(|_t, status| {
+                        // 默认状态样式（Active）：深炭灰底 + 灰边框 + 圆角 6px
+                        let base = iced::widget::text_editor::Style {
+                            background: Background::Color(Color::from(theme::canvas_bg())),
+                            border: iced::Border {
+                                color: Color::from(theme::card_stroke()),
+                                width: 1.0,
+                                radius: 6.0.into(),
+                            },
+                            placeholder: Color::from(theme::text_weak()),
+                            value: Color::from(theme::text_strong()),
+                            selection: Color::from(theme::accent()),
+                        };
+                        match status {
+                            iced::widget::text_editor::Status::Hovered => iced::widget::text_editor::Style {
+                                border: iced::Border {
+                                    width: 1.2,
+                                    ..base.border
+                                },
+                                ..base
+                            },
+                            iced::widget::text_editor::Status::Focused { .. } => iced::widget::text_editor::Style {
+                                border: iced::Border {
+                                    color: Color::from(theme::accent_teal()),
+                                    width: 1.4,
+                                    ..base.border
+                                },
+                                ..base
+                            },
+                            _ => base,
+                        }
+                    })
+                    .into()
+            } else {
+                let nid = node_id.to_string();
+                let pname = def.name.clone();
+                text_input(&def.name, &current)
+                    .on_input(move |v| Message::ParamInput(nid.clone(), pname.clone(), v))
+                    .width(Length::Fill)
+                    .size(11.0)
+                    .padding(Padding {
+                        top: 3.0,
+                        bottom: 3.0,
+                        left: 5.0,
+                        right: 5.0,
+                    })
+                    .into()
+            }
+        }
+        _ => {
+            // Float / Int / String：单行 text_input
+            let nid = node_id.to_string();
+            let pname = def.name.clone();
+            text_input(&def.name, &current)
+                .on_input(move |v| Message::ParamInput(nid.clone(), pname.clone(), v))
+                .width(Length::Fill)
+                .size(11.0)
+                .padding(Padding {
+                    top: 3.0,
+                    bottom: 3.0,
+                    left: 5.0,
+                    right: 5.0,
+                })
+                .into()
+        }
+    };
+
+    column![header, body].spacing(2).into()
+}
+
+/// 渲染分组小标题：弱化色 + 全宽细线分隔（与设置页分组风格一致）。
+fn view_section_header(label: &str) -> Element<'static, Message> {
+    row![
+        text(label.to_string())
+            .color(theme::text_weak())
+            .size(9.5),
+        container(row![])
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::divider()).into());
+                s
+            }),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+/// 渲染类型徽标：极小号文字 + 弱化色填充底 + 1px 边框 + 圆角。
+/// 用于端口/参数行右侧的类型标识（DataFrame、Int、长文本 等）。
+fn view_type_badge(label: &str, color: Color) -> Element<'static, Message> {
+    container(
+        text(label.to_string())
+            .color(color)
+            .size(8.5),
+    )
+    .padding(Padding {
+        top: 1.0,
+        bottom: 1.0,
+        left: 4.0,
+        right: 4.0,
+    })
+    .style(move |_t| {
+        let mut s = iced::widget::container::Style::default();
+        s.background = Some(Color { r: color.r, g: color.g, b: color.b, a: 24.0 / 255.0 }.into());
+        s.border = iced::Border {
+            color,
+            width: 0.8,
+            radius: 4.0.into(),
+        };
+        s
+    })
+    .into()
+}
+
+// ===== 画布 / 节点右键菜单叠加（画布 Stack 最上层） =====
+//
+// 坐标说明：本叠加层挂在 view_middle 的画布 Stack 内，原点即画布左上角，
+// 与 DagProgram 上报的右键坐标同坐标系——菜单直接在右键位置弹出，
+// 不会再被活动栏 / 侧栏 / 顶栏挤出 ~300px 的偏移。
+
+/// 右键菜单固定宽度。
+const CTX_MENU_WIDTH: f32 = 168.0;
+/// 单个菜单项高度。
+const CTX_ITEM_HEIGHT: f32 = 30.0;
+/// 菜单卡片内边距（上下左右）。
+const CTX_CARD_PAD: f32 = 5.0;
+/// 分隔线占用高度（上下各 4px 呼吸）。
+const CTX_SEPARATOR_H: f32 = 9.0;
+/// 菜单弹出位置距光标的微偏移，避免指针压住边框。
+const CTX_CURSOR_OFFSET: f32 = 2.0;
+/// 菜单距画布边缘的最小留白。
+const CTX_EDGE_MARGIN: f32 = 6.0;
+
+/// 渲染画布/节点右键菜单（画布 Stack 最上层卡片）。
+///
+/// 若 `context_menu_node_id` 为 Some → 节点菜单（运行到此节点 / 删除节点）；
+/// 否则 → 画布空白菜单（重置视图）。点击卡片外遮罩关闭菜单。
 fn view_context_menu_if_any(state: &UiState) -> Option<Element<'_, Message>> {
     let tab = state.dag_editor.active_tab()?;
     let screen_pos = tab.context_menu_screen_pos?;
+    let node_id = tab.context_menu_node_id.clone();
 
-    // 菜单项内容
-    let items: Vec<Element<'_, Message>> = if let Some(node_id) = &tab.context_menu_node_id {
-        // 节点菜单
-        let nid = node_id.clone();
-        let run_btn = button(text("运行到此节点").color(theme::text_strong()).size(11.0))
-            .width(Length::Fill)
-            .height(Length::Fixed(24.0))
-            .on_press(Message::RunUpToNode(nid.clone()))
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 8.0,
-                right: 8.0,
-            })
-            .style(|_t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(theme::card_bg()).into());
-                s.text_color = theme::text_strong();
-                s
-            });
-        let del_btn = button(text("删除节点").color(theme::danger()).size(11.0))
-            .width(Length::Fill)
-            .height(Length::Fixed(24.0))
-            .on_press(Message::DeleteNodeClick(nid))
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 8.0,
-                right: 8.0,
-            })
-            .style(|_t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(theme::card_bg()).into());
-                s.text_color = theme::text_strong();
-                s
-            });
-        let close_btn = button(text("关闭菜单").color(theme::text_weak()).size(11.0))
-            .width(Length::Fill)
-            .height(Length::Fixed(24.0))
-            .on_press(Message::ContextMenuClose)
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 8.0,
-                right: 8.0,
-            })
-            .style(|_t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(theme::card_bg()).into());
-                s.text_color = theme::text_strong();
-                s
-            });
-        vec![run_btn.into(), del_btn.into(), close_btn.into()]
+    // 菜单总高度（用于靠近底边时向上翻转）
+    let menu_height = if node_id.is_some() {
+        CTX_CARD_PAD * 2.0 + CTX_ITEM_HEIGHT * 2.0 + CTX_SEPARATOR_H
     } else {
-        // 画布空白菜单
-        let close_btn = button(text("关闭菜单").color(theme::text_weak()).size(11.0))
-            .width(Length::Fill)
-            .height(Length::Fixed(24.0))
-            .on_press(Message::ContextMenuClose)
-            .padding(Padding {
-                top: 0.0,
-                bottom: 0.0,
-                left: 8.0,
-                right: 8.0,
-            })
-            .style(|_t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(Color::from(theme::card_bg()).into());
-                s.text_color = theme::text_strong();
-                s
-            });
-        vec![close_btn.into()]
+        CTX_CARD_PAD * 2.0 + CTX_ITEM_HEIGHT
     };
 
-    // 菜单卡片：宽 140px，位置用 stack 子元素绝对定位不可行；这里用半透明全屏遮罩（点击遮罩关闭菜单）
-    // + 卡片容器 padding 模拟绝对位置（通过大 padding 把菜单顶到屏幕坐标）。
-    let pad_top = screen_pos.y.max(0.0);
-    let pad_left = screen_pos.x.max(0.0);
+    // responsive 取得画布层实际尺寸，做右/下边缘翻转
+    let overlay = iced::widget::responsive(move |size| {
+        // ---- 菜单项 ----
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(nid) = &node_id {
+            items.push(context_menu_item(
+                IconKind::Run,
+                "运行到此节点",
+                Message::RunUpToNode(nid.clone()),
+                MenuItemTone::Accent,
+            ));
+            items.push(context_menu_separator());
+            items.push(context_menu_item(
+                IconKind::Trash,
+                "删除节点",
+                Message::DeleteNodeClick(nid.clone()),
+                MenuItemTone::Danger,
+            ));
+        } else {
+            items.push(context_menu_item(
+                IconKind::FitView,
+                "重置视图",
+                Message::ResetCanvasView,
+                MenuItemTone::Normal,
+            ));
+        }
 
-    let items_col = column(items).spacing(0);
+        // ---- 定位：默认在光标的右下；超出右/下边缘则贴边翻转 ----
+        let mut x = screen_pos.x + CTX_CURSOR_OFFSET;
+        let mut y = screen_pos.y + CTX_CURSOR_OFFSET;
+        if size.width >= CTX_MENU_WIDTH + CTX_EDGE_MARGIN * 2.0
+            && x + CTX_MENU_WIDTH > size.width - CTX_EDGE_MARGIN
+        {
+            x = (size.width - CTX_MENU_WIDTH - CTX_EDGE_MARGIN).max(CTX_EDGE_MARGIN);
+        }
+        if size.height >= menu_height + CTX_EDGE_MARGIN * 2.0
+            && y + menu_height > size.height - CTX_EDGE_MARGIN
+        {
+            y = (size.height - menu_height - CTX_EDGE_MARGIN).max(CTX_EDGE_MARGIN);
+        }
 
-    let card = container(items_col)
-        .width(Length::Fixed(140.0))
+        let card = container(column(items).spacing(0))
+            .width(Length::Fixed(CTX_MENU_WIDTH))
+            .padding(Padding {
+                top: CTX_CARD_PAD,
+                bottom: CTX_CARD_PAD,
+                left: CTX_CARD_PAD,
+                right: CTX_CARD_PAD,
+            })
+            .style(|_t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(Color::from(theme::card_bg()).into());
+                s.border.radius = 10.0.into();
+                s.border.width = 1.0;
+                s.border.color = theme::card_stroke();
+                s.shadow = iced::Shadow {
+                    color: Color { r: 0.0, g: 0.0, b: 0.0, a: 150.0 / 255.0 },
+                    offset: iced::Vector::new(0.0, 6.0),
+                    blur_radius: 20.0,
+                };
+                s
+            });
+
+        let positioned = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(Padding {
+                top: y.max(0.0),
+                bottom: 0.0,
+                left: x.max(0.0),
+                right: 0.0,
+            })
+            .align_x(Alignment::Start)
+            .align_y(Alignment::Start);
+
+        // 透明遮罩：点击任意处关闭菜单
+        let mask = mouse_area(
+            container(text("")).width(Length::Fill).height(Length::Fill),
+        )
+        .on_press(Message::ContextMenuClose);
+
+        Stack::with_children(vec![mask.into(), positioned.into()])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    });
+
+    Some(overlay.into())
+}
+
+/// 菜单项视觉语义：普通 / 强调（运行）/ 危险（删除）。
+#[derive(Clone, Copy)]
+enum MenuItemTone {
+    Normal,
+    Accent,
+    Danger,
+}
+
+/// 构造一个右键菜单项：左侧矢量图标 + 文字，hover/press 有高亮反馈。
+fn context_menu_item<'a>(
+    icon: IconKind,
+    label: &'a str,
+    message: Message,
+    tone: MenuItemTone,
+) -> Element<'a, Message> {
+    let (icon_color, label_color): (Color, Color) = match tone {
+        MenuItemTone::Normal => (theme::text_weak(), theme::text_strong()),
+        MenuItemTone::Accent => (theme::accent_teal(), theme::text_strong()),
+        MenuItemTone::Danger => (theme::danger(), theme::danger()),
+    };
+
+    let icon_slot = container(icons::view_icon(icon, icon_color, 12.5))
+        .width(Length::Fixed(15.0))
+        .align_x(Alignment::Center);
+
+    let content = row![
+        icon_slot,
+        text(label).color(label_color).size(11.5),
+    ]
+    .spacing(9.0)
+    .height(Length::Fill)
+    .align_y(Alignment::Center);
+
+    button(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(CTX_ITEM_HEIGHT))
+        .padding(Padding {
+            top: 0.0,
+            bottom: 0.0,
+            left: 9.0,
+            right: 9.0,
+        })
+        .on_press(message)
+        .style(move |_t, status| {
+            let mut s = iced::widget::button::Style::default();
+            s.border.radius = 6.0.into();
+            s.border.width = 0.0;
+            s.text_color = label_color;
+            match status {
+                iced::widget::button::Status::Hovered => {
+                    s.background = Some(match tone {
+                        MenuItemTone::Danger => Color {
+                            r: 248.0 / 255.0,
+                            g: 113.0 / 255.0,
+                            b: 113.0 / 255.0,
+                            a: 26.0 / 255.0,
+                        },
+                        _ => Color::from(theme::hover_bg()),
+                    }
+                    .into());
+                }
+                iced::widget::button::Status::Pressed => {
+                    s.background = Some(match tone {
+                        MenuItemTone::Danger => Color {
+                            r: 248.0 / 255.0,
+                            g: 113.0 / 255.0,
+                            b: 113.0 / 255.0,
+                            a: 40.0 / 255.0,
+                        },
+                        _ => Color::from(theme::pressed_bg()),
+                    }
+                    .into());
+                }
+                _ => {
+                    s.background = Some(Color::TRANSPARENT.into());
+                }
+            }
+            s
+        })
+        .into()
+}
+
+/// 菜单项之间的细分隔线（左右各留 8px 呼吸）。
+fn context_menu_separator<'a>() -> Element<'a, Message> {
+    let line = container(row![])
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
         .style(|_t| {
             let mut s = iced::widget::container::Style::default();
-            s.background = Some(Color::from(theme::card_bg()).into());
+            s.background = Some(Color::from(theme::divider()).into());
             s
         });
 
-    // 全屏遮罩：点击关闭菜单
-    let mask = mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
-        .on_press(Message::ContextMenuClose);
-
-    let content = container(card)
+    container(line)
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fixed(CTX_SEPARATOR_H))
         .padding(Padding {
-            top: pad_top,
-            bottom: 0.0,
-            left: pad_left,
-            right: 0.0,
+            top: 4.0,
+            bottom: 4.0,
+            left: 8.0,
+            right: 8.0,
         })
-        .align_x(Alignment::Start)
-        .align_y(Alignment::Start);
-
-    let stacked = Stack::with_children(vec![mask.into(), content.into()])
-        .width(Length::Fill)
-        .height(Length::Fill);
-    Some(stacked.into())
+        .into()
 }
 
 // ===== 对话框叠加层 v2 =====

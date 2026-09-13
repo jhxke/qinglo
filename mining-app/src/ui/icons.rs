@@ -64,6 +64,8 @@ pub enum IconKind {
     AlignTop,
     /// 多选对齐-居左：三条横线左端对齐到同一垂直线
     AlignLeft,
+    /// 画布空白右键菜单「重置视图」：四角括号（适应窗口/全屏语义）
+    FitView,
 }
 
 /// 自绘图标的渲染参数：种类 + 颜色 + 描边宽度。
@@ -204,6 +206,7 @@ fn draw_icon_kind(frame: &mut canvas::Frame, kind: IconKind, color: Color, sw: f
         IconKind::Clear => draw_clear(frame, color, sw),
         IconKind::AlignTop => draw_align_top(frame, color, sw),
         IconKind::AlignLeft => draw_align_left(frame, color, sw),
+        IconKind::FitView => draw_fit_view(frame, color, sw),
     }
 }
 
@@ -634,6 +637,34 @@ fn draw_align_left(frame: &mut canvas::Frame, color: Color, sw: f32) {
             b.line_to(Point::new(*x2, *y));
         });
         frame.stroke(&line, stroke);
+    }
+}
+
+/// 适应视图：四个角括号（全屏/适配窗口语义）。
+/// 左上、右上、左下、右下各一段 L 形折线，围出一个矩形轮廓，
+/// 表达"将画布内容重置/缩放到窗口内"。
+fn draw_fit_view(frame: &mut canvas::Frame, color: Color, sw: f32) {
+    let stroke = solid_stroke(color, sw);
+    // (L 的水平起点, L 角点 x/y, L 的竖直终点) —— 四个角共用长度参数
+    let corners: &[(f32, f32, f32, f32)] = &[
+        // 左上：右→角点→下
+        (9.5, 4.0, 4.0, 9.5),
+        // 右上：左→角点→下
+        (14.5, 20.0, 4.0, 9.5),
+        // 左下：右→角点→上
+        (9.5, 4.0, 20.0, 14.5),
+        // 右下：左→角点→上
+        (14.5, 20.0, 20.0, 14.5),
+    ];
+    for &(hx, cx, cy, vy) in corners {
+        let l = Path::new(|b| {
+            // 上/下边：水平段（y 固定为 cy）
+            b.move_to(Point::new(hx, cy));
+            b.line_to(Point::new(cx, cy));
+            // 左/右边：竖直段（x 固定为 cx）
+            b.line_to(Point::new(cx, vy));
+        });
+        frame.stroke(&l, stroke);
     }
 }
 

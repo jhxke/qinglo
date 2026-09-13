@@ -99,8 +99,10 @@ pub fn view_log_panel(state: &UiState) -> Element<'_, Message> {
         .padding(Padding { top: 2.0, bottom: 6.0, left: 0.0, right: 0.0 });
 
     let body_scroll = scrollable(body_wrap)
+        .direction(scrollable::Direction::Vertical(theme::cool_scrollbar()))
         .width(Length::Fill)
-        .height(Length::Fill);
+        .height(Length::Fill)
+        .style(theme::cool_scrollbar_style());
 
     let col = column![top_divider, header_inner, body_scroll]
         .width(Length::Fill)

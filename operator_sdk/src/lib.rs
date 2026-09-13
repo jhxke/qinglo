@@ -157,6 +157,9 @@ pub enum ParamType {
     Int,
     Bool,
     String,
+    /// 长文本：多行编辑（SQL 语句、LLM 提示词等），与 String 在编译时常量生成时
+    /// 同样作为 `&str` 注入，但 UI 端会以 `text_editor` 多行编辑器呈现。
+    Text,
     DataFrame,
     DataFrameArray,
 }
@@ -199,7 +202,7 @@ pub fn generate_param_constants(params: &[OperatorPortParamDef]) -> String {
                     constants.push_str(&format!("const {}: bool = {};\n", const_name, b));
                 }
             }
-            ParamType::String => {
+            ParamType::String | ParamType::Text => {
                 let escaped_value = param.default_value.replace('\\', "\\\\").replace('"', "\\\"");
                 constants.push_str(&format!(
                     "const {}: &str = \"{}\";\n",

@@ -270,6 +270,8 @@ pub enum Message {
     RunUpToNode(String),
     /// 点击「删除节点」菜单项：参数为节点 id。
     DeleteNodeClick(String),
+    /// 画布空白右键菜单「重置视图」：zoom 归 1.0、offset 归零。
+    ResetCanvasView,
 
     /// 端口命中 & 连线创建的起点：(node_id, port_index, is_output=true)。
     /// 发布时机：`CanvasPress` 先在 `DagProgram::update` 层面做端口命中测试，
@@ -300,6 +302,10 @@ pub enum Message {
 
     /// 参数面板中某个参数输入框内容变化。参数为 (node_id, param_name, new_value)。
     ParamInput(String, String, String),
+    /// 长文本参数（`ParamType::Text`）多行编辑器的编辑事件。
+    /// 参数为 (node_id, param_name, action)。update 中对 `text_editors` 对应
+    /// `Content` 调用 `perform(action)`，并把 `Content::text()` 同步到 `param_values`。
+    ParamTextEdit(String, String, iced::widget::text_editor::Action),
     /// 关闭右侧节点参数抽屉（点击抽屉右上 × 按钮触发）。
     /// 由画布双击节点弹出抽屉，点 × 关闭。
     CloseParamsDrawer,
@@ -540,6 +546,16 @@ pub struct DagTab {
     /// 方向键连续移动选中节点的节流计时器: (首次按下时间, 上次移动时间)
     /// None 表示当前没有方向键被按住; 单击移动一步, 长按超过初始延迟后连续移动。
     pub arrow_move_timer: Option<(f64, f64)>,
+    /// 长文本参数（`ParamType::Text`）的多行编辑器状态缓存。
+    ///
+    /// key = `format!("{}::{}", node_id, param_name)`，value = `text_editor::Content`。
+    /// 仅缓存当前正在编辑的节点的内容；切换选中节点（双击其他节点）会触发
+    /// `refresh_text_editors_for_current_node` 重建缓存。`Content` 内部为 `RefCell`，
+    /// 视图层 `&self` 即可读取，编辑消息 `ParamTextEdit` 在 update 中 `perform(action)`。
+    pub text_editors: HashMap<String, iced::widget::text_editor::Content>,
+    /// 上一次预填充 `text_editors` 时的节点 ID。切换 `selected_node_id` 后由
+    /// AnimTick 检测不一致并刷新（防止选中点分散在多处难以集中埋点）。
+    pub text_editors_node_id: Option<String>,
 }
 
 impl DagTab {
@@ -589,6 +605,8 @@ impl DagTab {
             debug_session_id: None,
             debug_preview: None,
             arrow_move_timer: None,
+            text_editors: HashMap::new(),
+            text_editors_node_id: None,
         }
     }
 

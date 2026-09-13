@@ -9,7 +9,7 @@
 //!
 //! 圆角/尺寸更柔和，主按钮 10px，卡片 12px。
 
-use iced::{Background, Border, Color, Theme};
+use iced::{Background, Border, Color, Gradient, Radians, Theme};
 use iced::theme::Palette;
 use iced_aw::style::{self as aw_style, Status as AwStatus};
 
@@ -381,5 +381,148 @@ pub fn accent_border() -> Border {
         color: accent_bright(),
         width: 1.0,
         radius: WIDGET_ROUNDING.into(),
+    }
+}
+
+// ===== 科技风滚动条 =====
+//
+// 视觉层次（石墨 v3 配色）：
+// - 默认：隐形轨道，仅一条 4px 半透明灰白胶囊滑块，安静不抢内容
+// - 悬停滚动区：轨道泛起微光，滑块增亮，提示可交互
+// - 悬停滑块：滑块点亮为「深青 → 电光青」渐变，轨道透出青色辉光
+// - 拖动：轨道染青色底 + 渐变滑块，状态明确
+// - 几何：10px 悬浮热区（不占布局）/ 4px 视觉滑块 / 离边 2px / 全圆角胶囊
+
+/// 滚动条几何配置：悬浮细轨（配合 [cool_scrollbar_style] 使用）。
+pub fn cool_scrollbar() -> iced::widget::scrollable::Scrollbar {
+    iced::widget::scrollable::Scrollbar::new()
+        .width(10.0)
+        .scroller_width(4.0)
+        .margin(2.0)
+}
+
+/// 科技风滚动条样式工厂，返回 `scrollable.style(...)` 用的闭包。
+pub fn cool_scrollbar_style(
+) -> impl Fn(&iced::Theme, iced::widget::scrollable::Status)
+    -> iced::widget::scrollable::Style
+    + 'static {
+    use iced::widget::scrollable::{AutoScroll, Rail, Scroller, Status, Style};
+    use std::f32::consts::FRAC_PI_2;
+
+    let pill = Border {
+        radius: PILL_ROUNDING.into(),
+        ..Border::default()
+    };
+
+    // 滑块渐变：垂直轨 上(深青)→下(电光青)；水平轨 左(电光青)→右(深青)
+    let thumb_v = Background::Gradient(Gradient::Linear(
+        iced::gradient::Linear::new(Radians(FRAC_PI_2))
+            .add_stop(0.0, accent())
+            .add_stop(0.55, accent_bright())
+            .add_stop(1.0, accent_teal()),
+    ));
+    let thumb_h = Background::Gradient(Gradient::Linear(
+        iced::gradient::Linear::new(Radians(0.0))
+            .add_stop(0.0, accent_teal())
+            .add_stop(1.0, accent()),
+    ));
+
+    // 默认态：无轨道，暗色细滑块
+    let idle = Rail {
+        background: None,
+        border: pill,
+        scroller: Scroller {
+            background: Background::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 16.0 / 255.0 }),
+            border: pill,
+        },
+    };
+    // 悬停滚动区（未上轨）：微亮轨道 + 增亮滑块
+    let soft = Rail {
+        background: Some(Background::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 7.0 / 255.0 })),
+        border: pill,
+        scroller: Scroller {
+            background: Background::Color(Color { r: 1.0, g: 1.0, b: 1.0, a: 58.0 / 255.0 }),
+            border: pill,
+        },
+    };
+    // 悬停滑块：青色辉光轨道 + 渐变滑块
+    let glow_v = Rail {
+        background: Some(Background::Color(Color {
+            r: 34.0 / 255.0, g: 211.0 / 255.0, b: 238.0 / 255.0, a: 18.0 / 255.0,
+        })),
+        border: pill,
+        scroller: Scroller { background: thumb_v, border: pill },
+    };
+    let glow_h = Rail {
+        background: Some(Background::Color(Color {
+            r: 34.0 / 255.0, g: 211.0 / 255.0, b: 238.0 / 255.0, a: 18.0 / 255.0,
+        })),
+        border: pill,
+        scroller: Scroller { background: thumb_h, border: pill },
+    };
+    // 拖动：更深的青色轨道 + 渐变滑块
+    let drag_v = Rail {
+        background: Some(Background::Color(Color {
+            r: 8.0 / 255.0, g: 145.0 / 255.0, b: 178.0 / 255.0, a: 34.0 / 255.0,
+        })),
+        border: pill,
+        scroller: Scroller { background: thumb_v, border: pill },
+    };
+    let drag_h = Rail {
+        background: Some(Background::Color(Color {
+            r: 8.0 / 255.0, g: 145.0 / 255.0, b: 178.0 / 255.0, a: 34.0 / 255.0,
+        })),
+        border: pill,
+        scroller: Scroller { background: thumb_h, border: pill },
+    };
+
+    // 中键自动滚动浮轮：深炭底 + 青边 + 电光青箭头
+    let auto_scroll = AutoScroll {
+        background: Background::Color(Color {
+            r: 18.0 / 255.0, g: 19.0 / 255.0, b: 22.0 / 255.0, a: 0.96,
+        }),
+        border: Border {
+            radius: PILL_ROUNDING.into(),
+            width: 1.0,
+            color: Color {
+                r: 34.0 / 255.0, g: 211.0 / 255.0, b: 238.0 / 255.0, a: 110.0 / 255.0,
+            },
+        },
+        shadow: iced::Shadow {
+            color: Color::BLACK.scale_alpha(0.65),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        icon: accent_teal(),
+    };
+
+    move |_t, status| {
+        let (vertical, horizontal) = match status {
+            Status::Active { .. } => (idle, idle),
+            Status::Hovered {
+                is_vertical_scrollbar_hovered,
+                is_horizontal_scrollbar_hovered,
+                ..
+            } => (
+                if is_vertical_scrollbar_hovered { glow_v } else { soft },
+                if is_horizontal_scrollbar_hovered { glow_h } else { soft },
+            ),
+            Status::Dragged {
+                is_vertical_scrollbar_dragged,
+                is_horizontal_scrollbar_dragged,
+                ..
+            } => (
+                if is_vertical_scrollbar_dragged { drag_v } else { soft },
+                if is_horizontal_scrollbar_dragged { drag_h } else { soft },
+            ),
+        };
+
+        Style {
+            container: iced::widget::container::Style::default(),
+            vertical_rail: vertical,
+            horizontal_rail: horizontal,
+            gap: None,
+            auto_scroll,
+        }
     }
 }

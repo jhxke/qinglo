@@ -17,6 +17,8 @@ pub enum ParamType {
     Int,
     String,
     Bool,
+    /// 长文本：多行编辑（SQL 语句、LLM 提示词等），UI 用 `text_editor` 渲染
+    Text,
     DataFrame,
     DataFrameArray,
 }
@@ -28,6 +30,7 @@ impl ParamType {
             ParamType::Int => "整数",
             ParamType::String => "字符串",
             ParamType::Bool => "布尔",
+            ParamType::Text => "长文本",
             ParamType::DataFrame => "DataFrame",
             ParamType::DataFrameArray => "DataFrameArray",
         }
@@ -39,6 +42,7 @@ impl ParamType {
             ParamType::Int => "0".to_string(),
             ParamType::String => "".to_string(),
             ParamType::Bool => "false".to_string(),
+            ParamType::Text => "".to_string(),
             ParamType::DataFrame => "".to_string(),
             ParamType::DataFrameArray => "".to_string(),
         }
@@ -912,6 +916,7 @@ fn convert_port_param_def(pp: &ProtoPortParamDef) -> OperatorPortParamDef {
         "Int" => ParamType::Int,
         "Bool" => ParamType::Bool,
         "String" => ParamType::String,
+        "Text" => ParamType::Text,
         "DataFrame" => ParamType::DataFrame,
         "DataFrameArray" => ParamType::DataFrameArray,
         _ => ParamType::DataFrame,

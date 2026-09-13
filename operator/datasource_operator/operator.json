@@ -45,7 +45,7 @@
     {
       "name": "query",
       "direction": "Param",
-      "param_type": "String",
+      "param_type": "Text",
       "default_value": "SELECT ts_code,trade_date,open,high,low,close FROM tushare_daily LIMIT 10000"
     },
     {

@@ -150,6 +150,18 @@ impl MyApp {
                 mining_app::ui::poll_dag_exec_task(&mut state.dag_editor);
                 // 推进运行动画时间（~80ms → 0.08s）
                 state.anim_time += 0.08;
+                // 兜底刷新 Text 参数编辑器缓存：抽屉打开且 selected_node_id
+                // 与上次预热不一致时（用户在抽屉开启时点击了其他节点 / AddNode），
+                // 由 AnimTick 集中处理，避免在所有 selected_node_id 赋值点埋钩子。
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    if tab.params_drawer_open {
+                        let need_refresh = tab.text_editors_node_id.as_deref()
+                            != tab.selected_node_id.as_deref();
+                        if need_refresh {
+                            refresh_text_editors_for_current_node(tab);
+                        }
+                    }
+                }
                 #[cfg(windows)]
                 handle_webview_ipc(state);
             }
@@ -459,6 +471,22 @@ impl MyApp {
                     }
                 }
             }
+            // ===== 长文本参数编辑（text_editor Action）=====
+            // 对 `text_editors` 缓存中对应 `Content` 调用 `perform(action)` 应用编辑，
+            // 然后把 `Content::text()` 同步到 `param_values`，与 text_input 落盘路径合流。
+            Message::ParamTextEdit(node_id, param_name, action) => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    let key = format!("{}::{}", node_id, param_name);
+                    if let Some(content) = tab.text_editors.get_mut(&key) {
+                        content.perform(action);
+                        let new_text = content.text();
+                        if let Some(node) = tab.graph.get_node_mut(&node_id) {
+                            node.operator_type.set_param_value(&param_name, new_text);
+                            tab.dirty = true;
+                        }
+                    }
+                }
+            }
             Message::CloseParamsDrawer => {
                 if let Some(tab) = state.dag_editor.active_tab_mut() {
                     tab.params_drawer_open = false;
@@ -477,6 +505,14 @@ impl MyApp {
                     );
                 }
             }
+            Message::ResetCanvasView => {
+                if let Some(tab) = state.dag_editor.active_tab_mut() {
+                    tab.context_menu_screen_pos = None;
+                    tab.context_menu_node_id = None;
+                    tab.canvas_offset = Vec2::ZERO;
+                    tab.canvas_zoom = 1.0;
+                }
+            }
             Message::DeleteNodeClick(node_id) => {
                 if let Some(tab) = state.dag_editor.active_tab_mut() {
                     tab.context_menu_screen_pos = None;
@@ -487,6 +523,12 @@ impl MyApp {
                     // 同步从多选列表中移除（若存在）
                     tab.selected_node_ids.retain(|id| id != &node_id);
                     tab.graph.remove_node(&node_id);
+                    // 清理被删节点的长文本编辑器缓存，避免悬挂 key
+                    let prefix = format!("{}::", node_id);
+                    tab.text_editors.retain(|k, _| !k.starts_with(&prefix));
+                    if tab.text_editors_node_id.as_deref() == Some(node_id.as_str()) {
+                        tab.text_editors_node_id = None;
+                    }
                     tab.dirty = true;
                     tab.add_action_log(
                         format!("已删除节点 {}", node_id),
@@ -733,6 +775,74 @@ fn load_chinese_font() -> Vec<u8> {
 // - 屏幕坐标 pos：鼠标相对画布左上角的像素位置（已扣除画布在窗口中的偏移）
 // - 世界坐标 world：`world = (pos - offset) / zoom`，对应 graph 中节点的 position
 
+/// 预热当前选中节点的长文本参数（`ParamType::Text`）`text_editor::Content` 缓存。
+///
+/// 双击节点打开抽屉、或切换 `selected_node_id`（单击其他节点 / 右键节点 / 添加节点）
+/// 后由 AnimTick 兜底调用。若节点已删除则清空缓存并把 `text_editors_node_id` 置 None。
+///
+/// 复用既有 `Content` 实例：若编辑器已存在（同一节点再次打开抽屉）则不重建，
+/// 避免抹掉光标 / 选区状态；外部修改了 `param_values`（如重置参数）时需手动
+/// 清缓存后再调用本函数以从最新值重建。
+fn refresh_text_editors_for_current_node(tab: &mut mining_app::ui::state::DagTab) {
+    use mining_app::mining::dag::ParamType;
+
+    let current_id = tab.selected_node_id.clone();
+    // 1) 先用不可变借用收集 (param_name, current_value) 列表 + node_id
+    //    避免 `&node` 与 `&mut tab.text_editors` 同时存活。
+    let collected: Option<(String, Vec<(String, String)>)> = current_id
+        .as_deref()
+        .and_then(|nid| tab.graph.get_node(nid))
+        .map(|node| {
+            let node_id = current_id.clone().unwrap_or_default();
+            let pairs = node
+                .operator_type
+                .param_defs()
+                .iter()
+                .filter(|d| d.param_type == ParamType::Text)
+                .map(|d| {
+                    let v = node
+                        .operator_type
+                        .get_param_value(&d.name)
+                        .unwrap_or_default();
+                    (d.name.clone(), v)
+                })
+                .collect::<Vec<_>>();
+            (node_id, pairs)
+        });
+
+    let Some((node_id, text_params)) = collected else {
+        // 节点已删除或无选中节点：清空缓存避免悬挂引用
+        tab.text_editors.clear();
+        tab.text_editors_node_id = None;
+        return;
+    };
+
+    // 2) 若仍是同一节点（双击 / 再次打开抽屉），不抹掉既有编辑器；仅补齐缺漏
+    if tab.text_editors_node_id.as_deref() == Some(node_id.as_str()) {
+        for (pname, value) in text_params {
+            let key = format!("{}::{}", node_id, pname);
+            if !tab.text_editors.contains_key(&key) {
+                tab.text_editors.insert(
+                    key,
+                    iced::widget::text_editor::Content::with_text(&value),
+                );
+            }
+        }
+        return;
+    }
+
+    // 3) 切换节点：整体重建（保留同节点既有 Content 的光标 / 选区）
+    tab.text_editors.clear();
+    for (pname, value) in text_params {
+        let key = format!("{}::{}", node_id, pname);
+        tab.text_editors.insert(
+            key,
+            iced::widget::text_editor::Content::with_text(&value),
+        );
+    }
+    tab.text_editors_node_id = Some(node_id);
+}
+
 /// 画布鼠标按下：命中节点 → 选中 + 开始拖拽；命中空白 → 开始平移画布。
 ///
 /// 双击节点（同一节点两次左键按下间隔 < 400ms）→ 弹出右侧节点参数抽屉
@@ -776,6 +886,9 @@ fn handle_canvas_press(state: &mut UiState, pos: Vec2) {
     if is_double_click {
         if let Some(tab) = state.dag_editor.active_tab_mut() {
             tab.params_drawer_open = true;
+            // 双击触发抽屉打开：立即为当前节点的 Text 参数预热 text_editor 缓存，
+            // 避免首帧 view 因缓存缺失而临时降级为单行 text_input。
+            refresh_text_editors_for_current_node(tab);
         }
     }
     // 不论是否双击，都刷新"上一次按下"记录供下次比对
