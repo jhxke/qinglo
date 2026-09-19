@@ -25,6 +25,7 @@ $grpLLM        = [char]0x5927 + [char]0x6A21 + [char]0x578B                     
 $operators = @(
     # ===== data source =====
     @{ Group = $grpDataSource; Name = "datasource_operator"; Dir = [char]0x6570 + [char]0x636E + [char]0x6E90 + [char]0x8BFB + [char]0x53D6; Json = "operator\datasource_operator\operator.json" }
+    @{ Group = $grpDataSource; Name = "stream_datasource_operator"; Dir = [char]0x6D41 + [char]0x5F0F + [char]0x6570 + [char]0x636E + [char]0x6E90; Json = "operator\stream_datasource_operator\operator.json" }
 
     # ===== technical index =====
     @{ Group = $grpTechIndex; Name = "ma_operator";   Dir = "MA" + [char]0x7B97 + [char]0x5B50;   Json = "operator\ma_operator\operator.json" }

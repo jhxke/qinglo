@@ -3,6 +3,7 @@ members = [
     "mining-app",
     "operator_runtime",
     "operator/datasource_operator",
+    "operator/stream_datasource_operator",
     "operator/ma_operator",
     "operator/rsi_operator",
     "operator/macd_operator",

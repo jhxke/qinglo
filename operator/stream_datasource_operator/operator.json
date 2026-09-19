@@ -1,0 +1,71 @@
+{
+  "name": "流式 SQL 数据源",
+  "description": "流式接收上游字符串参数，拼装进 SQL 模板（${input}）后查询 PostgreSQL，每个输入字符串产出一个 DataFrame",
+  "code": "",
+  "color": [16, 185, 129],
+  "stream": true,
+  "summary": "字符串流输入 -> ${input} 拼装 SQL -> 查询数据库，逐批输出 DataFrame",
+  "description_md": "# 流式 SQL 数据源算子\n\n流式接收上游的**字符串**输入（如「列转字符串流」算子逐行产出的股票代码），把每个字符串替换进 SQL 模板中的 `${input}` 占位符，然后连接 PostgreSQL 执行查询，每个输入字符串产出一个 **DataFrame** chunk 流式输出。\n\n典型链路：`DataFrame -> 列转字符串流 -> 流式 SQL 数据源 -> 下游指标/可视化算子`。\n\n## 输入输出\n\n- **输入**：`input`（String，流式）—— 上游逐 chunk 推送的字符串参数\n- **输出**：`output`（DataFrame，流式）—— 每个输入字符串执行一次查询，结果作为一个 DataFrame chunk；流结束后服务端把多个 DataFrame 聚合为 DataFrameArray 供非流式下游消费\n\n## SQL 模板变量\n\n在 `query` 中使用 `${input}` 引用上游字符串，例如：\n\n```sql\nSELECT ts_code, trade_date, open, high, low, close\nFROM tushare_daily\nWHERE ts_code = '${input}'\nORDER BY trade_date\nLIMIT 1000\n```\n\n- 上游推送 `000001.SZ` 时，实际执行 `... WHERE ts_code = '000001.SZ' ...`\n- 字符串字面量的单引号需写在模板里（变量做**原文替换**，不自动加引号、不转义）\n- 未识别的 `${xxx}` 占位符保持原样并在 stderr 告警；模板中没有占位符时每个输入都执行同一条 SQL\n\n## 参数说明\n\n| 参数 | 类型 | 默认值 | 说明 |\n| --- | --- | --- | --- |\n| `host` | String | `localhost` | 数据库主机地址 |\n| `port` | Int | `5432` | 数据库端口 |\n| `database` | String | `whatigo` | 数据库名称 |\n| `username` | String | `postgres` | 登录用户名 |\n| `password` | String | （见默认配置） | 登录密码 |\n| `query` | Text | （空，必填） | 含 `${input}` 占位符的 SQL 模板 |\n| `sort_column` | String | （空） | 内存排序字段；为空则不排序（也可直接在 SQL 中 ORDER BY） |\n| `sort_descending` | Bool | `false` | 排序方向：`true`=降序，`false`=升序 |\n\n## 流式执行（stream=true）\n\n导出 5 个流式 C ABI 符号：\n\n- `stream_start`：解析参数、建立数据库连接（连接失败直接报错）\n- `stream_push`：收到一个 String chunk -> 渲染 SQL -> 同步执行查询 -> 结果 DataFrame 进入输出队列\n- `stream_next`：取出已就绪的 DataFrame chunk；无结果时返回暂无可读\n- `stream_push_end`：上游 EOF，输出队列排空后流结束\n- `stream_end`：释放连接与状态\n\n## 注意事项\n\n- 数据库连接在 `stream_start` 时建立一次，整条流复用，避免每 chunk 重连。\n- 任一 chunk 的 SQL 执行失败会中止整条流并返回错误详情（含实际执行的 SQL）。\n- 查询应包含 `LIMIT` 等过滤条件；上游字符串数量很多时会产生同等数量的查询，请注意数据库压力。\n- 批量模式（stream=false 降级）下读取端口 `input` 的 String 执行一次查询，输出单个 DataFrame。",
+  "port_params": [
+    {
+      "name": "input",
+      "direction": "Input",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "output",
+      "direction": "Output",
+      "param_type": "DataFrame",
+      "default_value": ""
+    },
+    {
+      "name": "host",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "localhost"
+    },
+    {
+      "name": "port",
+      "direction": "Param",
+      "param_type": "Int",
+      "default_value": "5432"
+    },
+    {
+      "name": "database",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "whatigo"
+    },
+    {
+      "name": "username",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "postgres"
+    },
+    {
+      "name": "password",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": "difyai123456"
+    },
+    {
+      "name": "query",
+      "direction": "Param",
+      "param_type": "Text",
+      "default_value": "SELECT ts_code, trade_date, open, high, low, close FROM tushare_daily WHERE ts_code = '${input}' ORDER BY trade_date LIMIT 1000"
+    },
+    {
+      "name": "sort_column",
+      "direction": "Param",
+      "param_type": "String",
+      "default_value": ""
+    },
+    {
+      "name": "sort_descending",
+      "direction": "Param",
+      "param_type": "Bool",
+      "default_value": "false"
+    }
+  ]
+}
